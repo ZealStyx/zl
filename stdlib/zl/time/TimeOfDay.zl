@@ -1,0 +1,9 @@
+// zl.time.TimeOfDay - clock-time view over epoch seconds.
+class TimeOfDay {
+    public int epoch
+    func TimeOfDay(int epoch): void { this.epoch = epoch }
+    public func hour(): int { return Time.hour(this.epoch) }
+    public func minute(): int { return Time.minute(this.epoch) }
+    public func second(): int { return Time.second(this.epoch) }
+    public func format(string pattern): string { return Time.format(this.epoch, pattern) }
+}

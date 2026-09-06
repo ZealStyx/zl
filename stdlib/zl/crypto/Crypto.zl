@@ -1,0 +1,4 @@
+// zl.crypto.Crypto - native cryptographic/hash primitives.
+// Higher-level protocols should remain in ZL and use these primitives.
+class Crypto {
+}

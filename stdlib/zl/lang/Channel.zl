@@ -1,0 +1,14 @@
+// zl.lang.Channel - high-level facade over bounded task-to-task channels.
+class Channel {
+    public static func bounded(int capacity): Channel { return Channel.create(capacity) }
+
+    public static func sendBlocking(Channel channel, unknown value): void {
+        Channel.send(channel, value)
+    }
+
+    public static func receiveBlocking(Channel channel): unknown {
+        return Channel.receive(channel)
+    }
+
+    public static func count(Channel channel): int { return Channel.size(channel) }
+}

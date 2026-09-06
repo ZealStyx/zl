@@ -1,0 +1,10 @@
+// zl.time.Date - date-only view over epoch seconds.
+class Date {
+    public int epoch
+    func Date(int epoch): void { this.epoch = epoch }
+    public func year(): int { return Time.year(this.epoch) }
+    public func month(): int { return Time.month(this.epoch) }
+    public func day(): int { return Time.day(this.epoch) }
+    public func format(string pattern): string { return Time.format(this.epoch, pattern) }
+    public func addDays(int days): Date { return new Date(this.epoch + days * 86400) }
+}

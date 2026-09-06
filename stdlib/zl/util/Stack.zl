@@ -1,0 +1,8 @@
+// zl.util.Stack - LIFO stack API (native storage primitive).
+//
+// The native implementation provides the storage primitive; the package
+// boundary remains explicit.
+class Stack {
+    // LIFO reference package: native storage is intentionally hidden behind this API.
+    // API: newStack, push, pop, peek, isEmpty, size.
+}

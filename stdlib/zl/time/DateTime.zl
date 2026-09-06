@@ -1,0 +1,16 @@
+// zl.time.DateTime - local-time view over epoch seconds.
+class DateTime {
+    public int epoch
+    func DateTime(int epoch): void { this.epoch = epoch }
+    public func year(): int { return Time.year(this.epoch) }
+    public func month(): int { return Time.month(this.epoch) }
+    public func day(): int { return Time.day(this.epoch) }
+    public func hour(): int { return Time.hour(this.epoch) }
+    public func minute(): int { return Time.minute(this.epoch) }
+    public func second(): int { return Time.second(this.epoch) }
+    public func format(string pattern): string { return Time.format(this.epoch, pattern) }
+    public func addSeconds(int seconds): DateTime { return new DateTime(this.epoch + seconds) }
+    public func addMinutes(int minutes): DateTime { return this.addSeconds(minutes * 60) }
+    public func addHours(int hours): DateTime { return this.addMinutes(hours * 60) }
+    public func difference(DateTime other): Duration { return new Duration((this.epoch - other.epoch) * 1000) }
+}

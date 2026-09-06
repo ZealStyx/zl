@@ -1,0 +1,71 @@
+// ZL standard library Vector3<T,U,V>.
+class Vector3<T, U, V> {
+    public T x
+    public U y
+    public V z
+
+    func Vector3(T x, U y, V z): void {
+        this.x = x
+        this.y = y
+        this.z = z
+    }
+
+    public operator +(Vector3<T, U, V> other): Vector3<T, U, V> {
+        return new Vector3<T, U, V>(this.x + other.x, this.y + other.y, this.z + other.z)
+    }
+
+    public operator -(Vector3<T, U, V> other): Vector3<T, U, V> {
+        return new Vector3<T, U, V>(this.x - other.x, this.y - other.y, this.z - other.z)
+    }
+
+    public operator *(double other): Vector3<double, double, double> {
+        return new Vector3<double, double, double>(this.x * other, this.y * other, this.z * other)
+    }
+
+    public operator /(double other): Vector3<double, double, double> {
+        return new Vector3<double, double, double>(this.x / other, this.y / other, this.z / other)
+    }
+
+    public operator ==(Vector3<T, U, V> other): bool {
+        return this.x == other.x && this.y == other.y && this.z == other.z
+    }
+
+    public operator !=(Vector3<T, U, V> other): bool {
+        return !(this == other)
+    }
+
+    public func lengthSquared(): double {
+        return Math.pow(this.x, 2.0) + Math.pow(this.y, 2.0) + Math.pow(this.z, 2.0)
+    }
+
+    public func length(): double {
+        return Math.sqrt(this.lengthSquared())
+    }
+
+    public func normalize(): Vector3<double, double, double> {
+        var len = this.length()
+        if (len == 0.0) {
+            return new Vector3<double, double, double>(0.0, 0.0, 0.0)
+        }
+        return new Vector3<double, double, double>(this.x / len, this.y / len, this.z / len)
+    }
+
+    public func dot(Vector3<T, U, V> other): double {
+        return Math.pow(this.x * other.x, 1.0) + Math.pow(this.y * other.y, 1.0) + Math.pow(this.z * other.z, 1.0)
+    }
+
+    public func cross(Vector3<T, U, V> other): Vector3<double, double, double> {
+        var cx = Math.pow(this.y * other.z, 1.0) - Math.pow(this.z * other.y, 1.0)
+        var cy = Math.pow(this.z * other.x, 1.0) - Math.pow(this.x * other.z, 1.0)
+        var cz = Math.pow(this.x * other.y, 1.0) - Math.pow(this.y * other.x, 1.0)
+        return new Vector3<double, double, double>(cx, cy, cz)
+    }
+
+    public func distanceSquared(Vector3<T, U, V> other): double {
+        return Math.pow(this.x - other.x, 2.0) + Math.pow(this.y - other.y, 2.0) + Math.pow(this.z - other.z, 2.0)
+    }
+
+    public func distance(Vector3<T, U, V> other): double {
+        return Math.sqrt(this.distanceSquared(other))
+    }
+}

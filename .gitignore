@@ -1,0 +1,14 @@
+# Build artifacts
+/build/
+/build/**
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Makefile
+*.cmake
+/docs/
+
+# IDE/editor files
+.vscode/
+.cache/

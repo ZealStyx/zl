@@ -1,0 +1,12 @@
+import zl.time.DateTime
+import zl.time.Date
+import zl.time.TimeOfDay
+import zl.time.Duration
+
+// zl.time.Time - ZL-owned time/date convenience API over native clock primitives.
+class Time {
+    public static func nowDateTime(): DateTime { return new DateTime(Time.now()) }
+    public static func today(): Date { return new Date(Time.now()) }
+    public static func clock(): TimeOfDay { return new TimeOfDay(Time.now()) }
+    public static func durationMillis(int millis): Duration { return new Duration(millis) }
+}

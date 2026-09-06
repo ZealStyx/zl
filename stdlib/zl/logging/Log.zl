@@ -1,0 +1,3 @@
+// zl.log.Log - structured logging facade.
+class Log {
+}

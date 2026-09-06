@@ -1,0 +1,9 @@
+// zl.fs.FileSystem - ZL-owned filesystem convenience API.
+// FileSystem.* native calls remain the OS boundary.
+class FileSystem {
+    public static func readText(string path): string { return FileSystem.readFile(path) }
+    public static func writeText(string path, string content): void { FileSystem.writeFile(path, content) }
+    public static func appendText(string path, string content): void { FileSystem.appendFile(path, content) }
+    public static func fileExists(string path): bool { return FileSystem.exists(path) }
+    public static func remove(string path): void { FileSystem.deleteFile(path) }
+}

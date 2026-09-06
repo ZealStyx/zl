@@ -1,0 +1,28 @@
+// zl.test.Runner - ZL-native test grouping and reporting.
+class Runner {
+    public string name
+    public int passed
+    public int failed
+
+    func Runner(string name): void {
+        this.name = name
+        this.passed = 0
+        this.failed = 0
+    }
+
+    public func run(string testName, func test): void {
+        try {
+            test()
+            this.passed = this.passed + 1
+            log("PASS " + testName)
+        } catch e {
+            this.failed = this.failed + 1
+            log("FAIL " + testName + ": " + e)
+        }
+    }
+
+    public func report(): int {
+        log(this.name + ": " + this.passed + " passed, " + this.failed + " failed")
+        return this.failed
+    }
+}

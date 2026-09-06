@@ -1,0 +1,9 @@
+// zl.serialize.Serialize - ZL-owned conversion policy over the native JSON engine.
+class Serialize {
+    public static func stringify(unknown value): string { return Serialize.encode(value) }
+    public static func parse(string value): unknown { return Serialize.decode(value) }
+    public static func string(unknown value): string { return Serialize.asString(value) }
+    public static func integer(unknown value): int { return Serialize.asInt(value) }
+    public static func number(unknown value): double { return Serialize.asDouble(value) }
+    public static func boolean(unknown value): bool { return Serialize.asBool(value) }
+}

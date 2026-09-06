@@ -1,0 +1,2321 @@
+#include "zl/vm/native.hpp"
+#include "zl/compiler/native_catalog.hpp"
+#include "zl/vm/runtime_task.hpp"
+#include "zl/vm/runtime_thread.hpp"
+#include "zl/vm/runtime_task_executor.hpp"
+#include "zl/vm/vm.hpp"
+#include "zl/vm/value.hpp"
+#include "zl/vm/gc.hpp"
+#include "zl/regex/regex.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iterator>
+#include <iostream>
+#include <limits>
+#include <sstream>
+#include <stdexcept>
+#include <thread>
+#include <random>
+#include <unordered_map>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#else
+#include <netdb.h>
+#include <sys/socket.h>
+#endif
+#include <cstdint>
+
+namespace zl {
+
+thread_local VM* g_currentNativeVm = nullptr;
+
+void setCurrentNativeVm(VM* vm) { g_currentNativeVm = vm; }
+
+namespace {
+
+// --- Math ---
+
+Value mathSqrt(const std::vector<Value>& args) {
+    return std::sqrt(toDouble(args[0]));
+}
+
+Value mathAbs(const std::vector<Value>& args) {
+    if (auto p = std::get_if<std::int64_t>(&args[0])) {
+        if (*p == std::numeric_limits<std::int64_t>::min())
+            throw std::runtime_error("Math.abs: integer overflow for INT64_MIN");
+        return *p < 0 ? -*p : *p;
+    }
+    return std::fabs(toDouble(args[0]));
+}
+
+Value mathPow(const std::vector<Value>& args) {
+    return std::pow(toDouble(args[0]), toDouble(args[1]));
+}
+
+Value mathFloor(const std::vector<Value>& args) {
+    return std::floor(toDouble(args[0]));
+}
+
+Value mathCeil(const std::vector<Value>& args) {
+    return std::ceil(toDouble(args[0]));
+}
+
+Value mathRound(const std::vector<Value>& args) {
+    return std::round(toDouble(args[0]));
+}
+
+Value mathMin(const std::vector<Value>& args) {
+    bool bothInt = std::holds_alternative<std::int64_t>(args[0]) && std::holds_alternative<std::int64_t>(args[1]);
+    if (bothInt) return std::min(std::get<std::int64_t>(args[0]), std::get<std::int64_t>(args[1]));
+    return std::min(toDouble(args[0]), toDouble(args[1]));
+}
+
+Value mathMax(const std::vector<Value>& args) {
+    bool bothInt = std::holds_alternative<std::int64_t>(args[0]) && std::holds_alternative<std::int64_t>(args[1]);
+    if (bothInt) return std::max(std::get<std::int64_t>(args[0]), std::get<std::int64_t>(args[1]));
+    return std::max(toDouble(args[0]), toDouble(args[1]));
+}
+
+
+
+Value mathCbrt(const std::vector<Value>& args) {
+    return std::cbrt(toDouble(args[0]));
+}
+
+Value mathTrunc(const std::vector<Value>& args) {
+    return std::trunc(toDouble(args[0]));
+}
+
+Value mathSin(const std::vector<Value>& args) { return std::sin(toDouble(args[0])); }
+Value mathCos(const std::vector<Value>& args) { return std::cos(toDouble(args[0])); }
+Value mathTan(const std::vector<Value>& args) { return std::tan(toDouble(args[0])); }
+
+Value mathAsin(const std::vector<Value>& args) {
+    const double x = toDouble(args[0]);
+    if (x < -1.0 || x > 1.0) throw std::runtime_error("Math.asin: domain error; expected [-1, 1]");
+    return std::asin(x);
+}
+
+Value mathAcos(const std::vector<Value>& args) {
+    const double x = toDouble(args[0]);
+    if (x < -1.0 || x > 1.0) throw std::runtime_error("Math.acos: domain error; expected [-1, 1]");
+    return std::acos(x);
+}
+
+Value mathAtan(const std::vector<Value>& args) { return std::atan(toDouble(args[0])); }
+
+Value mathAtan2(const std::vector<Value>& args) {
+    return std::atan2(toDouble(args[0]), toDouble(args[1]));
+}
+
+Value mathLog(const std::vector<Value>& args) {
+    const double x = toDouble(args[0]);
+    if (!(x > 0.0)) throw std::runtime_error("Math.log: domain error; expected a value > 0");
+    return std::log(x);
+}
+
+Value mathLog10(const std::vector<Value>& args) {
+    const double x = toDouble(args[0]);
+    if (!(x > 0.0)) throw std::runtime_error("Math.log10: domain error; expected a value > 0");
+    return std::log10(x);
+}
+
+Value mathExp(const std::vector<Value>& args) {
+    const double x = toDouble(args[0]);
+    const double result = std::exp(x);
+    if (std::isinf(result) && std::isfinite(x))
+        throw std::runtime_error("Math.exp: result overflow");
+    return result;
+}
+
+
+
+
+// Random helpers intentionally use a process-local PRNG. They are suitable
+// for simulation/game/application randomness, not cryptography.
+std::mt19937_64& mathRng() {
+    static thread_local std::mt19937_64 rng(std::random_device{}());
+    return rng;
+}
+
+Value mathRandom(const std::vector<Value>& /*args*/) {
+    std::uniform_real_distribution<double> dist(0.0, 1.0);
+    return dist(mathRng());
+}
+
+Value mathRandomInt(const std::vector<Value>& args) {
+    const std::int64_t lo = toInt64Strict(args[0]);
+    const std::int64_t hi = toInt64Strict(args[1]);
+    if (lo > hi) throw std::runtime_error("Math.randomInt: minimum must not exceed maximum");
+    std::uniform_int_distribution<std::int64_t> dist(lo, hi);
+    return dist(mathRng());
+}
+
+Value mathRandomFloat(const std::vector<Value>& args) {
+    const double lo = toDouble(args[0]);
+    const double hi = toDouble(args[1]);
+    if (lo > hi) throw std::runtime_error("Math.randomFloat: minimum must not exceed maximum");
+    std::uniform_real_distribution<double> dist(lo, hi);
+    return dist(mathRng());
+}
+
+// --- IO ---
+// (log(...) remains the dedicated statement-level print - these are library
+// forms that additionally support no-newline output and reading input, which
+// a statement-only `log` couldn't do.)
+
+Value ioPrint(const std::vector<Value>& args) {
+    std::cout << valueToString(args[0]);
+    return Value{};
+}
+
+Value ioPrintln(const std::vector<Value>& args) {
+    std::cout << valueToString(args[0]) << std::endl;
+    return Value{};
+}
+
+Value ioReadLine(const std::vector<Value>& /*args*/) {
+    std::string line;
+    if (!std::getline(std::cin, line)) return Value{}; // EOF -> nil
+    return line;
+}
+
+Value ioClear(const std::vector<Value>& /*args*/) {
+#ifdef _WIN32
+    // Enable virtual-terminal processing when the host console supports it,
+    // then use the same ANSI sequence as Unix-like terminals. If the handle
+    // is redirected or the mode cannot be changed, still emit the sequence;
+    // redirected consumers may intentionally interpret it themselves.
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (out != INVALID_HANDLE_VALUE && out != nullptr) {
+        DWORD mode = 0;
+        if (GetConsoleMode(out, &mode)) {
+            if ((mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) == 0) {
+                DWORD updated = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+                SetConsoleMode(out, updated);
+            }
+        }
+    }
+#endif
+    std::cout << "\x1b[2J\x1b[H" << std::flush;
+    return Value{};
+}
+
+// --- Collection (lists, arrays, sets share ListRef; maps use MapRef) ---
+
+ListRef requireList(const Value& v, const char* fnName) {
+    if (auto p = std::get_if<ListRef>(&v)) return *p;
+    throw std::runtime_error(std::string(fnName) + " expects a list/array/set as its first argument");
+}
+
+MapRef requireMap(const Value& v, const char* fnName) {
+    if (auto p = std::get_if<MapRef>(&v)) return *p;
+    throw std::runtime_error(std::string(fnName) + " expects a map as its first argument");
+}
+
+std::size_t requireIndex(const Value& v, std::size_t size, const char* fnName) {
+    std::int64_t i = toInt64Strict(v);
+    if (i < 0 || static_cast<std::size_t>(i) >= size) {
+        throw std::runtime_error(std::string(fnName) + ": index " + std::to_string(i) +
+                                  " out of bounds (size " + std::to_string(size) + ")");
+    }
+    return static_cast<std::size_t>(i);
+}
+
+std::size_t listLogicalSize(const ListRef& list) {
+    return list->items.size() - std::min(list->frontIndex, list->items.size());
+}
+
+void normalizeListFront(ListRef list) {
+    if (list->frontIndex == 0) return;
+    if (list->frontIndex >= list->items.size()) {
+        list->items.clear();
+        list->frontIndex = 0;
+        return;
+    }
+    if (list->frontIndex * 2 >= list->items.size()) {
+        list->items.erase(list->items.begin(),
+                          list->items.begin() + static_cast<std::ptrdiff_t>(list->frontIndex));
+        list->frontIndex = 0;
+    }
+}
+
+Value collNewList(const std::vector<Value>&) { return makeEmptyList(); }
+
+Value collPush(const std::vector<Value>& args) {
+    auto list = requireList(args[0], "Collection.push");
+    if (list->frontIndex != 0) {
+        // A list with a queue front offset is still a valid ListRef, but
+        // Collection.push should preserve normal list semantics. Compact the
+        // consumed prefix before exposing the new element.
+        list->items.erase(list->items.begin(),
+                          list->items.begin() + static_cast<std::ptrdiff_t>(list->frontIndex));
+        list->frontIndex = 0;
+    }
+    list->items.push_back(args[1]);
+    return Value{};
+}
+
+Value collPop(const std::vector<Value>& args) {
+    auto list = requireList(args[0], "Collection.pop");
+    if (listLogicalSize(list) == 0) throw std::runtime_error("Collection.pop: cannot pop from an empty list");
+    Value back = list->items.back();
+    list->items.pop_back();
+    normalizeListFront(list);
+    return back;
+}
+
+Value collGet(const std::vector<Value>& args) {
+    auto list = requireList(args[0], "Collection.get");
+    const std::size_t size = listLogicalSize(list);
+    const std::size_t index = requireIndex(args[1], size, "Collection.get");
+    return list->items[list->frontIndex + index];
+}
+
+Value collSet(const std::vector<Value>& args) {
+    auto list = requireList(args[0], "Collection.set");
+    const std::size_t size = listLogicalSize(list);
+    const std::size_t index = requireIndex(args[1], size, "Collection.set");
+    list->items[list->frontIndex + index] = args[2];
+    return Value{};
+}
+
+Value collLength(const std::vector<Value>& args) {
+    if (auto p = std::get_if<ListRef>(&args[0])) return static_cast<std::int64_t>(listLogicalSize(*p));
+    if (auto p = std::get_if<MapRef>(&args[0])) return static_cast<std::int64_t>((*p)->entries.size());
+    if (auto p = std::get_if<std::string>(&args[0])) return static_cast<std::int64_t>(p->size());
+    throw std::runtime_error("Collection.length expects a list/array/set, map, or string");
+}
+
+// --- Queue / Stack (zl.util) - both are a plain ListRef under the hood,
+// same box Collection's own lists use; only the push/pop END differs
+// (front for Queue's FIFO order, back for Stack's LIFO order, matching
+// Collection.push/pop's existing back-of-list convention). No new Value
+// variant, no VM changes - purely a compile-time-gated pair of natives
+// (see NativeSignature::homePackage in type_checker.cpp). ---
+
+Value queueNew(const std::vector<Value>&) { return makeEmptyList(); }
+
+Value queueEnqueue(const std::vector<Value>& args) {
+    auto list = requireList(args[0], "Queue.enqueue");
+    list->items.push_back(args[1]);
+    return Value{};
+}
+
+Value queueDequeue(const std::vector<Value>& args) {
+    auto list = requireList(args[0], "Queue.dequeue");
+    if (listLogicalSize(list) == 0) throw std::runtime_error("Queue.dequeue: cannot dequeue from an empty queue");
+    Value front = list->items[list->frontIndex++];
+    normalizeListFront(list);
+    return front;
+}
+
+Value queuePeek(const std::vector<Value>& args) {
+    auto list = requireList(args[0], "Queue.peek");
+    if (listLogicalSize(list) == 0) throw std::runtime_error("Queue.peek: cannot peek an empty queue");
+    return list->items[list->frontIndex];
+}
+
+Value queueIsEmpty(const std::vector<Value>& args) {
+    return listLogicalSize(requireList(args[0], "Queue.isEmpty")) == 0;
+}
+
+Value queueSize(const std::vector<Value>& args) {
+    return static_cast<std::int64_t>(listLogicalSize(requireList(args[0], "Queue.size")));
+}
+
+Value stackNew(const std::vector<Value>&) { return makeEmptyList(); }
+
+Value stackPush(const std::vector<Value>& args) {
+    auto list = requireList(args[0], "Stack.push");
+    normalizeListFront(list);
+    list->items.push_back(args[1]);
+    return Value{};
+}
+
+Value stackPop(const std::vector<Value>& args) {
+    auto list = requireList(args[0], "Stack.pop");
+    if (listLogicalSize(list) == 0) throw std::runtime_error("Stack.pop: cannot pop from an empty stack");
+    Value back = list->items.back();
+    list->items.pop_back();
+    normalizeListFront(list);
+    return back;
+}
+
+Value stackPeek(const std::vector<Value>& args) {
+    auto list = requireList(args[0], "Stack.peek");
+    if (listLogicalSize(list) == 0) throw std::runtime_error("Stack.peek: cannot peek an empty stack");
+    return list->items.back();
+}
+
+Value stackIsEmpty(const std::vector<Value>& args) {
+    return listLogicalSize(requireList(args[0], "Stack.isEmpty")) == 0;
+}
+
+Value stackSize(const std::vector<Value>& args) {
+    return static_cast<std::int64_t>(listLogicalSize(requireList(args[0], "Stack.size")));
+}
+
+Value collNewMap(const std::vector<Value>&) { return makeEmptyMap(); }
+
+Value collMapSet(const std::vector<Value>& args) {
+    auto map = requireMap(args[0], "Collection.mapSet");
+    for (auto& entry : map->entries) {
+        if (valuesEqual(entry.first, args[1])) { entry.second = args[2]; return Value{}; }
+    }
+    map->entries.emplace_back(args[1], args[2]);
+    return Value{};
+}
+
+Value collMapGet(const std::vector<Value>& args) {
+    auto map = requireMap(args[0], "Collection.mapGet");
+    for (auto& entry : map->entries) {
+        if (valuesEqual(entry.first, args[1])) return entry.second;
+    }
+    throw std::runtime_error("Collection.mapGet: key not found");
+}
+
+Value collMapHas(const std::vector<Value>& args) {
+    auto map = requireMap(args[0], "Collection.mapHas");
+    for (auto& entry : map->entries) {
+        if (valuesEqual(entry.first, args[1])) return true;
+    }
+    return false;
+}
+
+Value collMapRemove(const std::vector<Value>& args) {
+    auto map = requireMap(args[0], "Collection.mapRemove");
+    for (auto it = map->entries.begin(); it != map->entries.end(); ++it) {
+        if (valuesEqual(it->first, args[1])) { map->entries.erase(it); break; }
+    }
+    return Value{};
+}
+
+Value collMapKeys(const std::vector<Value>& args) {
+    auto map = requireMap(args[0], "Collection.mapKeys");
+    auto out = std::get<ListRef>(makeEmptyList());
+    out->items.reserve(map->entries.size());
+    for (const auto& entry : map->entries) out->items.push_back(entry.first);
+    return out;
+}
+
+Value collMapValues(const std::vector<Value>& args) {
+    auto map = requireMap(args[0], "Collection.mapValues");
+    auto out = std::get<ListRef>(makeEmptyList());
+    out->items.reserve(map->entries.size());
+    for (const auto& entry : map->entries) out->items.push_back(entry.second);
+    return out;
+}
+
+Value collNewSet(const std::vector<Value>&) { return makeEmptyList(); } // sets reuse the list representation
+
+Value collSetAdd(const std::vector<Value>& args) {
+    auto set = requireList(args[0], "Collection.setAdd");
+    for (auto& item : set->items) {
+        if (valuesEqual(item, args[1])) return Value{}; // already present - sets don't allow duplicates
+    }
+    set->items.push_back(args[1]);
+    return Value{};
+}
+
+Value collSetHas(const std::vector<Value>& args) {
+    auto set = requireList(args[0], "Collection.setHas");
+    for (auto& item : set->items) {
+        if (valuesEqual(item, args[1])) return true;
+    }
+    return false;
+}
+
+Value collSetRemove(const std::vector<Value>& args) {
+    auto set = requireList(args[0], "Collection.setRemove");
+    for (auto it = set->items.begin(); it != set->items.end(); ++it) {
+        if (valuesEqual(*it, args[1])) { set->items.erase(it); break; }
+    }
+    return Value{};
+}
+
+Value collSetItems(const std::vector<Value>& args) {
+    auto set = requireList(args[0], "Collection.setItems");
+    auto out = std::get<ListRef>(makeEmptyList());
+    out->items.reserve(set->items.size());
+    for (const auto& item : set->items) out->items.push_back(item);
+    return out;
+}
+
+// --- String ---
+
+const std::string& requireString(const Value& v, const char* fnName) {
+    if (auto p = std::get_if<std::string>(&v)) return *p;
+    throw std::runtime_error(std::string(fnName) + " expects a string argument");
+}
+
+Value strLength(const std::vector<Value>& args) {
+    return static_cast<std::int64_t>(requireString(args[0], "String.length").size());
+}
+
+Value strUpper(const std::vector<Value>& args) {
+    std::string s = requireString(args[0], "String.upper");
+    for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return s;
+}
+
+Value strLower(const std::vector<Value>& args) {
+    std::string s = requireString(args[0], "String.lower");
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+Value strTrim(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.trim");
+    std::size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return std::string("");
+    std::size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
+Value strContains(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.contains");
+    const std::string& needle = requireString(args[1], "String.contains");
+    return s.find(needle) != std::string::npos;
+}
+
+Value strIndexOf(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.indexOf");
+    const std::string& needle = requireString(args[1], "String.indexOf");
+    auto pos = s.find(needle);
+    return static_cast<std::int64_t>(pos == std::string::npos ? -1 : static_cast<std::int64_t>(pos));
+}
+
+Value strCharAt(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.charAt");
+    std::size_t i = requireIndex(args[1], s.size(), "String.charAt");
+    return std::string(1, s[i]);
+}
+
+Value strSubstring(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.substring");
+    std::int64_t start = toInt64Strict(args[1]);
+    std::int64_t end = toInt64Strict(args[2]);
+    if (start < 0 || end < start || static_cast<std::size_t>(end) > s.size()) {
+        throw std::runtime_error("String.substring: invalid range [" + std::to_string(start) +
+                                  ", " + std::to_string(end) + ") for a string of length " +
+                                  std::to_string(s.size()));
+    }
+    return s.substr(static_cast<std::size_t>(start), static_cast<std::size_t>(end - start));
+}
+
+Value strReplace(const std::vector<Value>& args) {
+    std::string s = requireString(args[0], "String.replace");
+    const std::string& from = requireString(args[1], "String.replace");
+    const std::string& to = requireString(args[2], "String.replace");
+    if (from.empty()) return s;
+    std::string result;
+    std::size_t pos = 0;
+    while (true) {
+        std::size_t found = s.find(from, pos);
+        if (found == std::string::npos) { result += s.substr(pos); break; }
+        result += s.substr(pos, found - pos) + to;
+        pos = found + from.size();
+    }
+    return result;
+}
+
+Value strSplit(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.split");
+    const std::string& delim = requireString(args[1], "String.split");
+    Value result = makeEmptyList();
+    auto& items = std::get<ListRef>(result)->items;
+    if (delim.empty()) {
+        for (char c : s) items.emplace_back(std::string(1, c));
+        return result;
+    }
+    std::size_t pos = 0;
+    while (true) {
+        std::size_t found = s.find(delim, pos);
+        if (found == std::string::npos) { items.emplace_back(s.substr(pos)); break; }
+        items.emplace_back(s.substr(pos, found - pos));
+        pos = found + delim.size();
+    }
+    return result;
+}
+
+std::int64_t parseIntStrict(const std::string& s, const char* functionName) {
+    try {
+        std::size_t pos = 0;
+        std::int64_t result = static_cast<std::int64_t>(std::stoll(s, &pos));
+        while (pos < s.size() && std::isspace(static_cast<unsigned char>(s[pos]))) ++pos;
+        if (pos != s.size()) throw std::invalid_argument("trailing characters");
+        return result;
+    } catch (const std::exception&) {
+        throw std::runtime_error(std::string(functionName) + ": \"" + s + "\" isn't a valid integer");
+    }
+}
+
+double parseDoubleStrict(const std::string& s, const char* functionName) {
+    try {
+        std::size_t pos = 0;
+        double result = std::stod(s, &pos);
+        while (pos < s.size() && std::isspace(static_cast<unsigned char>(s[pos]))) ++pos;
+        if (pos != s.size()) throw std::invalid_argument("trailing characters");
+        return result;
+    } catch (const std::exception&) {
+        throw std::runtime_error(std::string(functionName) + ": \"" + s + "\" isn't a valid number");
+    }
+}
+
+Value strToInt(const std::vector<Value>& args) {
+    return parseIntStrict(requireString(args[0], "String.toInt"), "String.toInt");
+}
+
+Value strToFloat(const std::vector<Value>& args) {
+    return parseDoubleStrict(requireString(args[0], "String.toFloat"), "String.toFloat");
+}
+
+// --- Parsing utilities ---
+// Int.parse, Double.parse, Bool.parse - the official ZL way to convert
+// strings into typed values. These deliberately throw on invalid input
+// (catchable with try/catch) rather than returning nil, since a failed
+// parse is almost always a programming error or bad user input that
+// should be handled explicitly.
+
+Value intParse(const std::vector<Value>& args) {
+    return parseIntStrict(requireString(args[0], "Int.parse"), "Int.parse");
+}
+
+Value doubleParse(const std::vector<Value>& args) {
+    return parseDoubleStrict(requireString(args[0], "Double.parse"), "Double.parse");
+}
+
+Value boolParse(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "Bool.parse");
+    if (s == "true" || s == "1" || s == "yes") return true;
+    if (s == "false" || s == "0" || s == "no") return false;
+    throw std::runtime_error("Bool.parse: \"" + s + "\" is not a valid boolean (expected true/false/1/0/yes/no)");
+}
+
+// --- FileSystem ---
+// Every failure here just throws std::runtime_error - it propagates through
+// the VM's per-instruction try/catch exactly like a built-in error (division
+// by zero, bad index, ...), so zl's `try`/`catch` handles file errors for
+// free with no special-casing needed.
+
+Value fsReadFile(const std::vector<Value>& args) {
+    const std::string& path = requireString(args[0], "FileSystem.readFile");
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("FileSystem.readFile: could not open \"" + path + "\"");
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+}
+
+Value fsWriteFile(const std::vector<Value>& args) {
+    const std::string& path = requireString(args[0], "FileSystem.writeFile");
+    const std::string& content = requireString(args[1], "FileSystem.writeFile");
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) throw std::runtime_error("FileSystem.writeFile: could not open \"" + path + "\" for writing");
+    file << content;
+    return Value{};
+}
+
+Value fsAppendFile(const std::vector<Value>& args) {
+    const std::string& path = requireString(args[0], "FileSystem.appendFile");
+    const std::string& content = requireString(args[1], "FileSystem.appendFile");
+    std::ofstream file(path, std::ios::binary | std::ios::app);
+    if (!file) throw std::runtime_error("FileSystem.appendFile: could not open \"" + path + "\" for writing");
+    file << content;
+    return Value{};
+}
+
+Value fsExists(const std::vector<Value>& args) {
+    const std::string& path = requireString(args[0], "FileSystem.exists");
+    return std::filesystem::exists(path);
+}
+
+Value fsDeleteFile(const std::vector<Value>& args) {
+    const std::string& path = requireString(args[0], "FileSystem.deleteFile");
+    std::error_code ec;
+    bool removed = std::filesystem::remove(path, ec);
+    if (ec || !removed) throw std::runtime_error("FileSystem.deleteFile: could not delete \"" + path + "\"");
+    return Value{};
+}
+
+Value fsListDir(const std::vector<Value>& args) {
+    const std::string& path = requireString(args[0], "FileSystem.listDir");
+    std::error_code ec;
+    if (!std::filesystem::is_directory(path, ec) || ec) {
+        throw std::runtime_error("FileSystem.listDir: \"" + path + "\" is not a directory");
+    }
+    Value result = makeEmptyList();
+    auto& items = std::get<ListRef>(result)->items;
+    for (const auto& entry : std::filesystem::directory_iterator(path)) {
+        items.emplace_back(entry.path().filename().string());
+    }
+    return result;
+}
+
+
+Value networkResolve(const std::vector<Value>& args) {
+    const std::string& host = requireString(args[0], "Network.resolve");
+#ifdef _WIN32
+    static std::once_flag winsockOnce;
+    std::call_once(winsockOnce, [] {
+        WSADATA data{};
+        if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
+            throw std::runtime_error("Network.resolve: WSAStartup failed");
+        }
+    });
+#endif
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_ADDRCONFIG;
+    addrinfo* result = nullptr;
+    const int rc = getaddrinfo(host.c_str(), nullptr, &hints, &result);
+    if (rc != 0) {
+#ifdef _WIN32
+        throw std::runtime_error("Network.resolve: " + host + ": " + std::to_string(WSAGetLastError()));
+#else
+        throw std::runtime_error("Network.resolve: " + host + ": " + gai_strerror(rc));
+#endif
+    }
+    Value out = makeEmptyList();
+    auto& items = std::get<ListRef>(out)->items;
+    for (addrinfo* p = result; p; p = p->ai_next) {
+        char numeric[NI_MAXHOST]{};
+        if (getnameinfo(p->ai_addr, static_cast<socklen_t>(p->ai_addrlen),
+                        numeric, sizeof(numeric), nullptr, 0, NI_NUMERICHOST) == 0) {
+            std::string value(numeric);
+            bool duplicate = false;
+            for (const auto& existing : items) {
+                if (std::holds_alternative<std::string>(existing) && std::get<std::string>(existing) == value) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) items.emplace_back(std::move(value));
+        }
+    }
+    if (items.empty()) {
+        freeaddrinfo(result);
+        throw std::runtime_error("Network.resolve: host resolved without a numeric address: " + host);
+    }
+    std::string first = std::get<std::string>(items.front());
+    freeaddrinfo(result);
+    return first;
+}
+
+// --- Time ---
+
+std::tm toLocalTm(std::int64_t epochSeconds) {
+    std::time_t t = static_cast<std::time_t>(epochSeconds);
+    std::tm result{};
+#if defined(_WIN32)
+    localtime_s(&result, &t);   // Windows secure CRT signature: (tm*, const time_t*)
+#else
+    localtime_r(&t, &result);   // POSIX signature: (const time_t*, tm*)
+#endif
+    return result;
+}
+
+Value timeNow(const std::vector<Value>&) {
+    auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    return static_cast<std::int64_t>(secs);
+}
+
+Value timeNowMillis(const std::vector<Value>&) {
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    return static_cast<std::int64_t>(ms);
+}
+
+Value timeSleepAsync(const std::vector<Value>& args) {
+    const double milliseconds = toDouble(args[0]);
+    if (milliseconds < 0.0) {
+        throw std::runtime_error("Time.sleepAsync: duration cannot be negative");
+    }
+
+    auto task = std::make_shared<RuntimeTaskState>("void");
+    RuntimeTaskExecutor::instance().enqueue([task, milliseconds]() {
+        try {
+            if (task->status() == TaskStatus::Cancelled) return;
+            try {
+                task->start();
+            } catch (const std::logic_error&) {
+                return;
+            }
+
+            const auto total = std::chrono::duration<double, std::milli>(milliseconds);
+            auto remaining = total;
+            constexpr auto quantum = std::chrono::milliseconds(5);
+            while (remaining > decltype(remaining)::zero()) {
+                if (task->cancellationRequested()) {
+                    try { task->cancel(); } catch (const std::logic_error&) {}
+                    return;
+                }
+                const auto slice = std::min(remaining, std::chrono::duration<double, std::milli>(quantum));
+                std::this_thread::sleep_for(slice);
+                remaining -= slice;
+            }
+
+            if (task->cancellationRequested()) {
+                try { task->cancel(); } catch (const std::logic_error&) {}
+                return;
+            }
+            try { task->succeed(Value{}); } catch (const std::logic_error&) {}
+        } catch (...) {
+            try { task->fail(std::current_exception()); } catch (const std::logic_error&) {}
+        }
+    });
+
+    return TaskRef(task);
+}
+
+
+bool isExplicitlySharedValue(const Value& value) {
+    const auto* object = std::get_if<ObjectRef>(&value);
+    return object && *object && ((*object)->className == "Shared");
+}
+
+bool capturesAreExplicitlyShared(const ClosureBox& closure) {
+    for (const auto& [name, value] : closure.captured) {
+        (void)name;
+        if (!isExplicitlySharedValue(value)) return false;
+    }
+    return true;
+}
+
+template <typename Ptr, typename Factory>
+Ptr ensureObjectState(ObjectBox& object, Ptr ObjectBox::*member, Factory&& factory) {
+    std::lock_guard<std::mutex> initLock(object.stateInitMutex);
+    auto& state = object.*member;
+    if (!state) state = factory();
+    return state;
+}
+
+Value mutexWithLock(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    auto closure = std::get_if<ClosureRef>(&args[1]);
+    if (!obj || !*obj || (*obj)->className != "Mutex")
+        throw std::runtime_error("Mutex.withLock: expected a Mutex");
+    auto mutexState = ensureObjectState(*(*obj), &ObjectBox::mutexState, [] { return std::make_shared<std::mutex>(); });
+    if (!closure || !*closure || !(*closure)->chunk || !(*closure)->paramNames.empty())
+        throw std::runtime_error("Mutex.withLock: expected a zero-argument func");
+    if (!g_currentNativeVm) throw std::runtime_error("Mutex.withLock: no active VM");
+    std::unique_lock<std::mutex> lock(*mutexState);
+    return g_currentNativeVm->invokeTaskClosure(*closure);
+}
+
+Value rwLockWithRead(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    auto closure = std::get_if<ClosureRef>(&args[1]);
+    if (!obj || !*obj || (*obj)->className != "RwLock")
+        throw std::runtime_error("RwLock.withRead: expected a RwLock");
+    auto rwLockState = ensureObjectState(*(*obj), &ObjectBox::rwLockState, [] { return std::make_shared<std::shared_mutex>(); });
+    if (!closure || !*closure || !(*closure)->chunk || !(*closure)->paramNames.empty())
+        throw std::runtime_error("RwLock.withRead: expected a zero-argument func");
+    if (!g_currentNativeVm) throw std::runtime_error("RwLock.withRead: no active VM");
+    std::shared_lock<std::shared_mutex> lock(*rwLockState);
+    return g_currentNativeVm->invokeTaskClosure(*closure);
+}
+
+Value rwLockWithWrite(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    auto closure = std::get_if<ClosureRef>(&args[1]);
+    if (!obj || !*obj || (*obj)->className != "RwLock")
+        throw std::runtime_error("RwLock.withWrite: expected a RwLock");
+    auto rwLockState = ensureObjectState(*(*obj), &ObjectBox::rwLockState, [] { return std::make_shared<std::shared_mutex>(); });
+    if (!closure || !*closure || !(*closure)->chunk || !(*closure)->paramNames.empty())
+        throw std::runtime_error("RwLock.withWrite: expected a zero-argument func");
+    if (!g_currentNativeVm) throw std::runtime_error("RwLock.withWrite: no active VM");
+    std::unique_lock<std::shared_mutex> lock(*rwLockState);
+    return g_currentNativeVm->invokeTaskClosure(*closure);
+}
+
+
+Value atomicLoad(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Atomic")
+        throw std::runtime_error("Atomic.load: expected an Atomic");
+    auto atomicState = ensureObjectState(*(*obj), &ObjectBox::atomicState, [] { return std::make_shared<std::atomic<std::int64_t>>(0); });
+    return atomicState->load(std::memory_order_seq_cst);
+}
+
+Value atomicStore(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Atomic")
+        throw std::runtime_error("Atomic.store: expected an Atomic");
+    if (!std::holds_alternative<std::int64_t>(args[1]))
+        throw std::runtime_error("Atomic.store: expected an int");
+    auto atomicState = ensureObjectState(*(*obj), &ObjectBox::atomicState, [] { return std::make_shared<std::atomic<std::int64_t>>(0); });
+    atomicState->store(std::get<std::int64_t>(args[1]), std::memory_order_seq_cst);
+    return Value{};
+}
+
+Value atomicAdd(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Atomic")
+        throw std::runtime_error("Atomic.add: expected an Atomic");
+    if (!std::holds_alternative<std::int64_t>(args[1]))
+        throw std::runtime_error("Atomic.add: expected an int");
+    auto atomicState = ensureObjectState(*(*obj), &ObjectBox::atomicState, [] { return std::make_shared<std::atomic<std::int64_t>>(0); });
+    return atomicState->fetch_add(std::get<std::int64_t>(args[1]), std::memory_order_seq_cst) + std::get<std::int64_t>(args[1]);
+}
+
+Value atomicLoadBool(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Atomic")
+        throw std::runtime_error("Atomic.loadBool: expected an Atomic");
+    auto state = ensureObjectState(*(*obj), &ObjectBox::atomicBoolState, [] { return std::make_shared<std::atomic<bool>>(false); });
+    return state->load(std::memory_order_seq_cst);
+}
+
+Value atomicStoreBool(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Atomic")
+        throw std::runtime_error("Atomic.storeBool: expected an Atomic");
+    if (!std::holds_alternative<bool>(args[1]))
+        throw std::runtime_error("Atomic.storeBool: expected a bool");
+    auto state = ensureObjectState(*(*obj), &ObjectBox::atomicBoolState, [] { return std::make_shared<std::atomic<bool>>(false); });
+    state->store(std::get<bool>(args[1]), std::memory_order_seq_cst);
+    return Value{};
+}
+
+Value atomicLoadDouble(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Atomic") throw std::runtime_error("Atomic.loadDouble: expected an Atomic");
+    auto state = ensureObjectState(*(*obj), &ObjectBox::atomicDoubleState, [] { return std::make_shared<std::atomic<double>>(0.0); });
+    return state->load(std::memory_order_seq_cst);
+}
+
+Value atomicStoreDouble(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Atomic") throw std::runtime_error("Atomic.storeDouble: expected an Atomic");
+    if (!std::holds_alternative<double>(args[1])) throw std::runtime_error("Atomic.storeDouble: expected a double");
+    auto state = ensureObjectState(*(*obj), &ObjectBox::atomicDoubleState, [] { return std::make_shared<std::atomic<double>>(0.0); });
+    state->store(std::get<double>(args[1]), std::memory_order_seq_cst);
+    return Value{};
+}
+
+Value atomicLoadRef(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Atomic")
+        throw std::runtime_error("Atomic.loadRef: expected an Atomic");
+    auto state = ensureObjectState(*(*obj), &ObjectBox::atomicRefState, [] { return std::make_shared<AtomicRefState>(); });
+    std::lock_guard<std::mutex> lock(state->mutex);
+    return state->value;
+}
+
+Value atomicStoreRef(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Atomic")
+        throw std::runtime_error("Atomic.storeRef: expected an Atomic");
+    if (!std::holds_alternative<ObjectRef>(args[1]) && !std::holds_alternative<std::monostate>(args[1]))
+        throw std::runtime_error("Atomic.storeRef: expected an object reference or null");
+    auto state = ensureObjectState(*(*obj), &ObjectBox::atomicRefState, [] { return std::make_shared<AtomicRefState>(); });
+    std::lock_guard<std::mutex> lock(state->mutex);
+    state->value = args[1];
+    return Value{};
+}
+
+Value semaphoreAcquire(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Semaphore")
+        throw std::runtime_error("Semaphore.acquire: expected a Semaphore");
+    auto state = ensureObjectState(*(*obj), &ObjectBox::semaphoreState, [] { return std::make_shared<ObjectBox::SemaphoreState>(); });
+    std::unique_lock<std::mutex> lock(state->mutex);
+    state->cv.wait(lock, [&] { return state->permits > 0; });
+    --state->permits;
+    return Value{};
+}
+
+Value semaphoreRelease(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Semaphore")
+        throw std::runtime_error("Semaphore.release: expected a Semaphore");
+    auto state = ensureObjectState(*(*obj), &ObjectBox::semaphoreState, [] { return std::make_shared<ObjectBox::SemaphoreState>(); });
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        ++state->permits;
+    }
+    state->cv.notify_one();
+    return Value{};
+}
+
+Value semaphoreAvailable(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Semaphore")
+        throw std::runtime_error("Semaphore.available: expected a Semaphore");
+    auto state = ensureObjectState(*(*obj), &ObjectBox::semaphoreState, [] { return std::make_shared<ObjectBox::SemaphoreState>(); });
+    std::lock_guard<std::mutex> lock(state->mutex);
+    return state->permits;
+}
+
+Value conditionWait(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Condition")
+        throw std::runtime_error("Condition.wait: expected a Condition");
+    auto state = ensureObjectState(*(*obj), &ObjectBox::conditionState, [] { return std::make_shared<ObjectBox::ConditionState>(); });
+    std::unique_lock<std::mutex> lock(state->mutex);
+    state->cv.wait(lock);
+    return Value{};
+}
+
+Value conditionNotifyOne(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Condition")
+        throw std::runtime_error("Condition.notifyOne: expected a Condition");
+    auto state = ensureObjectState(*(*obj), &ObjectBox::conditionState, [] { return std::make_shared<ObjectBox::ConditionState>(); });
+    state->cv.notify_one();
+    return Value{};
+}
+
+Value conditionNotifyAll(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Condition")
+        throw std::runtime_error("Condition.notifyAll: expected a Condition");
+    auto state = ensureObjectState(*(*obj), &ObjectBox::conditionState, [] { return std::make_shared<ObjectBox::ConditionState>(); });
+    state->cv.notify_all();
+    return Value{};
+}
+
+Value channelCreate(const std::vector<Value>& args) {
+    if (!std::holds_alternative<std::int64_t>(args[0]))
+        throw std::runtime_error("Channel.create: expected capacity int");
+    const auto cap = static_cast<std::int64_t>(std::get<std::int64_t>(args[0]));
+    if (cap <= 0) throw std::runtime_error("Channel.create: capacity must be greater than zero");
+    auto obj = makeGCObject();
+    obj->className = "Channel";
+    obj->channelState = std::make_shared<ObjectBox::ChannelState>();
+    obj->channelState->capacity = static_cast<std::size_t>(cap);
+    return obj;
+}
+
+Value channelSend(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
+        throw std::runtime_error("Channel.send: expected a Channel");
+    auto state = (*obj)->channelState;
+    std::unique_lock<std::mutex> lock(state->mutex);
+    state->cvNotFull.wait(lock, [&] { return state->items.size() < state->capacity; });
+    state->items.push_back(args[1]);
+    lock.unlock();
+    state->cvNotEmpty.notify_one();
+    return Value{};
+}
+
+Value channelReceive(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
+        throw std::runtime_error("Channel.receive: expected a Channel");
+    auto state = (*obj)->channelState;
+    std::unique_lock<std::mutex> lock(state->mutex);
+    state->cvNotEmpty.wait(lock, [&] { return !state->items.empty(); });
+    Value value = std::move(state->items.front());
+    state->items.pop_front();
+    lock.unlock();
+    state->cvNotFull.notify_one();
+    return value;
+}
+
+Value channelSize(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
+        throw std::runtime_error("Channel.size: expected a Channel");
+    auto state = (*obj)->channelState;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    return static_cast<std::int64_t>(state->items.size());
+}
+
+
+Value channelSendAsync(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
+        throw std::runtime_error("Channel.sendAsync: expected a Channel");
+    auto task = std::make_shared<RuntimeTaskState>("void");
+    const Value value = args[1];
+    std::shared_ptr<ObjectBox::ChannelState> state = (*obj)->channelState;
+
+    std::optional<Value> delivered;
+    TaskRef receiverTask;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        // Discard cancelled/terminal receive waiters before matching a sender.
+        while (!state->pendingReceives.empty()) {
+            auto candidate = state->pendingReceives.front().task;
+            state->pendingReceives.pop_front();
+            if (candidate && !candidate->isTerminal()) {
+                receiverTask = std::move(candidate);
+                delivered = value;
+                break;
+            }
+        }
+        if (!receiverTask) {
+            if (state->items.size() < state->capacity) {
+                state->items.push_back(value);
+            } else {
+                state->pendingSends.push_back({value, task});
+                std::weak_ptr<ObjectBox::ChannelState> weakState = state;
+                std::weak_ptr<RuntimeTaskState> weakTask = task;
+                task->onCancellation([weakState, weakTask]() {
+                    auto lockedState = weakState.lock();
+                    auto lockedTask = weakTask.lock();
+                    if (!lockedState || !lockedTask) return;
+                    std::lock_guard<std::mutex> lock(lockedState->mutex);
+                    auto it = std::remove_if(lockedState->pendingSends.begin(), lockedState->pendingSends.end(),
+                        [&](const auto& pending) { return pending.task == lockedTask; });
+                    lockedState->pendingSends.erase(it, lockedState->pendingSends.end());
+                });
+                return TaskRef(task);
+            }
+        }
+    }
+
+    task->start();
+    task->succeed(Value{});
+    if (receiverTask && delivered) {
+        try {
+            receiverTask->start();
+            receiverTask->succeed(std::move(*delivered));
+        } catch (const std::logic_error&) {
+            // The receiver may have been cancelled concurrently between the
+            // queue handoff and its terminal transition. Cancellation wins.
+        }
+    }
+    state->cvNotEmpty.notify_one();
+    return TaskRef(task);
+}
+
+Value channelReceiveAsync(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
+        throw std::runtime_error("Channel.receiveAsync: expected a Channel");
+    auto task = std::make_shared<RuntimeTaskState>();
+    std::shared_ptr<ObjectBox::ChannelState> state = (*obj)->channelState;
+    std::optional<Value> immediate;
+    TaskRef senderTask;
+    bool senderMatched = false;
+
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (!state->items.empty()) {
+            immediate = std::move(state->items.front());
+            state->items.pop_front();
+        } else {
+            while (!state->pendingSends.empty()) {
+                auto sender = state->pendingSends.front();
+                state->pendingSends.pop_front();
+                if (sender.task && !sender.task->isTerminal()) {
+                    senderTask = std::move(sender.task);
+                    immediate = std::move(sender.value);
+                    senderMatched = true;
+                    break;
+                }
+            }
+            if (!immediate) {
+                state->pendingReceives.push_back({task});
+                std::weak_ptr<ObjectBox::ChannelState> weakState = state;
+                std::weak_ptr<RuntimeTaskState> weakTask = task;
+                task->onCancellation([weakState, weakTask]() {
+                    auto lockedState = weakState.lock();
+                    auto lockedTask = weakTask.lock();
+                    if (!lockedState || !lockedTask) return;
+                    std::lock_guard<std::mutex> lock(lockedState->mutex);
+                    auto it = std::remove_if(lockedState->pendingReceives.begin(), lockedState->pendingReceives.end(),
+                        [&](const auto& pending) { return pending.task == lockedTask; });
+                    lockedState->pendingReceives.erase(it, lockedState->pendingReceives.end());
+                });
+                return TaskRef(task);
+            }
+        }
+    }
+
+    // Never complete the matched sender while holding the channel mutex: its
+    // continuations may synchronously re-enter this channel.
+    if (senderMatched && senderTask) {
+        try {
+            senderTask->start();
+            senderTask->succeed(Value{});
+        } catch (const std::logic_error&) {
+            // Cancellation may have won the race after the queue handoff.
+        }
+    }
+
+    task->start();
+    task->succeed(std::move(*immediate));
+    state->cvNotFull.notify_one();
+    return TaskRef(task);
+}
+
+Value taskSpawn(const std::vector<Value>& args) {
+    auto closure = std::get_if<ClosureRef>(&args[0]);
+    if (!closure || !(*closure)) throw std::runtime_error("Task.spawn: expected a func value");
+    const auto& c = **closure;
+    if (!c.chunk) throw std::runtime_error("Task.spawn: function value has no executable chunk");
+    if (c.functionIndex >= c.chunk->functions.size()) throw std::runtime_error("Task.spawn: invalid function value");
+    const auto& fn = c.chunk->functions[c.functionIndex];
+    if (fn.isAsync) throw std::runtime_error("Task.spawn: expected a synchronous func");
+    if (!c.paramNames.empty()) throw std::runtime_error("Task.spawn: CPU task entry func must take no parameters");
+    if (!capturesAreExplicitlyShared(c)) throw std::runtime_error("Task.spawn: captured values must be Shared<T> when crossing CPU workers");
+
+    auto task = std::make_shared<RuntimeTaskState>(c.returnTypeName.empty() ? "void" : c.returnTypeName);
+    const auto closureCopy = *closure;
+    RuntimeTaskExecutor::instance().enqueue([task, closureCopy]() mutable {
+        try {
+            task->start();
+            VM workerVm;
+            Value result = workerVm.invokeTaskClosure(closureCopy);
+            task->succeed(std::move(result));
+        } catch (...) {
+            try { task->fail(std::current_exception()); } catch (const std::logic_error&) {}
+        }
+    });
+    return TaskRef(task);
+}
+
+Value threadStart(const std::vector<Value>& args) {
+    auto closure = std::get_if<ClosureRef>(&args[0]);
+    if (!closure || !(*closure)) throw std::runtime_error("Thread.start: expected a func value");
+    const auto& c = **closure;
+    if (!c.chunk) throw std::runtime_error("Thread.start: function value has no executable chunk");
+    if (c.functionIndex >= c.chunk->functions.size()) throw std::runtime_error("Thread.start: invalid function value");
+    if (c.chunk->functions[c.functionIndex].isAsync) throw std::runtime_error("Thread.start: async func values must use Task/await instead");
+    if (!c.paramNames.empty()) throw std::runtime_error("Thread.start: thread entry func must take no parameters");
+    if (!capturesAreExplicitlyShared(c)) throw std::runtime_error("Thread.start: captured values must be Shared<T> when crossing raw threads");
+    if (!g_currentNativeVm) throw std::runtime_error("Thread.start: no active VM");
+
+    auto state = std::make_shared<RuntimeThreadState>();
+    const auto closureCopy = *closure;
+    const void* closureIdentity = closureCopy.get();
+    TracingGC::instance().protect(closureIdentity);
+    state->startWith([closureCopy, closureIdentity]() mutable {
+        try {
+            VM workerVm;
+            workerVm.invokeThreadClosure(closureCopy);
+        } catch (...) {
+            TracingGC::instance().unprotect(closureIdentity);
+            // An exception escaping a Thread is an uncaught exception and is
+            // process-fatal by language definition.
+            std::terminate();
+        }
+        TracingGC::instance().unprotect(closureIdentity);
+    });
+    return Value{std::move(state)};
+}
+
+Value threadJoin(const std::vector<Value>& args) {
+    auto thread = std::get_if<ThreadRef>(&args[0]);
+    if (!thread || !(*thread)) throw std::runtime_error("Thread.join: expected a Thread value");
+    (*thread)->join();
+    return Value{};
+}
+
+Value threadIsAlive(const std::vector<Value>& args) {
+    auto thread = std::get_if<ThreadRef>(&args[0]);
+    if (!thread || !(*thread)) throw std::runtime_error("Thread.isAlive: expected a Thread value");
+    return (*thread)->isAlive();
+}
+
+Value timeSleep(const std::vector<Value>& args) {
+    double seconds = toDouble(args[0]);
+    if (seconds > 0.0) {
+        std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
+    }
+    return Value{};
+}
+
+Value timeYear(const std::vector<Value>& args)   { return static_cast<std::int64_t>(toLocalTm(toInt64Strict(args[0])).tm_year + 1900); }
+Value timeMonth(const std::vector<Value>& args)  { return static_cast<std::int64_t>(toLocalTm(toInt64Strict(args[0])).tm_mon + 1); }
+Value timeDay(const std::vector<Value>& args)    { return static_cast<std::int64_t>(toLocalTm(toInt64Strict(args[0])).tm_mday); }
+Value timeHour(const std::vector<Value>& args)   { return static_cast<std::int64_t>(toLocalTm(toInt64Strict(args[0])).tm_hour); }
+Value timeMinute(const std::vector<Value>& args) { return static_cast<std::int64_t>(toLocalTm(toInt64Strict(args[0])).tm_min); }
+Value timeSecond(const std::vector<Value>& args) { return static_cast<std::int64_t>(toLocalTm(toInt64Strict(args[0])).tm_sec); }
+
+// Time.format(timestamp, "YYYY-MM-DD HH:mm:ss") - simple token substitution
+// rather than exposing raw strftime, so the pattern stays readable.
+Value timeFormat(const std::vector<Value>& args) {
+    std::tm tmv = toLocalTm(toInt64Strict(args[0]));
+    std::string result = requireString(args[1], "Time.format");
+
+    auto replaceAll = [&](const std::string& token, int value, int width) {
+        std::ostringstream oss;
+        oss << std::setw(width) << std::setfill('0') << value;
+        std::string valStr = oss.str();
+        std::size_t pos = 0;
+        while ((pos = result.find(token, pos)) != std::string::npos) {
+            result.replace(pos, token.size(), valStr);
+            pos += valStr.size();
+        }
+    };
+    replaceAll("YYYY", tmv.tm_year + 1900, 4);
+    replaceAll("MM", tmv.tm_mon + 1, 2);
+    replaceAll("DD", tmv.tm_mday, 2);
+    replaceAll("HH", tmv.tm_hour, 2);
+    replaceAll("mm", tmv.tm_min, 2);
+    replaceAll("ss", tmv.tm_sec, 2);
+    return result;
+}
+
+
+// --- Type reflection -------------------------------------------------------
+
+Value typeName(const std::vector<Value>& args) {
+    if (std::holds_alternative<ObjectRef>(args[0])) {
+        auto obj = std::get<ObjectRef>(args[0]);
+        return (obj && obj->runtimeType) ? Value{obj->runtimeType->name} : Value{};
+    }
+    if (std::holds_alternative<ListRef>(args[0])) return std::string("list");
+    if (std::holds_alternative<MapRef>(args[0])) return std::string("map");
+    if (std::holds_alternative<ClosureRef>(args[0])) return std::string("func");
+    if (std::holds_alternative<std::int64_t>(args[0])) return std::string("int");
+    if (std::holds_alternative<double>(args[0])) return std::string("double");
+    if (std::holds_alternative<std::string>(args[0])) return std::string("string");
+    if (std::holds_alternative<bool>(args[0])) return std::string("bool");
+    return std::string("nil");
+}
+
+Value typeKind(const std::vector<Value>& args) {
+    const Value& value = args.at(0);
+    if (std::holds_alternative<std::monostate>(value)) return std::string("nil");
+    if (std::holds_alternative<std::int64_t>(value)) return std::string("int");
+    if (std::holds_alternative<double>(value)) return std::string("double");
+    if (std::holds_alternative<std::string>(value)) return std::string("string");
+    if (std::holds_alternative<bool>(value)) return std::string("bool");
+    if (std::holds_alternative<ListRef>(value)) return std::string("list");
+    if (std::holds_alternative<MapRef>(value)) return std::string("map");
+    if (std::holds_alternative<ClosureRef>(value)) return std::string("function");
+    if (std::holds_alternative<TaskRef>(value)) return std::string("task");
+    if (std::holds_alternative<ThreadRef>(value)) return std::string("thread");
+    if (auto obj = std::get_if<ObjectRef>(&value)) {
+        if (!*obj) return std::string("object");
+        if ((*obj)->className == "Type") return std::string("type");
+        return ((*obj)->runtimeType && (*obj)->runtimeType->isDataType) ? std::string("data") :
+               ((*obj)->runtimeType && (*obj)->runtimeType->isEnumType) ? std::string("enum") : std::string("object");
+    }
+    return std::string("object");
+}
+
+Value typeIsData(const std::vector<Value>& args) {
+    const Value& value = args.at(0);
+    if (auto obj = std::get_if<ObjectRef>(&value); obj && *obj && (*obj)->runtimeType) return (*obj)->runtimeType->isDataType;
+    return false;
+}
+
+Value typeIsEnum(const std::vector<Value>& args) {
+    const Value& value = args.at(0);
+    if (auto obj = std::get_if<ObjectRef>(&value); obj && *obj && (*obj)->runtimeType) return (*obj)->runtimeType->isEnumType;
+    return false;
+}
+
+Value typeEnumMembers(const std::vector<Value>& args) {
+    const Value& value = args.at(0);
+    auto out = makeGCList();
+    if (auto obj = std::get_if<ObjectRef>(&value); obj && *obj && (*obj)->runtimeType) {
+        for (const auto& member : (*obj)->runtimeType->enumMembers) out->items.emplace_back(member);
+    }
+    return ListRef(std::move(out));
+}
+
+Value typeFields(const std::vector<Value>& args) {
+    if (!std::holds_alternative<ObjectRef>(args[0]))
+        throw std::runtime_error("Reflection.fields: expected an object");
+    auto obj = std::get<ObjectRef>(args[0]);
+    auto out = makeGCList();
+    if (obj && obj->runtimeType) for (const auto& field : obj->runtimeType->fields) {
+        auto ref = makeGCObject();
+        ref->className = "Field";
+        ref->fields["name"] = field.name;
+        ref->fields["type"] = field.typeName;
+        ref->fields["access"] = field.access;
+        out->items.emplace_back(ObjectRef(std::move(ref)));
+    }
+    return out;
+}
+
+Value typeMethods(const std::vector<Value>& args) {
+    if (!std::holds_alternative<ObjectRef>(args[0]))
+        throw std::runtime_error("Reflection.methods: expected an object");
+    auto obj = std::get<ObjectRef>(args[0]);
+    auto out = makeGCList();
+    if (obj && obj->runtimeType) for (const auto& method : obj->runtimeType->methods) {
+        auto ref = makeGCObject();
+        ref->className = "Method";
+        ref->fields["name"] = method.name;
+        ref->fields["returnType"] = method.returnType;
+        ref->fields["access"] = method.access;
+        ref->fields["static"] = method.isStatic;
+        ref->fields["async"] = method.isAsync;
+        auto params = makeGCList();
+        for (const auto& type : method.parameterTypes) params->items.emplace_back(type);
+        ref->fields["parameters"] = ListRef(std::move(params));
+        out->items.emplace_back(ObjectRef(std::move(ref)));
+    }
+    return out;
+}
+
+Value typeBase(const std::vector<Value>& args) {
+    if (!std::holds_alternative<ObjectRef>(args[0]))
+        throw std::runtime_error("Reflection.base: expected an object");
+    auto obj = std::get<ObjectRef>(args[0]);
+    if (!obj || !obj->runtimeType || obj->runtimeType->baseClassName.empty()) return Value{};
+    return obj->runtimeType->baseClassName;
+}
+
+// --- Reflection wrappers -------------------------------------------------
+
+std::string sharedRuntimeClassName(const Value& value) {
+    if (std::holds_alternative<std::int64_t>(value)) return "Shared<int>";
+    if (std::holds_alternative<double>(value)) return "Shared<double>";
+    if (std::holds_alternative<bool>(value)) return "Shared<bool>";
+    if (std::holds_alternative<std::string>(value)) return "Shared<string>";
+    if (auto obj = std::get_if<ObjectRef>(&value); obj && *obj)
+        return "Shared<" + (*obj)->className + ">";
+    if (std::holds_alternative<ListRef>(value)) return "Shared<list>";
+    if (std::holds_alternative<MapRef>(value)) return "Shared<map>";
+    if (std::holds_alternative<ClosureRef>(value)) return "Shared<func>";
+    return "Shared<object>";
+}
+
+Value sharedShare(const std::vector<Value>& args) {
+    if (args.size() != 1) throw std::runtime_error("Shared.share: expected one value");
+    auto box = makeGCObject();
+    // Runtime dispatch uses the canonical Shared class; the compiler retains
+    // Shared<T> at the static type level for get()/setValue() typing.
+    box->className = "Shared";
+    box->fields["__value"] = args[0];
+    return Value{ObjectRef(std::move(box))};
+}
+
+Value sharedGet(const std::vector<Value>& args) {
+    if (args.size() != 1) throw std::runtime_error("Shared.__get: expected one value");
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Shared")
+        throw std::runtime_error("Shared.__get: expected a Shared value");
+    auto mutex = ensureObjectState(*(*obj), &ObjectBox::sharedValueMutex, [] { return std::make_shared<std::recursive_mutex>(); });
+    std::lock_guard<std::recursive_mutex> lock(*mutex);
+    auto it = (*obj)->fields.find("__value");
+    if (it == (*obj)->fields.end()) throw std::runtime_error("Shared.__get: invalid Shared value");
+    return it->second;
+}
+
+Value sharedWithLock(const std::vector<Value>& args) {
+    if (args.size() != 2) throw std::runtime_error("Shared.__withLock: expected Shared value and callback");
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    auto closure = std::get_if<ClosureRef>(&args[1]);
+    if (!obj || !*obj || (*obj)->className != "Shared")
+        throw std::runtime_error("Shared.__withLock: expected a Shared value");
+    if (!closure || !*closure || !(*closure)->chunk || !(*closure)->paramNames.empty())
+        throw std::runtime_error("Shared.__withLock: expected a zero-argument func");
+    if (!g_currentNativeVm) throw std::runtime_error("Shared.__withLock: no active VM");
+    auto mutex = ensureObjectState(*(*obj), &ObjectBox::sharedValueMutex, [] { return std::make_shared<std::recursive_mutex>(); });
+    std::unique_lock<std::recursive_mutex> lock(*mutex);
+    return g_currentNativeVm->invokeTaskClosure(*closure);
+}
+
+Value sharedSet(const std::vector<Value>& args) {
+    if (args.size() != 2) throw std::runtime_error("Shared.__set: expected two values");
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Shared")
+        throw std::runtime_error("Shared.__set: expected a Shared value");
+    auto mutex = ensureObjectState(*(*obj), &ObjectBox::sharedValueMutex, [] { return std::make_shared<std::recursive_mutex>(); });
+    std::lock_guard<std::recursive_mutex> lock(*mutex);
+    (*obj)->fields["__value"] = args[1];
+    return Value{};
+}
+
+Value typeOf(const std::vector<Value>& args) {
+    if (args.size() != 1) throw std::runtime_error("Type.of: expected one argument");
+    auto box = makeGCObject();
+    box->className = "Type";
+    box->fields["__value"] = args[0];
+    return ObjectRef(std::move(box));
+}
+
+
+ObjectRef requireTypeObject(const Value& value, const char* name) {
+    auto obj = std::get_if<ObjectRef>(&value);
+    if (!obj || !(*obj) || (*obj)->className != "Type")
+        throw std::runtime_error(std::string(name) + ": expected a Type value");
+    return *obj;
+}
+
+const Value& reflectedValue(const Value& value, const char* name) {
+    auto obj = requireTypeObject(value, name);
+    auto it = obj->fields.find("__value");
+    if (it == obj->fields.end()) throw std::runtime_error(std::string(name) + ": invalid Type value");
+    return it->second;
+}
+
+Value reflectionName(const std::vector<Value>& args) {
+    const Value& value = reflectedValue(args[0], "Reflection.name");
+    return typeName({value});
+}
+
+Value reflectionKind(const std::vector<Value>& args) {
+    const Value& value = reflectedValue(args[0], "Reflection.kind");
+    return typeKind({value});
+}
+
+Value reflectionIsData(const std::vector<Value>& args) {
+    const Value& value = reflectedValue(args[0], "Reflection.isData");
+    return typeIsData({value});
+}
+
+Value reflectionIsEnum(const std::vector<Value>& args) {
+    const Value& value = reflectedValue(args[0], "Reflection.isEnum");
+    return typeIsEnum({value});
+}
+
+Value reflectionEnumMembers(const std::vector<Value>& args) {
+    const Value& value = reflectedValue(args[0], "Reflection.enumMembers");
+    return typeEnumMembers({value});
+}
+
+Value reflectionFunction(const std::vector<Value>& args) {
+    const Value& value = reflectedValue(args[0], "Reflection.function");
+    auto closure = std::get_if<ClosureRef>(&value);
+    if (!closure || !(*closure))
+        throw std::runtime_error("Reflection.function: expected a function value");
+    auto ref = makeGCObject();
+    ref->className = "Function";
+    ref->fields["__closure"] = value;
+    ref->fields["name"] = (*closure)->functionName;
+    auto params = makeGCList();
+    for (const auto& type : (*closure)->parameterTypeNames) params->items.emplace_back(type);
+    ref->fields["parameters"] = ListRef(std::move(params));
+    ref->fields["returnType"] = (*closure)->returnTypeName;
+    ref->fields["async"] = (*closure)->isAsync;
+    ref->fields["native"] = (*closure)->isNative;
+    return ObjectRef(std::move(ref));
+}
+
+Value typeCallable(const std::vector<Value>& args) {
+    return reflectionFunction(args);
+}
+
+Value reflectionFields(const std::vector<Value>& args) {
+    const Value& value = reflectedValue(args[0], "Reflection.fields");
+    return typeFields({value});
+}
+
+Value reflectionMethods(const std::vector<Value>& args) {
+    const Value& value = reflectedValue(args[0], "Reflection.methods");
+    return typeMethods({value});
+}
+
+Value reflectionBase(const std::vector<Value>& args) {
+    const Value& value = reflectedValue(args[0], "Reflection.base");
+    return typeBase({value});
+}
+
+Value reflectionInterfaces(const std::vector<Value>& args) {
+    const Value& value = reflectedValue(args[0], "Reflection.interfaces");
+    auto obj = std::get_if<ObjectRef>(&value);
+    if (!obj || !(*obj) || !(*obj)->runtimeType)
+        throw std::runtime_error("Reflection.interfaces: expected an object-backed Type");
+    auto out = makeGCList();
+    for (const auto& name : (*obj)->runtimeType->interfaces) out->items.emplace_back(name);
+    return ListRef(std::move(out));
+}
+
+Value reflectionTypeParameters(const std::vector<Value>& args) {
+    const Value& value = reflectedValue(args[0], "Reflection.typeParameters");
+    auto obj = std::get_if<ObjectRef>(&value);
+    if (!obj || !(*obj) || !(*obj)->runtimeType)
+        throw std::runtime_error("Reflection.typeParameters: expected an object-backed Type");
+    auto out = makeGCList();
+    for (const auto& name : (*obj)->runtimeType->typeParameters) out->items.emplace_back(name);
+    return ListRef(std::move(out));
+}
+
+Value reflectedMember(const Value& value, const char* expectedClass, const char* name) {
+    auto obj = std::get_if<ObjectRef>(&value);
+    if (!obj || !(*obj) || (*obj)->className != expectedClass)
+        throw std::runtime_error(std::string(name) + ": expected a " + expectedClass + " value");
+    return value;
+}
+
+Value reflectionMemberField(const Value& value, const char* expectedClass, const char* operation, const char* fieldName) {
+    auto obj = std::get<ObjectRef>(reflectedMember(value, expectedClass, operation));
+    auto it = obj->fields.find(fieldName);
+    if (it == obj->fields.end()) throw std::runtime_error(std::string("Reflection.") + operation + ": malformed " + expectedClass + " metadata");
+    return it->second;
+}
+Value reflectionFieldName(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Field", "Field.name", "name"); }
+Value reflectionFieldType(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Field", "Field.type", "type"); }
+Value reflectionFieldAccess(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Field", "Field.access", "access"); }
+Value reflectionMethodName(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Method", "Method.name", "name"); }
+Value reflectionMethodReturnType(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Method", "Method.returnType", "returnType"); }
+Value reflectionMethodAccess(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Method", "Method.access", "access"); }
+Value reflectionMethodIsStatic(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Method", "Method.static", "static"); }
+Value reflectionMethodIsAsync(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Method", "Method.async", "async"); }
+Value reflectionMethodParameters(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Method", "Method.parameters", "parameters"); }
+Value reflectionFunctionName(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Function", "Function.name", "name"); }
+Value reflectionFunctionParameters(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Function", "Function.parameters", "parameters"); }
+Value reflectionFunctionReturnType(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Function", "Function.returnType", "returnType"); }
+Value reflectionFunctionIsAsync(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Function", "Function.async", "async"); }
+Value reflectionFunctionIsNative(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Function", "Function.native", "native"); }
+
+
+Value reflectionTypeConstructors(const std::vector<Value>& args) {
+    if (args.size() != 1 || !std::holds_alternative<ObjectRef>(args[0])) throw std::runtime_error("Type.constructors: expected a Type value");
+    auto typeObj = requireTypeObject(args[0], "Type.constructors");
+    auto it = typeObj->fields.find("__value");
+    if (it == typeObj->fields.end() || !std::holds_alternative<ObjectRef>(it->second)) throw std::runtime_error("Type.constructors: invalid Type value");
+    auto valueObj = std::get<ObjectRef>(it->second);
+    auto out = makeGCList();
+    if (valueObj && valueObj->runtimeType) {
+        for (const auto& ctor : valueObj->runtimeType->constructors) {
+            auto ref = makeGCObject();
+            ref->className = "Constructor";
+            ref->fields["__owner"] = ctor.ownerClassName;
+            ref->fields["__functionIndex"] = static_cast<std::int64_t>(ctor.functionIndex);
+            ref->fields["__access"] = ctor.access;
+            auto params = makeGCList();
+            for (const auto& type : ctor.parameterTypes) params->items.emplace_back(type);
+            ref->fields["parameters"] = ListRef(std::move(params));
+            out->items.emplace_back(ObjectRef(std::move(ref)));
+        }
+    }
+    return out;
+}
+
+Value reflectionField(const std::vector<Value>& args) {
+    const Value& typeValue = args[0];
+    const Value& fieldNameValue = args[1];
+    const std::string& fieldName = requireString(fieldNameValue, "Reflection.field");
+    auto typeObj = requireTypeObject(typeValue, "Reflection.field");
+    const Value& original = typeObj->fields.at("__value");
+    if (!std::holds_alternative<ObjectRef>(original)) throw std::runtime_error("Reflection.field: expected an object-backed Type");
+    auto valueObj = std::get<ObjectRef>(original);
+    if (!valueObj || !valueObj->runtimeType) throw std::runtime_error("Reflection.field: missing runtime type metadata");
+    auto it = std::find_if(valueObj->runtimeType->fields.begin(), valueObj->runtimeType->fields.end(), [&](const auto& f){ return f.name == fieldName; });
+    if (it == valueObj->runtimeType->fields.end()) throw std::runtime_error("Reflection.field: field not found: " + fieldName);
+    auto ref = makeGCObject(); ref->className = "Field";
+    ref->fields["name"] = it->name; ref->fields["type"] = it->typeName; ref->fields["access"] = it->access;
+    return ObjectRef(std::move(ref));
+}
+
+Value reflectionMethod(const std::vector<Value>& args) {
+    const std::string& methodName = requireString(args[1], "Reflection.method");
+    auto typeObj = requireTypeObject(args[0], "Reflection.method");
+    const Value& original = typeObj->fields.at("__value");
+    if (!std::holds_alternative<ObjectRef>(original)) throw std::runtime_error("Reflection.method: expected an object-backed Type");
+    auto valueObj = std::get<ObjectRef>(original);
+    if (!valueObj || !valueObj->runtimeType) throw std::runtime_error("Reflection.method: missing runtime type metadata");
+    const auto matches = std::count_if(valueObj->runtimeType->methods.begin(), valueObj->runtimeType->methods.end(),
+                                       [&](const auto& m){ return m.name == methodName; });
+    if (matches == 0) throw std::runtime_error("Reflection.method: method not found: " + methodName);
+    if (matches > 1) throw std::runtime_error("Reflection.method: method '" + methodName + "' is overloaded; use Type.methods() and select a signature");
+    auto it = std::find_if(valueObj->runtimeType->methods.begin(), valueObj->runtimeType->methods.end(), [&](const auto& m){ return m.name == methodName; });
+    auto ref = makeGCObject(); ref->className = "Method";
+    ref->fields["name"] = it->name; ref->fields["returnType"] = it->returnType; ref->fields["access"] = it->access; ref->fields["static"] = it->isStatic; ref->fields["async"] = it->isAsync;
+    auto params = makeGCList(); for (const auto& type : it->parameterTypes) params->items.emplace_back(type); ref->fields["parameters"] = ListRef(std::move(params));
+    ref->fields["__owner"] = it->ownerClassName; ref->fields["__functionIndex"] = static_cast<std::int64_t>(it->functionIndex);
+    return ObjectRef(std::move(ref));
+}
+
+Value reflectionConstructor(const std::vector<Value>& args) {
+    auto typeObj = requireTypeObject(args[0], "Reflection.constructor");
+    if (!std::holds_alternative<std::int64_t>(args[1])) throw std::runtime_error("Reflection.constructor: expected integer index");
+    const auto index = static_cast<std::size_t>(std::get<std::int64_t>(args[1]));
+    const Value& original = typeObj->fields.at("__value");
+    if (!std::holds_alternative<ObjectRef>(original)) throw std::runtime_error("Reflection.constructor: expected an object-backed Type");
+    auto valueObj = std::get<ObjectRef>(original);
+    if (!valueObj || !valueObj->runtimeType || index >= valueObj->runtimeType->constructors.size()) throw std::runtime_error("Reflection.constructor: index out of range");
+    auto ref = makeGCObject(); ref->className = "Constructor";
+    const auto& ctor = valueObj->runtimeType->constructors[index];
+    ref->fields["__owner"] = ctor.ownerClassName; ref->fields["__functionIndex"] = static_cast<std::int64_t>(ctor.functionIndex); ref->fields["__access"] = ctor.access;
+    auto params = makeGCList(); for (const auto& type : ctor.parameterTypes) params->items.emplace_back(type); ref->fields["parameters"] = ListRef(std::move(params));
+    return ObjectRef(std::move(ref));
+}
+
+Value reflectionConstructorParameters(const std::vector<Value>& args) {
+    auto obj = std::get<ObjectRef>(reflectedMember(args[0], "Constructor", "Constructor.parameters"));
+    return obj->fields.at("parameters");
+}
+
+// --- Test assertions ------------------------------------------------------
+
+[[noreturn]] void testFailure(const char* name, const std::string& message) {
+    throw std::runtime_error(std::string("Test.") + name + " failed: " + message);
+}
+
+Value testFail(const std::vector<Value>& args) {
+    const std::string message = requireString(args[0], "Test.fail");
+    testFailure("fail", message);
+}
+
+Value testAssertTrue(const std::vector<Value>& args) {
+    if (!isTruthy(args[0])) testFailure("assertTrue", "expected a truthy value");
+    return Value{};
+}
+
+Value testAssertFalse(const std::vector<Value>& args) {
+    if (isTruthy(args[0])) testFailure("assertFalse", "expected a falsy value");
+    return Value{};
+}
+
+Value testAssertEqual(const std::vector<Value>& args) {
+    if (!valuesEqual(args[0], args[1])) {
+        testFailure("assertEqual", "expected " + valueToString(args[0]) +
+            " == " + valueToString(args[1]));
+    }
+    return Value{};
+}
+
+Value testAssertNotEqual(const std::vector<Value>& args) {
+    if (valuesEqual(args[0], args[1])) {
+        testFailure("assertNotEqual", "expected " + valueToString(args[0]) +
+            " != " + valueToString(args[1]));
+    }
+    return Value{};
+}
+
+Value testAssertNear(const std::vector<Value>& args) {
+    const double actual = toDouble(args[0]);
+    const double expected = toDouble(args[1]);
+    const double epsilon = toDouble(args[2]);
+    if (!(epsilon >= 0.0) || std::isnan(actual) || std::isnan(expected) ||
+        std::fabs(actual - expected) > epsilon) {
+        testFailure("assertNear", "expected " + valueToString(args[0]) +
+            " to be within " + valueToString(args[2]) + " of " +
+            valueToString(args[1]));
+    }
+    return Value{};
+}
+
+
+
+// --- Logging ---
+Value logInfo(const std::vector<Value>& args) { std::cout << "[INFO] " << valueToString(args[0]) << "\n"; return Value{}; }
+Value logWarn(const std::vector<Value>& args) { std::cout << "[WARN] " << valueToString(args[0]) << "\n"; return Value{}; }
+Value logError(const std::vector<Value>& args) { std::cerr << "[ERROR] " << valueToString(args[0]) << "\n"; return Value{}; }
+
+// --- Advanced text ---
+Value textFormat(const std::vector<Value>& args) {
+    std::string out = requireString(args[0], "Text.format");
+    auto vals = requireList(args[1], "Text.format");
+    for (std::size_t i = 0; i < vals->items.size(); ++i) {
+        const std::string token = "{" + std::to_string(i) + "}";
+        const std::string value = valueToString(vals->items[i]);
+        std::size_t pos = 0;
+        while ((pos = out.find(token, pos)) != std::string::npos) { out.replace(pos, token.size(), value); pos += value.size(); }
+    }
+    return out;
+}
+
+static void collectRegexNames(const std::shared_ptr<zl::regex_engine::Node>& n, std::vector<std::pair<int,std::string>>& out) {
+    if (n->kind == zl::regex_engine::NodeKind::NamedGroup && n->captureIndex > 0 && !n->captureName.empty()) out.emplace_back(n->captureIndex, n->captureName);
+    for (const auto& c : n->children) collectRegexNames(c, out);
+}
+
+static Value makeRegexMatchObject(const std::string& text, const zl::regex_engine::MatchResult& match, const zl::regex_engine::Pattern& pattern) {
+    auto ref = makeGCObject();
+    ref->className = "RegexMatch";
+    ref->fields["value"] = match.groups.empty() ? text.substr(match.start, match.end - match.start) : match.groups[0];
+    ref->fields["start"] = static_cast<std::int64_t>(match.start);
+    ref->fields["end"] = static_cast<std::int64_t>(match.end);
+    auto groups = makeGCList();
+    auto matched = makeGCList();
+    auto namedGroups = makeGCMap();
+    auto namedMatched = makeGCMap();
+    for (std::size_t i = 0; i < match.groups.size(); ++i) {
+        groups->items.emplace_back(match.groups[i]);
+        matched->items.emplace_back(i < match.groupMatched.size() && match.groupMatched[i]);
+    }
+    std::vector<std::pair<int,std::string>> names;
+    collectRegexNames(pattern.root, names);
+    for (const auto& [index, name] : names) if (index >= 0 && static_cast<std::size_t>(index) < match.groups.size()) {
+        namedGroups->entries.emplace_back(name, match.groups[index]);
+        namedMatched->entries.emplace_back(name, index < static_cast<int>(match.groupMatched.size()) && match.groupMatched[index]);
+    }
+    ref->fields["groups"] = ListRef(std::move(groups));
+    ref->fields["matched"] = ListRef(std::move(matched));
+    ref->fields["namedGroups"] = MapRef(std::move(namedGroups));
+    ref->fields["namedMatched"] = MapRef(std::move(namedMatched));
+    return ObjectRef(std::move(ref));
+}
+static zl::regex_engine::Pattern loadRegexPattern(const std::vector<Value>& args, std::size_t index, const char* fnName) {
+    try { return zl::regex_engine::parse(requireString(args[index], fnName)); }
+    catch (const std::exception& e) { throw std::runtime_error(std::string("RegexError: ") + fnName + ": " + e.what()); }
+}
+Value textRegexMatches(const std::vector<Value>& args) {
+    const std::string text = requireString(args[0], "Text.regexMatches"); auto p = loadRegexPattern(args,1,"Text.regexMatches");
+    try { return zl::regex_engine::match(p,text,true).matched; } catch(const std::exception&e){throw std::runtime_error(std::string("RegexError: Text.regexMatches: ")+e.what());}
+}
+Value textRegexFullMatches(const std::vector<Value>& args) {
+    const std::string text = requireString(args[0], "Text.regexFullMatches"); auto p = loadRegexPattern(args,1,"Text.regexFullMatches");
+    try { auto r=zl::regex_engine::match(p,text,false); return r.matched && r.start==0 && r.end==text.size(); } catch(const std::exception&e){throw std::runtime_error(std::string("RegexError: Text.regexFullMatches: ")+e.what());}
+}
+Value textRegexFindAll(const std::vector<Value>& args) {
+    const std::string text = requireString(args[0], "Text.regexFindAll"); auto p = loadRegexPattern(args,1,"Text.regexFindAll");
+    try {auto ms=zl::regex_engine::matchAll(p,text);auto out=makeGCList();for(auto&m:ms)out->items.emplace_back(m.groups.empty()?text.substr(m.start,m.end-m.start):m.groups[0]);return ListRef(std::move(out));}catch(const std::exception&e){throw std::runtime_error(std::string("RegexError: Text.regexFindAll: ")+e.what());}
+}
+Value textRegexReplace(const std::vector<Value>& args) {
+    const std::string text = requireString(args[0], "Text.regexReplace"); const std::string repl=requireString(args[2],"Text.regexReplace"); auto p=loadRegexPattern(args,1,"Text.regexReplace");
+    try{return zl::regex_engine::replace(p,text,repl);}catch(const std::exception&e){throw std::runtime_error(std::string("RegexError: Text.regexReplace: ")+e.what());}
+}
+Value textRegexFind(const std::vector<Value>& args) {
+    const std::string text=requireString(args[0],"Text.regexFind");auto p=loadRegexPattern(args,1,"Text.regexFind");
+    try{auto m=zl::regex_engine::match(p,text,true);if(!m.matched)return Value{};return makeRegexMatchObject(text,m,p);}catch(const std::exception&e){throw std::runtime_error(std::string("RegexError: Text.regexFind: ")+e.what());}
+}
+Value textRegexFindMatches(const std::vector<Value>& args) {
+    const std::string text=requireString(args[0],"Text.regexFindMatches");auto p=loadRegexPattern(args,1,"Text.regexFindMatches");
+    try{auto ms=zl::regex_engine::matchAll(p,text);auto out=makeGCList();for(auto&m:ms)out->items.emplace_back(makeRegexMatchObject(text,m,p));return ListRef(std::move(out));}catch(const std::exception&e){throw std::runtime_error(std::string("RegexError: Text.regexFindMatches: ")+e.what());}
+}
+
+// --- JSON serialization ---
+class JsonParser {
+    const std::string& s; std::size_t p = 0;
+    void ws() { while (p < s.size() && std::isspace(static_cast<unsigned char>(s[p]))) ++p; }
+    bool take(char c) { ws(); if (p < s.size() && s[p] == c) { ++p; return true; } return false; }
+    [[noreturn]] void fail(const std::string& m) { throw std::runtime_error("Serialize.decode: " + m + " at offset " + std::to_string(p)); }
+
+    static void appendUtf8(std::string& out, std::uint32_t cp) {
+        if (cp <= 0x7Fu) out.push_back(static_cast<char>(cp));
+        else if (cp <= 0x7FFu) {
+            out.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+            out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+        } else if (cp <= 0xFFFFu) {
+            out.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+            out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+            out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+        } else {
+            out.push_back(static_cast<char>(0xF0u | (cp >> 18)));
+            out.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
+            out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+            out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+        }
+    }
+
+    std::uint32_t hex4() {
+        if (p + 4 > s.size()) fail("incomplete unicode escape");
+        std::uint32_t value = 0;
+        for (int i = 0; i < 4; ++i) {
+            const char c = s[p++];
+            value <<= 4;
+            if (c >= '0' && c <= '9') value |= static_cast<std::uint32_t>(c - '0');
+            else if (c >= 'a' && c <= 'f') value |= static_cast<std::uint32_t>(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') value |= static_cast<std::uint32_t>(c - 'A' + 10);
+            else fail("invalid unicode escape");
+        }
+        return value;
+    }
+
+    Value parseString() {
+        if (!take('"')) fail("expected string");
+        std::string out;
+        while (p < s.size()) {
+            const unsigned char c = static_cast<unsigned char>(s[p++]);
+            if (c == '"') return out;
+            if (c < 0x20u) fail("unescaped control character in string");
+            if (c != '\\') { out.push_back(static_cast<char>(c)); continue; }
+            if (p >= s.size()) fail("unterminated escape");
+            const char e = s[p++];
+            switch (e) {
+                case '"': out += '"'; break;
+                case '\\': out += '\\'; break;
+                case '/': out += '/'; break;
+                case 'b': out += '\b'; break;
+                case 'f': out += '\f'; break;
+                case 'n': out += '\n'; break;
+                case 'r': out += '\r'; break;
+                case 't': out += '\t'; break;
+                case 'u': {
+                    const std::uint32_t first = hex4();
+                    std::uint32_t cp = first;
+                    // JSON encodes non-BMP code points as a UTF-16 surrogate pair.
+                    if (first >= 0xD800u && first <= 0xDBFFu) {
+                        if (p + 2 > s.size() || s[p] != '\\' || s[p + 1] != 'u') {
+                            fail("high surrogate must be followed by a low surrogate");
+                        }
+                        p += 2;
+                        const std::uint32_t second = hex4();
+                        if (second < 0xDC00u || second > 0xDFFFu) fail("invalid low surrogate");
+                        cp = 0x10000u + ((first - 0xD800u) << 10) + (second - 0xDC00u);
+                    } else if (first >= 0xDC00u && first <= 0xDFFFu) {
+                        fail("unexpected low surrogate");
+                    }
+                    appendUtf8(out, cp);
+                    break;
+                }
+                default: fail("unsupported escape");
+            }
+        }
+        fail("unterminated string");
+    }
+
+    Value parseNumber() {
+        ws();
+        const std::size_t start = p;
+        if (p < s.size() && s[p] == '-') ++p;
+        if (p >= s.size() || !std::isdigit(static_cast<unsigned char>(s[p]))) fail("expected number");
+        if (s[p] == '0') {
+            ++p;
+            if (p < s.size() && std::isdigit(static_cast<unsigned char>(s[p]))) fail("leading zero in number");
+        } else {
+            while (p < s.size() && std::isdigit(static_cast<unsigned char>(s[p]))) ++p;
+        }
+        bool dbl = false;
+        if (p < s.size() && s[p] == '.') {
+            dbl = true; ++p;
+            if (p >= s.size() || !std::isdigit(static_cast<unsigned char>(s[p]))) fail("expected digit after decimal point");
+            while (p < s.size() && std::isdigit(static_cast<unsigned char>(s[p]))) ++p;
+        }
+        if (p < s.size() && (s[p] == 'e' || s[p] == 'E')) {
+            dbl = true; ++p;
+            if (p < s.size() && (s[p] == '+' || s[p] == '-')) ++p;
+            if (p >= s.size() || !std::isdigit(static_cast<unsigned char>(s[p]))) fail("expected digit in exponent");
+            while (p < s.size() && std::isdigit(static_cast<unsigned char>(s[p]))) ++p;
+        }
+        const std::string n = s.substr(start, p - start);
+        try {
+            return dbl ? Value{std::stod(n)} : Value{static_cast<std::int64_t>(std::stoll(n))};
+        } catch (...) { fail("invalid number"); }
+    }
+
+    Value parseValue() {
+        ws();
+        if (p >= s.size()) fail("unexpected end");
+        if (s[p] == '"') return parseString();
+        if (s[p] == '{') return parseObject();
+        if (s[p] == '[') return parseArray();
+        if (s.compare(p, 4, "true") == 0) { p += 4; return true; }
+        if (s.compare(p, 5, "false") == 0) { p += 5; return false; }
+        if (s.compare(p, 4, "null") == 0) { p += 4; return Value{}; }
+        return parseNumber();
+    }
+
+    Value parseArray() {
+        take('['); auto out = makeGCList(); ws();
+        if (take(']')) return out;
+        for (;;) {
+            out->items.push_back(parseValue()); ws();
+            if (take(']')) return out;
+            if (!take(',')) fail("expected ',' or ']'");
+            ws(); if (p < s.size() && s[p] == ']') fail("trailing comma in array");
+        }
+    }
+
+    Value parseObject() {
+        take('{'); auto out = makeGCMap(); ws();
+        if (take('}')) return out;
+        for (;;) {
+            ws(); if (p >= s.size() || s[p] != '"') fail("object key must be string");
+            Value k = parseString(); if (!take(':')) fail("expected ':'");
+            Value v = parseValue(); out->entries.emplace_back(k, v); ws();
+            if (take('}')) return out;
+            if (!take(',')) fail("expected ',' or '}'");
+            ws(); if (p < s.size() && s[p] == '}') fail("trailing comma in object");
+        }
+    }
+public:
+    explicit JsonParser(const std::string& x): s(x) {}
+    Value parse() { Value v = parseValue(); ws(); if (p != s.size()) fail("trailing characters"); return v; }
+};
+std::string jsonEscape(const std::string& s) {
+    std::string o = "\"";
+    static constexpr char hex[] = "0123456789abcdef";
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"': o += "\\\""; break;
+            case '\\': o += "\\\\"; break;
+            case '\b': o += "\\b"; break;
+            case '\f': o += "\\f"; break;
+            case '\n': o += "\\n"; break;
+            case '\r': o += "\\r"; break;
+            case '\t': o += "\\t"; break;
+            default:
+                if (c < 0x20u) {
+                    o += "\\u00";
+                    o.push_back(hex[c >> 4]);
+                    o.push_back(hex[c & 0x0F]);
+                } else {
+                    o.push_back(static_cast<char>(c));
+                }
+        }
+    }
+    return o + "\"";
+}
+std::string toJson(const Value& v) {
+    if (std::holds_alternative<std::monostate>(v)) return "null";
+    if (auto p = std::get_if<bool>(&v)) return *p ? "true" : "false";
+    if (auto p = std::get_if<std::int64_t>(&v)) return std::to_string(*p);
+    if (auto p = std::get_if<double>(&v)) {
+        if (!std::isfinite(*p)) throw std::runtime_error("Serialize.encode: non-finite number");
+        std::ostringstream o;
+        o << std::setprecision(17) << *p;
+        return o.str();
+    }
+    if (auto p = std::get_if<std::string>(&v)) return jsonEscape(*p);
+    if (auto p = std::get_if<ListRef>(&v)) {
+        std::string o = "[";
+        for (std::size_t i = 0; i < (*p)->items.size(); ++i) {
+            if (i) o += ",";
+            o += toJson((*p)->items[i]);
+        }
+        return o + "]";
+    }
+    if (auto p = std::get_if<MapRef>(&v)) {
+        std::string o = "{";
+        for (std::size_t i = 0; i < (*p)->entries.size(); ++i) {
+            if (i) o += ",";
+            auto& e = (*p)->entries[i];
+            if (!std::holds_alternative<std::string>(e.first))
+                throw std::runtime_error("Serialize.encode: object keys must be strings");
+            o += jsonEscape(std::get<std::string>(e.first)) + ":" + toJson(e.second);
+        }
+        return o + "}";
+    }
+    if (auto p = std::get_if<ObjectRef>(&v)) {
+        std::string o = "{";
+        bool first = true;
+        for (auto& e : (*p)->fields) {
+            if (!first) o += ",";
+            first = false;
+            o += jsonEscape(e.first) + ":" + toJson(e.second);
+        }
+        return o + "}";
+    }
+    throw std::runtime_error("Serialize.encode: unsupported value");
+}
+Value serializeEncode(const std::vector<Value>& args){return toJson(args[0]);}
+Value serializeDecode(const std::vector<Value>& args){return JsonParser(requireString(args[0],"Serialize.decode")).parse();}
+Value serializeAsString(const std::vector<Value>& args){if(!std::holds_alternative<std::string>(args[0]))throw std::runtime_error("Serialize.asString: expected string");return std::get<std::string>(args[0]);}
+Value serializeAsInt(const std::vector<Value>& args){if(!std::holds_alternative<std::int64_t>(args[0]))throw std::runtime_error("Serialize.asInt: expected int");return std::get<std::int64_t>(args[0]);}
+Value serializeAsDouble(const std::vector<Value>& args){if(std::holds_alternative<std::int64_t>(args[0]))return static_cast<double>(std::get<std::int64_t>(args[0]));if(!std::holds_alternative<double>(args[0]))throw std::runtime_error("Serialize.asDouble: expected number");return std::get<double>(args[0]);}
+Value serializeAsBool(const std::vector<Value>& args){if(!std::holds_alternative<bool>(args[0]))throw std::runtime_error("Serialize.asBool: expected bool");return std::get<bool>(args[0]);}
+
+// --- Checksums / hashes ---
+std::uint32_t crc32(const std::string& s){std::uint32_t crc=0xFFFFFFFFu;for(unsigned char c:s){crc^=c;for(int i=0;i<8;++i)crc=(crc>>1)^((crc&1)?0xEDB88320u:0);}return ~crc;}
+std::string hex32(std::uint32_t x){std::ostringstream o;o<<std::hex<<std::setw(8)<<std::setfill('0')<<x;return o.str();}
+Value cryptoCrc32(const std::vector<Value>& args){return hex32(crc32(requireString(args[0],"Crypto.crc32")));}
+
+// Compact SHA-256 implementation; this is a native primitive, not a ZL
+// reimplementation, and exposes only the stable digest API to ZL.
+std::string sha256(const std::string& in){
+    static const std::uint32_t K[64]={0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};std::uint32_t h[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};std::vector<std::uint8_t> d(in.begin(),in.end());std::uint64_t bits=(std::uint64_t)d.size()*8;d.push_back(0x80);while(d.size()%64!=56)d.push_back(0);for(int i=7;i>=0;--i)d.push_back((bits>>(i*8))&255);auto R=[](std::uint32_t x,int n){return (x>>n)|(x<<(32-n));};for(std::size_t off=0;off<d.size();off+=64){std::uint32_t w[64]{};for(int i=0;i<16;++i)w[i]=(d[off+i*4]<<24)|(d[off+i*4+1]<<16)|(d[off+i*4+2]<<8)|d[off+i*4+3];for(int i=16;i<64;++i){auto s0=R(w[i-15],7)^R(w[i-15],18)^(w[i-15]>>3);auto s1=R(w[i-2],17)^R(w[i-2],19)^(w[i-2]>>10);w[i]=w[i-16]+s0+w[i-7]+s1;}std::uint32_t a=h[0],b=h[1],c=h[2],e=h[4],f=h[5],g=h[6],hh=h[7],dd=h[3];for(int i=0;i<64;++i){auto S1=R(e,6)^R(e,11)^R(e,25);auto ch=(e&f)^((~e)&g);auto t1=hh+S1+ch+K[i]+w[i];auto S0=R(a,2)^R(a,13)^R(a,22);auto maj=(a&b)^(a&c)^(b&c);auto t2=S0+maj;hh=g;g=f;f=e;e=dd+t1;dd=c;c=b;b=a;a=t1+t2;}h[0]+=a;h[1]+=b;h[2]+=c;h[3]+=dd;h[4]+=e;h[5]+=f;h[6]+=g;h[7]+=hh;}std::ostringstream o;o<<std::hex<<std::setfill('0');for(auto x:h)o<<std::setw(8)<<x;return o.str();}
+Value cryptoSha256(const std::vector<Value>& args){return sha256(requireString(args[0],"Crypto.sha256"));}
+Value hashCode(const std::vector<Value>& args){ return valueHashCode(args[0]); }
+
+// --- System ---
+
+Value sysExit(const std::vector<Value>& args) {
+    throw SystemExitException{static_cast<int>(toInt64Strict(args[0]))};
+}
+
+Value sysGetEnv(const std::vector<Value>& args) {
+    const std::string& name = requireString(args[0], "System.getEnv");
+    const char* val = std::getenv(name.c_str());
+    if (!val) return Value{}; // nil if not set
+    return std::string(val);
+}
+
+// Runs `command` through the shell and captures its stdout. Deliberately
+// broad (the person explicitly asked for this) - there's no sandboxing here,
+// same as Python's os.system or Java's ProcessBuilder.
+Value sysExec(const std::vector<Value>& args) {
+    const std::string& command = requireString(args[0], "System.exec");
+    std::array<char, 256> buffer{};
+    std::string result;
+    FILE* pipe = popen(command.c_str(), "r");
+    if (!pipe) throw std::runtime_error("System.exec: failed to start \"" + command + "\"");
+    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+        result += buffer.data();
+    }
+    pclose(pipe);
+    return result;
+}
+
+
+Value reflectionFunctionInvoke(const std::vector<Value>& args) {
+    if (!g_currentNativeVm) throw std::runtime_error("Reflection.functionInvoke: no active VM");
+    if (args.size() != 2) throw std::runtime_error("Reflection.functionInvoke: expected function and args");
+    return g_currentNativeVm->invokeReflectiveFunction(args[0], args[1]);
+}
+
+Value reflectionMethodInvoke(const std::vector<Value>& args) {
+    if (!g_currentNativeVm) throw std::runtime_error("Reflection.methodInvoke: no active VM");
+    if (args.size() != 3) throw std::runtime_error("Reflection.methodInvoke: expected method, receiver, args");
+    return g_currentNativeVm->invokeReflectiveMethod(args[0], args[1], args[2]);
+}
+
+Value reflectionConstructorInvoke(const std::vector<Value>& args) {
+    if (!g_currentNativeVm) throw std::runtime_error("Reflection.constructorInvoke: no active VM");
+    if (args.size() != 2) throw std::runtime_error("Reflection.constructorInvoke: expected constructor, args");
+    return g_currentNativeVm->invokeReflectiveConstructor(args[0], args[1]);
+}
+
+std::vector<NativeFunction> buildTable() {
+    // Callback bindings carry explicit NativeId values. The catalog supplies
+    // language metadata; the table supplies only the VM implementations.
+    // Binding no longer depends on the two tables having matching positions.
+        static const std::vector<std::pair<NativeId, std::function<Value(const std::vector<Value>&)>>> callbacks = {
+        std::pair{NativeId::TYPE_NAME, typeName},
+        std::pair{NativeId::TYPE_FIELDS, typeFields},
+        std::pair{NativeId::TYPE_METHODS, typeMethods},
+        std::pair{NativeId::TYPE_BASE, typeBase},
+        std::pair{NativeId::TYPE_CALLABLE, typeCallable},
+        std::pair{NativeId::MATH_SQRT, mathSqrt},
+        std::pair{NativeId::MATH_ABS, mathAbs},
+        std::pair{NativeId::MATH_POW, mathPow},
+        std::pair{NativeId::MATH_FLOOR, mathFloor},
+        std::pair{NativeId::MATH_CEIL, mathCeil},
+        std::pair{NativeId::MATH_ROUND, mathRound},
+        std::pair{NativeId::MATH_MIN, mathMin},
+        std::pair{NativeId::MATH_MAX, mathMax},
+        std::pair{NativeId::MATH_CBRT, mathCbrt},
+        std::pair{NativeId::MATH_TRUNC, mathTrunc},
+        std::pair{NativeId::MATH_SIN, mathSin},
+        std::pair{NativeId::MATH_COS, mathCos},
+        std::pair{NativeId::MATH_TAN, mathTan},
+        std::pair{NativeId::MATH_ASIN, mathAsin},
+        std::pair{NativeId::MATH_ACOS, mathAcos},
+        std::pair{NativeId::MATH_ATAN, mathAtan},
+        std::pair{NativeId::MATH_ATAN2, mathAtan2},
+        std::pair{NativeId::MATH_LOG, mathLog},
+        std::pair{NativeId::MATH_LOG10, mathLog10},
+        std::pair{NativeId::MATH_EXP, mathExp},
+        std::pair{NativeId::MATH_RANDOM, mathRandom},
+        std::pair{NativeId::MATH_RANDOMINT, mathRandomInt},
+        std::pair{NativeId::MATH_RANDOMFLOAT, mathRandomFloat},
+        std::pair{NativeId::IO_PRINT, ioPrint},
+        std::pair{NativeId::IO_PRINTLN, ioPrintln},
+        std::pair{NativeId::IO_READLINE, ioReadLine},
+        std::pair{NativeId::IO_CLEAR, ioClear},
+        std::pair{NativeId::COLLECTION_NEWLIST, collNewList},
+        std::pair{NativeId::COLLECTION_PUSH, collPush},
+        std::pair{NativeId::COLLECTION_POP, collPop},
+        std::pair{NativeId::COLLECTION_GET, collGet},
+        std::pair{NativeId::COLLECTION_SET, collSet},
+        std::pair{NativeId::COLLECTION_LENGTH, collLength},
+        std::pair{NativeId::COLLECTION_NEWMAP, collNewMap},
+        std::pair{NativeId::COLLECTION_MAPSET, collMapSet},
+        std::pair{NativeId::COLLECTION_MAPGET, collMapGet},
+        std::pair{NativeId::COLLECTION_MAPHAS, collMapHas},
+        std::pair{NativeId::COLLECTION_MAPREMOVE, collMapRemove},
+        std::pair{NativeId::COLLECTION_MAPKEYS, collMapKeys},
+        std::pair{NativeId::COLLECTION_MAPVALUES, collMapValues},
+        std::pair{NativeId::COLLECTION_NEWSET, collNewSet},
+        std::pair{NativeId::COLLECTION_SETADD, collSetAdd},
+        std::pair{NativeId::COLLECTION_SETHAS, collSetHas},
+        std::pair{NativeId::COLLECTION_SETREMOVE, collSetRemove},
+        std::pair{NativeId::COLLECTION_SETITEMS, collSetItems},
+        std::pair{NativeId::QUEUE_NEWQUEUE, queueNew},
+        std::pair{NativeId::QUEUE_ENQUEUE, queueEnqueue},
+        std::pair{NativeId::QUEUE_DEQUEUE, queueDequeue},
+        std::pair{NativeId::QUEUE_PEEK, queuePeek},
+        std::pair{NativeId::QUEUE_ISEMPTY, queueIsEmpty},
+        std::pair{NativeId::QUEUE_SIZE, queueSize},
+        std::pair{NativeId::STACK_NEWSTACK, stackNew},
+        std::pair{NativeId::STACK_PUSH, stackPush},
+        std::pair{NativeId::STACK_POP, stackPop},
+        std::pair{NativeId::STACK_PEEK, stackPeek},
+        std::pair{NativeId::STACK_ISEMPTY, stackIsEmpty},
+        std::pair{NativeId::STACK_SIZE, stackSize},
+        std::pair{NativeId::STRING_LENGTH, strLength},
+        std::pair{NativeId::STRING_UPPER, strUpper},
+        std::pair{NativeId::STRING_LOWER, strLower},
+        std::pair{NativeId::STRING_TRIM, strTrim},
+        std::pair{NativeId::STRING_CONTAINS, strContains},
+        std::pair{NativeId::STRING_INDEXOF, strIndexOf},
+        std::pair{NativeId::STRING_CHARAT, strCharAt},
+        std::pair{NativeId::STRING_SUBSTRING, strSubstring},
+        std::pair{NativeId::STRING_REPLACE, strReplace},
+        std::pair{NativeId::STRING_SPLIT, strSplit},
+        std::pair{NativeId::STRING_TOINT, strToInt},
+        std::pair{NativeId::STRING_TOFLOAT, strToFloat},
+        std::pair{NativeId::STRING_REGEXMATCHES, textRegexMatches},
+        std::pair{NativeId::STRING_REGEXFULLMATCHES, textRegexFullMatches},
+        std::pair{NativeId::STRING_REGEXFINDALL, textRegexFindAll},
+        std::pair{NativeId::STRING_REGEXREPLACE, textRegexReplace},
+        std::pair{NativeId::STRING_REGEXFIND, textRegexFind},
+        std::pair{NativeId::STRING_REGEXFINDMATCHES, textRegexFindMatches},
+        std::pair{NativeId::FILESYSTEM_READFILE, fsReadFile},
+        std::pair{NativeId::FILESYSTEM_WRITEFILE, fsWriteFile},
+        std::pair{NativeId::FILESYSTEM_APPENDFILE, fsAppendFile},
+        std::pair{NativeId::FILESYSTEM_EXISTS, fsExists},
+        std::pair{NativeId::FILESYSTEM_DELETEFILE, fsDeleteFile},
+        std::pair{NativeId::FILESYSTEM_LISTDIR, fsListDir},
+        std::pair{NativeId::NETWORK_RESOLVE, networkResolve},
+        std::pair{NativeId::TIME_NOW, timeNow},
+        std::pair{NativeId::TIME_NOWMILLIS, timeNowMillis},
+        std::pair{NativeId::TIME_SLEEP, timeSleep},
+        std::pair{NativeId::TIME_SLEEP_ASYNC, timeSleepAsync},
+        std::pair{NativeId::TIME_YEAR, timeYear},
+        std::pair{NativeId::TIME_MONTH, timeMonth},
+        std::pair{NativeId::TIME_DAY, timeDay},
+        std::pair{NativeId::TIME_HOUR, timeHour},
+        std::pair{NativeId::TIME_MINUTE, timeMinute},
+        std::pair{NativeId::TIME_SECOND, timeSecond},
+        std::pair{NativeId::TIME_FORMAT, timeFormat},
+        std::pair{NativeId::THREAD_START, threadStart},
+        std::pair{NativeId::THREAD_JOIN, threadJoin},
+        std::pair{NativeId::THREAD_ISALIVE, threadIsAlive},
+        std::pair{NativeId::TASK_SPAWN, taskSpawn},
+        std::pair{NativeId::MUTEX_WITHLOCK, mutexWithLock},
+        std::pair{NativeId::RWLOCK_WITHREAD, rwLockWithRead},
+        std::pair{NativeId::RWLOCK_WITHWRITE, rwLockWithWrite},
+        std::pair{NativeId::ATOMIC_LOAD, atomicLoad},
+        std::pair{NativeId::ATOMIC_STORE, atomicStore},
+        std::pair{NativeId::ATOMIC_ADD, atomicAdd},
+        std::pair{NativeId::ATOMIC_LOAD_BOOL, atomicLoadBool},
+        std::pair{NativeId::ATOMIC_STORE_BOOL, atomicStoreBool},
+        std::pair{NativeId::ATOMIC_LOAD_DOUBLE, atomicLoadDouble},
+        std::pair{NativeId::ATOMIC_STORE_DOUBLE, atomicStoreDouble},
+        std::pair{NativeId::ATOMIC_LOAD_REF, atomicLoadRef},
+        std::pair{NativeId::ATOMIC_STORE_REF, atomicStoreRef},
+        std::pair{NativeId::SEMAPHORE_ACQUIRE, semaphoreAcquire},
+        std::pair{NativeId::SEMAPHORE_RELEASE, semaphoreRelease},
+        std::pair{NativeId::SEMAPHORE_AVAILABLE, semaphoreAvailable},
+        std::pair{NativeId::CONDITION_WAIT, conditionWait},
+        std::pair{NativeId::CONDITION_NOTIFYONE, conditionNotifyOne},
+        std::pair{NativeId::CONDITION_NOTIFYALL, conditionNotifyAll},
+        std::pair{NativeId::CHANNEL_CREATE, channelCreate},
+        std::pair{NativeId::CHANNEL_SEND, channelSend},
+        std::pair{NativeId::CHANNEL_RECEIVE, channelReceive},
+        std::pair{NativeId::CHANNEL_SIZE, channelSize},
+        std::pair{NativeId::CHANNEL_SEND_ASYNC, channelSendAsync},
+        std::pair{NativeId::CHANNEL_RECEIVE_ASYNC, channelReceiveAsync},
+        std::pair{NativeId::TEST_FAIL, testFail},
+        std::pair{NativeId::TEST_ASSERTTRUE, testAssertTrue},
+        std::pair{NativeId::TEST_ASSERTFALSE, testAssertFalse},
+        std::pair{NativeId::TEST_ASSERTEQUAL, testAssertEqual},
+        std::pair{NativeId::TEST_ASSERTNOTEQUAL, testAssertNotEqual},
+        std::pair{NativeId::TEST_ASSERTNEAR, testAssertNear},
+        std::pair{NativeId::LOG_INFO, logInfo},
+        std::pair{NativeId::LOG_WARN, logWarn},
+        std::pair{NativeId::LOG_ERROR, logError},
+        std::pair{NativeId::TEXT_FORMAT, textFormat},
+        std::pair{NativeId::TEXT_REGEXMATCHES, textRegexMatches},
+        std::pair{NativeId::TEXT_REGEXFULLMATCHES, textRegexFullMatches},
+        std::pair{NativeId::TEXT_REGEXFINDALL, textRegexFindAll},
+        std::pair{NativeId::TEXT_REGEXREPLACE, textRegexReplace},
+        std::pair{NativeId::SERIALIZE_ENCODE, serializeEncode},
+        std::pair{NativeId::SERIALIZE_DECODE, serializeDecode},
+        std::pair{NativeId::SERIALIZE_ASSTRING, serializeAsString},
+        std::pair{NativeId::SERIALIZE_ASINT, serializeAsInt},
+        std::pair{NativeId::SERIALIZE_ASDOUBLE, serializeAsDouble},
+        std::pair{NativeId::SERIALIZE_ASBOOL, serializeAsBool},
+        std::pair{NativeId::CRYPTO_CRC32, cryptoCrc32},
+        std::pair{NativeId::CRYPTO_SHA256, cryptoSha256},
+        std::pair{NativeId::HASH_CODE, hashCode},
+        std::pair{NativeId::SYSTEM_EXIT, sysExit},
+        std::pair{NativeId::SYSTEM_GETENV, sysGetEnv},
+        std::pair{NativeId::SYSTEM_EXEC, sysExec},
+        std::pair{NativeId::INT_PARSE, intParse},
+        std::pair{NativeId::DOUBLE_PARSE, doubleParse},
+        std::pair{NativeId::BOOL_PARSE, boolParse},
+        std::pair{NativeId::SHARED_SHARE, sharedShare},
+        std::pair{NativeId::SHARED_GET, std::function<Value(const std::vector<Value>&)>{sharedGet}},
+        std::pair{NativeId::SHARED_SET, std::function<Value(const std::vector<Value>&)>{sharedSet}},
+        std::pair{NativeId::SHARED_WITHLOCK, std::function<Value(const std::vector<Value>&)>{sharedWithLock}},
+        std::pair{NativeId::TYPE_OF, typeOf},
+        std::pair{NativeId::TYPE_KIND, typeKind},
+        std::pair{NativeId::TYPE_IS_DATA, typeIsData},
+        std::pair{NativeId::TYPE_IS_ENUM, typeIsEnum},
+        std::pair{NativeId::TYPE_ENUM_MEMBERS, typeEnumMembers},
+        std::pair{NativeId::REFLECTION_NAME, reflectionName},
+        std::pair{NativeId::REFLECTION_KIND, reflectionKind},
+        std::pair{NativeId::REFLECTION_IS_DATA, reflectionIsData},
+        std::pair{NativeId::REFLECTION_IS_ENUM, reflectionIsEnum},
+        std::pair{NativeId::REFLECTION_ENUM_MEMBERS, reflectionEnumMembers},
+        std::pair{NativeId::REFLECTION_FIELDS, reflectionFields},
+        std::pair{NativeId::REFLECTION_METHODS, reflectionMethods},
+        std::pair{NativeId::REFLECTION_BASE, reflectionBase},
+        std::pair{NativeId::REFLECTION_INTERFACES, reflectionInterfaces},
+        std::pair{NativeId::REFLECTION_TYPE_PARAMETERS, reflectionTypeParameters},
+        std::pair{NativeId::REFLECTION_FIELD_NAME, reflectionFieldName},
+        std::pair{NativeId::REFLECTION_FIELD_TYPE, reflectionFieldType},
+        std::pair{NativeId::REFLECTION_FIELD_ACCESS, reflectionFieldAccess},
+        std::pair{NativeId::REFLECTION_METHOD_NAME, reflectionMethodName},
+        std::pair{NativeId::REFLECTION_METHOD_RETURN_TYPE, reflectionMethodReturnType},
+        std::pair{NativeId::REFLECTION_METHOD_ACCESS, reflectionMethodAccess},
+        std::pair{NativeId::REFLECTION_METHOD_STATIC, reflectionMethodIsStatic},
+        std::pair{NativeId::REFLECTION_METHOD_ASYNC, reflectionMethodIsAsync},
+        std::pair{NativeId::REFLECTION_METHOD_PARAMETERS, reflectionMethodParameters},
+        std::pair{NativeId::REFLECTION_FUNCTION, reflectionFunction},
+        std::pair{NativeId::REFLECTION_FUNCTION_NAME, reflectionFunctionName},
+        std::pair{NativeId::REFLECTION_FUNCTION_PARAMETERS, reflectionFunctionParameters},
+        std::pair{NativeId::REFLECTION_FUNCTION_RETURN_TYPE, reflectionFunctionReturnType},
+        std::pair{NativeId::REFLECTION_FUNCTION_ASYNC, reflectionFunctionIsAsync},
+        std::pair{NativeId::REFLECTION_FUNCTION_IS_NATIVE, reflectionFunctionIsNative},
+        std::pair{NativeId::REFLECTION_FUNCTION_INVOKE, reflectionFunctionInvoke},
+        std::pair{NativeId::REFLECTION_TYPE_CONSTRUCTORS, reflectionTypeConstructors},
+        std::pair{NativeId::REFLECTION_CONSTRUCTOR_PARAMETERS, reflectionConstructorParameters},
+        std::pair{NativeId::REFLECTION_FIELD, reflectionField},
+        std::pair{NativeId::REFLECTION_METHOD, reflectionMethod},
+        std::pair{NativeId::REFLECTION_CONSTRUCTOR, reflectionConstructor},
+        std::pair{NativeId::REFLECTION_METHOD_INVOKE, reflectionMethodInvoke},
+        std::pair{NativeId::REFLECTION_CONSTRUCTOR_INVOKE, reflectionConstructorInvoke},
+    };
+
+    const auto& signatures = nativeSignatureTable();
+    std::vector<std::pair<NativeId, std::function<Value(const std::vector<Value>&)>>> callbackById;
+    callbackById.reserve(callbacks.size());
+    for (const auto& [id, callback] : callbacks) {
+        const auto duplicate = std::find_if(callbackById.begin(), callbackById.end(), [id](const auto& entry) { return entry.first == id; });
+        if (duplicate != callbackById.end()) throw std::logic_error("duplicate native callback id");
+        callbackById.emplace_back(id, callback);
+    }
+
+    std::vector<NativeFunction> table;
+    table.reserve(signatures.size());
+    for (const auto& signature : signatures) {
+        const auto it = std::find_if(callbackById.begin(), callbackById.end(), [&signature](const auto& entry) { return entry.first == signature.id; });
+        if (it == callbackById.end()) {
+            throw std::logic_error("native catalog entry has no callback: '" + signature.qualifiedName + "'");
+        }
+        table.push_back(NativeFunction{signature.id, signature.qualifiedName, it->second});
+    }
+    if (callbackById.size() != signatures.size()) {
+        throw std::logic_error("native callback catalog mismatch");
+    }
+    return table;
+}
+
+} // namespace
+
+std::vector<NativeFunction>& mutableNativeFunctionTable() {
+    static std::vector<NativeFunction> table = buildTable();
+    return table;
+}
+
+NativeFunctionRegistrar::NativeFunctionRegistrar(std::vector<NativeFunction> functions) {
+    auto& table = mutableNativeFunctionTable();
+    table.insert(table.end(), std::make_move_iterator(functions.begin()), std::make_move_iterator(functions.end()));
+}
+
+const std::vector<NativeFunction>& nativeFunctionTable() {
+    return mutableNativeFunctionTable();
+}
+
+std::optional<std::size_t> findNativeFunction(NativeId id) {
+    const auto& table = nativeFunctionTable();
+    for (std::size_t i = 0; i < table.size(); ++i) {
+        if (table[i].id == id) return i;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::size_t> findNativeFunction(const std::string& qualifiedName) {
+    const auto signature = findNativeSignature(qualifiedName);
+    if (!signature) return std::nullopt;
+    return findNativeFunction((*signature)->id);
+}
+
+} // namespace zl

@@ -1,0 +1,13 @@
+// zl.util.Queue - FIFO queue API (native storage primitive).
+//
+// This file exists so `import zl.util.Queue` resolves to a real file, same
+// as any user-defined package - the module loader doesn't special-case
+// stdlib packages at the resolver level. The actual Queue.* functions are
+// natives implemented in native.cpp; this class body is intentionally
+// empty since native calls (Namespace.method(...)) are resolved by
+// qualified-name lookup against the native table, not by looking at any
+// class's declared members.
+class Queue {
+    // FIFO reference package: native storage is intentionally hidden behind this API.
+    // API: newQueue, enqueue, dequeue, peek, isEmpty, size.
+}

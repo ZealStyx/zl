@@ -1,0 +1,3 @@
+// zl.net.Network - portable DNS/network discovery facade.
+class Network {
+}

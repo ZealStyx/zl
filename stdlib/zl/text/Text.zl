@@ -1,0 +1,47 @@
+// zl.text.Text - ZL-owned text convenience API.
+// String.* remains the small native string primitive boundary.
+class Text {
+    public static func length(string value): int { return String.length(value) }
+    public static func upper(string value): string { return String.upper(value) }
+    public static func lower(string value): string { return String.lower(value) }
+    public static func trim(string value): string { return String.trim(value) }
+    public static func isBlank(string value): bool { return String.trim(value) == "" }
+    public static func repeatText(string value, int count): string {
+        if count < 0 { throw new Exception("Text.repeat count must be non-negative") }
+        var result = ""
+        var i = 0
+        while i < count {
+            result = result + value
+            i = i + 1
+        }
+        return result
+    }
+    public static func contains(string value, string needle): bool { return String.contains(value, needle) }
+    public static func indexOf(string value, string needle): int { return String.indexOf(value, needle) }
+    public static func charAt(string value, int index): string { return String.charAt(value, index) }
+    public static func substring(string value, int start, int length): string { return String.substring(value, start, length) }
+    public static func replace(string value, string from, string to): string { return String.replace(value, from, to) }
+    public static func toInt(string value): int { return String.toInt(value) }
+    public static func toFloat(string value): double { return String.toFloat(value) }
+
+    public static func startsWith(string value, string prefix): bool {
+        if (String.length(prefix) > String.length(value)) { return false }
+        return String.substring(value, 0, String.length(prefix)) == prefix
+    }
+
+    public static func endsWith(string value, string suffix): bool {
+        var suffixLength = String.length(suffix)
+        var valueLength = String.length(value)
+        if (suffixLength > valueLength) { return false }
+        return String.substring(value, valueLength - suffixLength, valueLength) == suffix
+    }
+
+    public static func join(List<string> parts, string separator): string {
+        var result = ""
+        for i in 0..parts.length() {
+            if (i > 0) { result = result + separator }
+            result = result + parts.get(i)
+        }
+        return result
+    }
+}

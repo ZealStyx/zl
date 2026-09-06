@@ -1,0 +1,6 @@
+// zl.lang.Thread - explicit OS-thread facade.
+class Thread {
+    public static func startThread(func work): Thread { return Thread.start(work) }
+    public static func wait(Thread thread): void { Thread.join(thread) }
+    public static func running(Thread thread): bool { return Thread.isAlive(thread) }
+}

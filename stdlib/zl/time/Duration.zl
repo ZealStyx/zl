@@ -1,0 +1,10 @@
+// zl.time.Duration - integer millisecond duration.
+class Duration {
+    public int millis
+    func Duration(int millis): void { this.millis = millis }
+    public func seconds(): double { return this.millis / 1000.0 }
+    public func minutes(): double { return this.millis / 60000.0 }
+    public func hours(): double { return this.millis / 3600000.0 }
+    public func add(Duration other): Duration { return new Duration(this.millis + other.millis) }
+    public func subtract(Duration other): Duration { return new Duration(this.millis - other.millis) }
+}

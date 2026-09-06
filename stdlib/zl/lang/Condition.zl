@@ -1,0 +1,3 @@
+// Low-level condition-variable coordination primitive.
+class Condition {
+}

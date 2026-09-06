@@ -1,0 +1,14 @@
+// zl.test.Test - assertion API.
+class Test {
+    public func assertThrows(func action): void {
+        var threw = false
+        try {
+            action()
+        } catch e {
+            threw = true
+        }
+        if (!threw) {
+            throw new Exception("Test.assertThrows failed: expected callable to throw")
+        }
+    }
+}

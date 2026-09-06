@@ -1,0 +1,6 @@
+// zl.lang.Task - CPU task runtime surface.
+// Task values are created by Task.spawn and completed/awaited by the runtime.
+// Complex Task<T> typing remains on the native primitive so generic result types
+// are preserved exactly.
+class Task {
+}
