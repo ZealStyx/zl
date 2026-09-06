@@ -1,0 +1,41 @@
+// ============================================================================
+// ZL Examples - Intermediate - Modules and Imports
+//
+// Imports are Java-style dotted names, and they resolve to files: `import
+// zl.text.Text` loads `zl/text/Text.zl` from a module root.
+//
+//   * `zl.lang` is auto-imported everywhere - Math, String, IO, Collection,
+//     Time, System, and the Int/Double/Bool parsers need no import statement.
+//   * Everything else needs an explicit import.
+//   * A bare `import Greeter` resolves against the importing file's own
+//     directory first, then the roots passed with `--root`.
+//
+// See _lib/Greeter.zl for the imported class.
+// ============================================================================
+
+import zl.text.Text
+import Greeter
+
+class Modules {
+    func main(): void {
+        // zl.lang needs no import at all.
+        log(String.upper("auto-imported"))
+        log(Math.abs(-7))
+
+        // A package import, spelled as a dotted path.
+        log(Text.startsWith("hello", "he"))
+
+        // A local module resolved from this file's directory.
+        var g = new Greeter("Hello")
+        log(g.greet("Ada"))
+        log(Greeter.banner())
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// AUTO-IMPORTED
+// 7
+// true
+// Hello, Ada
+// == Greeter ==
+// --- End expected output ---

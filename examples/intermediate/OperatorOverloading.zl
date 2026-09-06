@@ -1,0 +1,37 @@
+// ============================================================================
+// ZL Examples - Intermediate - Operator Overloading
+//
+// A class declares its own operators with the `operator` keyword, using normal
+// method syntax. Operators take part in ordinary overload resolution, are
+// public by default, and may be marked `private` or `protected`.
+//
+// Arithmetic, comparison, bitwise, shift and the unary + - ! ~ forms are all
+// supported. Built-in operators remain the fallback for primitives.
+// ============================================================================
+
+import Money
+
+class OperatorOverloading {
+    func main(): void {
+        var a = new Money(100)
+        var b = new Money(250)
+
+        var sum = a + b
+        log(sum.cents)
+        log(sum.toString())
+
+        var diff = b - a
+        log(diff.cents)
+
+        log(a == new Money(100))
+        log(a == b)
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 350
+// Money(350)
+// 150
+// true
+// false
+// --- End expected output ---

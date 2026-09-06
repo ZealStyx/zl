@@ -1,0 +1,53 @@
+// ============================================================================
+// ZL Examples - Intermediate - Records (data)
+//
+// `data` declares a named record of typed public fields. Unlike a class, a
+// record is value-oriented and immutable after construction.
+//
+// The literal must name every field exactly once - an unknown, missing, or
+// duplicated field is a compile-time error.
+//
+// Records compare STRUCTURALLY: two records of the same type with equal fields
+// are `==`, which is why `a == b` is true below even though they are distinct
+// objects.
+// ============================================================================
+
+data Point {
+    x: int
+    y: int
+}
+
+data Labelled {
+    point: Point
+    label: string
+}
+
+class DataRecords {
+    func main(): void {
+        var a = Point { x: 10, y: 20 }
+        var b = Point { x: 10, y: 20 }
+        var c = Point { x: 10, y: 21 }
+
+        log(a.x)
+        log(a.y)
+        log(a == b)
+        log(a == c)
+
+        // Records nest, and structural equality reaches through the nesting.
+        var l1 = Labelled { point: Point { x: 1, y: 2 }, label: "origin-ish" }
+        var l2 = Labelled { point: Point { x: 1, y: 2 }, label: "origin-ish" }
+        log(l1 == l2)
+        log(l1.label)
+        log(l1.point.x)
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 10
+// 20
+// true
+// false
+// true
+// origin-ish
+// 1
+// --- End expected output ---

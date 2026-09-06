@@ -1,0 +1,50 @@
+// ============================================================================
+// ZL Examples - Advanced - zl.fs.FileSystem
+//
+// `FileSystem.*` is the OS boundary; the zl.fs package adds convenience
+// wrappers. The primitives are auto-imported, so no import is strictly needed.
+//
+//   FileSystem.readFile(path) / writeFile(path, text) / appendFile(path, text)
+//   FileSystem.exists(path) / deleteFile(path) / listDir(path)
+//   FileSystem.readText / writeText / appendText / fileExists   (package aliases)
+//   FileSystem.readOr(path, fallback)    read, or return a default on failure
+//
+// There is no temp-directory helper (`System` exposes only exit, getEnv and
+// exec), so the example writes a fixed file in the working directory and
+// removes it again - running it leaves nothing behind.
+// ============================================================================
+
+import zl.fs.FileSystem
+
+class FileSystemLib {
+    func main(): void {
+        var path = "zl_filesystem_example.txt"
+
+        log("exists before: " + FileSystem.exists(path))
+
+        FileSystem.writeFile(path, "first line")
+        log("exists after write: " + FileSystem.exists(path))
+        log("content: " + FileSystem.readFile(path))
+
+        FileSystem.appendFile(path, " and more")
+        log("appended: " + FileSystem.readFile(path))
+
+        log("length: " + String.length(FileSystem.readFile(path)))
+
+        FileSystem.deleteFile(path)
+        log("exists after delete: " + FileSystem.exists(path))
+
+        // readOr turns a missing file into a value instead of an error.
+        log("fallback: " + FileSystem.readOr(path, "<nothing here>"))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// exists before: false
+// exists after write: true
+// content: first line
+// appended: first line and more
+// length: 19
+// exists after delete: false
+// fallback: <nothing here>
+// --- End expected output ---

@@ -1,0 +1,72 @@
+// ============================================================================
+// ZL Examples - Basics - Loops
+//
+// ZL has four loop forms. The `for` loop is a RANGE loop only - there is no
+// C-style `for (i = 0; i < n; i++)` and no `for x in collection`:
+//
+//     for i in start..end          // end is EXCLUSIVE
+//     for i in start..end step n   // optional stride
+//
+// To walk a collection you drive the index yourself, as shown below.
+//
+// `repeat { ... } while cond` is a do-while: the body always runs at least
+// once, and the condition is checked afterwards.
+// ============================================================================
+
+class Loops {
+    func main(): void {
+        for i in 0..3 {
+            log("count " + i)
+        }
+
+        for i in 0..10 step 3 {
+            log("step " + i)
+        }
+
+        var n = 0
+        while (n < 3) {
+            log("while " + n)
+            n = n + 1
+        }
+
+        var k = 0
+        repeat {
+            k = k + 1
+        } while (k < 3)
+        log("repeat stopped at " + k)
+
+        // break leaves the loop, continue skips to the next iteration.
+        var sum = 0
+        for i in 0..10 {
+            if (i == 2) { continue }
+            if (i == 5) { break }
+            sum = sum + i
+        }
+        log("sum " + sum)      // 0 + 1 + 3 + 4
+
+        // Walking a list by index.
+        var names = new List<string>()
+        names.push("Ada")
+        names.push("Grace")
+        for i in 0..names.length() {
+            log("name " + names.get(i))
+        }
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// count 0
+// count 1
+// count 2
+// step 0
+// step 3
+// step 6
+// step 9
+// while 0
+// while 1
+// while 2
+// repeat stopped at 3
+// sum 8
+// name Ada
+// name Grace
+// --- End expected output ---

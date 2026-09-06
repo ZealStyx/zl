@@ -1,0 +1,33 @@
+// ============================================================================
+// ZL Examples - Advanced - zl.logging.Log
+//
+// Three severity levels, each prefixed on output:
+//
+//   Log.info("...")     ->  [INFO] ...
+//   Log.warn("...")     ->  [WARN] ...
+//   Log.error("...")    ->  [ERROR] ...
+//
+// The package is `zl.logging`, not `zl.log`, because `log` is a reserved
+// keyword - the built-in `log(...)` used everywhere else in these examples is
+// that keyword.
+// ============================================================================
+
+import zl.logging.Log
+
+class LoggingLib {
+    func main(): void {
+        Log.info("server started")
+        Log.warn("cache miss")
+        Log.error("request failed")
+
+        var userId = 42
+        Log.info("processed user " + userId)
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// [INFO] server started
+// [WARN] cache miss
+// [ERROR] request failed
+// [INFO] processed user 42
+// --- End expected output ---

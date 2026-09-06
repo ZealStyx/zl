@@ -1,0 +1,38 @@
+// ============================================================================
+// ZL Examples - Intermediate - Inheritance
+//
+// `class Sub extends Base`. The subclass constructor calls the base
+// constructor with `super(...)`. Overriding a method is marked with the
+// `@Override` annotation, and dispatch is virtual: calling `describe()` on an
+// `Animal` that is really a `Dog` runs Dog's `speak()`.
+//
+// The base and subclass live in _lib/Animal.zl and _lib/Dog.zl, because each
+// .zl file may declare only one class.
+// ============================================================================
+
+import Animal
+import Dog
+
+class Inheritance {
+    func main(): void {
+        var a = new Animal("Generic")
+        log(a.describe())
+
+        var d = new Dog("Rex")
+        log(d.describe())
+        log(d.fetch())
+
+        // Virtual dispatch through a base-typed variable.
+        Animal masked = new Dog("Ada")
+        log(masked.describe())
+        log(masked.name)
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// Generic says ...
+// Rex says Woof
+// Rex fetches the ball
+// Ada says Woof
+// Ada
+// --- End expected output ---

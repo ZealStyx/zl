@@ -1,0 +1,67 @@
+// ============================================================================
+// ZL Examples - Advanced - zl.serialize (JSON)
+//
+// The JSON parser and encoder are native; `Serialize` is the ZL-facing facade.
+//
+//   Serialize.stringify(value)    encode to a JSON string
+//   Serialize.parse(text)         decode back into ZL values
+//   Serialize.number(n)           wrap a number
+//
+// Supported shapes: null, booleans, numbers, strings, lists/arrays, and
+// string-keyed maps/objects.
+//
+// Both collection spellings encode to the same JSON. The lowercase `map<K,V>` /
+// `list<T>` literals are native, and the generic `Map<K,V>` / `List<T>` classes
+// are wrappers around the same storage - the encoder looks through the wrapper
+// rather than printing its internals.
+// ============================================================================
+
+import zl.serialize.Serialize
+
+class JsonLib {
+    func main(): void {
+        log(Serialize.stringify(42))
+        log(Serialize.stringify(true))
+        log(Serialize.stringify("hi"))
+        log(Serialize.stringify([1, 2, 3]))
+
+        map<string, string> meta = {"name": "ZL", "kind": "language"}
+        log(Serialize.stringify(meta))
+
+        // Round-trip: encode, decode, read a field back out.
+        var json = Serialize.stringify(meta)
+        var decoded = Serialize.parse(json)
+        log(Serialize.stringify(decoded))
+
+        // Nested structures survive the round trip.
+        map<string, int> counts = {"files": 3, "errors": 0}
+        log(Serialize.stringify(counts))
+
+        // The generic collection classes encode identically.
+        var generic = new Map<string, string>()
+        generic.put("name", "ZL")
+        generic.put("kind", "language")
+        log(Serialize.stringify(generic))
+
+        var items = new List<int>()
+        items.push(1)
+        items.push(2)
+        items.push(3)
+        log(Serialize.stringify(items))
+
+        log(Serialize.number(7))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 42
+// true
+// "hi"
+// [1,2,3]
+// {"name":"ZL","kind":"language"}
+// {"name":"ZL","kind":"language"}
+// {"files":3,"errors":0}
+// {"name":"ZL","kind":"language"}
+// [1,2,3]
+// 7
+// --- End expected output ---

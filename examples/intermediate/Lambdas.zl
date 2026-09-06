@@ -1,0 +1,59 @@
+// ============================================================================
+// ZL Examples - Intermediate - Lambdas
+//
+// A lambda is an anonymous function VALUE: assignable to a variable, passable
+// as an argument, returnable from a function. It reuses the `func` keyword in
+// expression position.
+//
+// Two body forms:
+//     func(x) => x * x        expression body - `return` is implied
+//     func(x) { ... }         block body - an explicit `return` is required,
+//                             and falling off the end returns nil
+//
+// Parameters may be untyped (`x`) or typed (`int x`), using the same
+// `Type Name` order as named functions. `func` on its own is also a TYPE name
+// for a slot holding a function value.
+//
+// A lambda has NO return-type annotation: `func(int x): int => x` is a syntax
+// error. The parameter list is followed directly by `=>` or `{`.
+// ============================================================================
+
+class Lambdas {
+    static func applyTwice(func f, int x): int {
+        return f(f(x))
+    }
+
+    static func compose(func f, func g): func {
+        return func(x) => f(g(x))
+    }
+
+    func main(): void {
+        var square = func(x) => x * x
+        log(square(5))
+
+        var greet = func(string name) { return "Hi " + name }
+        log(greet("Zeal"))
+
+        log(Lambdas.applyTwice(func(x) => x * 2, 3))
+
+        var addOneThenDouble = Lambdas.compose(func(x) => x * 2, func(x) => x + 1)
+        log(addOneThenDouble(4))
+
+        // A lambda passed straight into a collection algorithm.
+        var nums = new List<int>()
+        nums.push(1)
+        nums.push(2)
+        nums.push(3)
+        nums.forEach(func(x) => log("saw " + x))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 25
+// Hi Zeal
+// 12
+// 10
+// saw 1
+// saw 2
+// saw 3
+// --- End expected output ---

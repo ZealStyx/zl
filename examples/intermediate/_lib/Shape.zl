@@ -1,0 +1,6 @@
+// Shared module source for Interfaces.zl - not a runnable example.
+// Interface members are declared WITHOUT the `func` keyword.
+interface Shape {
+    area(): double
+    name(): string
+}

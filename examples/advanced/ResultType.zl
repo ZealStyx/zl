@@ -1,0 +1,80 @@
+// ============================================================================
+// ZL Examples - Advanced - Result<T,E>
+//
+// `Result<T,E>` is Option's two-parameter sibling: instead of "value or
+// nothing" it is "success value of type T, or an error of type E". Use it when
+// the failure carries information the caller needs.
+//
+//     new Ok<int, string>(value)      success
+//     new Err<int, string>(error)     failure
+//
+//   isOk() / isErr()                  which case you have
+//   unwrap() / unwrapErr()            the payload - each THROWS on the wrong case
+//   unwrapOr(fallback)                the value, or a constant default
+//   unwrapErrOr(fallback)             the error, or a constant default
+//   contains(candidate)               is this the success value I asked about?
+//   isOkAnd / isErrAnd                case test plus a predicate
+//
+// Result<T,E> is built in - no import needed. Like Option, it works as a
+// declared return or parameter type: `Ok<int,string>` satisfies
+// `Result<int,string>`.
+// ============================================================================
+
+class ResultType {
+    // Errors travel as values, so the caller decides what to do with them.
+    static func divide(int a, int b): Result<int, string> {
+        if (b == 0) { return new Err<int, string>("division by zero") }
+        return new Ok<int, string>(a / b)
+    }
+
+    static func report(Result<int, string> r): string {
+        if (r.isOk()) { return "ok " + r.unwrap() }
+        return "err " + r.unwrapErr()
+    }
+
+    func main(): void {
+        var good = new Ok<int, string>(21 * 2)
+        var bad = new Err<int, string>("division by zero")
+
+        log(good.isOk())
+        log(good.isErr())
+        log(good.unwrap())
+        log(good.unwrapOr(0))
+        log(good.contains(42))
+        log(good.isOkAnd(func(v) => v == 42))
+        log(good.unwrapErrOr("no error"))
+
+        log(bad.isOk())
+        log(bad.isErr())
+        log(bad.unwrapErr())
+        log(bad.unwrapOr(-1))
+        log(bad.isErrAnd(func(e) => e == "division by zero"))
+
+        try {
+            log(bad.unwrap())
+        } catch Exception e {
+            log("threw: " + e.message)
+        }
+
+        log(ResultType.report(ResultType.divide(10, 2)))
+        log(ResultType.report(ResultType.divide(1, 0)))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// true
+// false
+// 42
+// 42
+// true
+// true
+// no error
+// false
+// true
+// division by zero
+// -1
+// true
+// threw: Result.unwrap called on Err
+// ok 5
+// err division by zero
+// --- End expected output ---

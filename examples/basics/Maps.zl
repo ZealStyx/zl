@@ -1,0 +1,50 @@
+// ============================================================================
+// ZL Examples - Basics - Map<K,V>
+//
+// `Map<K,V>` is the generic key/value collection, and it is INSERTION-ORDERED
+// by construction: it is a vector-backed association list, not a hash table.
+// New keys append at the end, re-setting a key updates it in place, and
+// removing a key does not reorder the rest.
+// ============================================================================
+
+class Maps {
+    func main(): void {
+        var ages = new Map<string, int>()
+        ages.put("ada", 36)
+        ages.put("alan", 41)
+        ages.put("grace", 45)
+
+        log(ages.length())
+        log(ages.get("ada"))
+        log(ages.has("grace"))
+        log(ages.has("nobody"))
+
+        ages.put("ada", 37)          // update in place, order preserved
+        log(ages.get("ada"))
+        log(ages.length())
+
+        ages.remove("alan")
+        log(ages.length())
+        log(ages.has("alan"))
+
+        // keys() and values() return a generic List, so iterate it with its own
+        // length()/get() - not the native Collection.* primitives.
+        var keys = ages.keys()
+        for i in 0..keys.length() {
+            log("key " + keys.get(i))
+        }
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 3
+// 36
+// true
+// false
+// 37
+// 3
+// 2
+// false
+// key ada
+// key grace
+// --- End expected output ---

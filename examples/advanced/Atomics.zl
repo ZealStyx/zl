@@ -1,0 +1,62 @@
+// ============================================================================
+// ZL Examples - Advanced - Atomic
+//
+// `Atomic` is the correct tool for a counter mutated from several threads:
+// every operation is a single indivisible step, so no update can be lost.
+//
+//   Atomic.store(a, v) / Atomic.load(a)     int slot
+//   Atomic.add(a, delta)                    adds and returns the NEW value
+//   Atomic.storeBool / loadBool             bool slot
+//   Atomic.storeDouble / loadDouble         double slot
+//   Atomic.storeRef / loadRef               object slot
+//
+// `new Atomic()` starts at 0 - the constructor takes no argument.
+//
+// To use one from a worker thread you can now capture it directly - the thread
+// capture rule accepts `Atomic` (along with `Mutex`, `RwLock`, `Semaphore`,
+// `Channel` and `Condition`) as well as `Shared<T>`, because each of them
+// guards its own state internally.
+// ============================================================================
+
+import zl.lang.Atomic
+
+class Atomics {
+    func main(): void {
+        var counter = new Atomic()
+        log("initial " + Atomic.load(counter))
+
+        Atomic.store(counter, 10)
+        log("stored " + Atomic.load(counter))
+
+        log("add 5 -> " + Atomic.add(counter, 5))
+        log("now " + Atomic.load(counter))
+
+        var flag = new Atomic()
+        Atomic.storeBool(flag, true)
+        log("flag " + Atomic.loadBool(flag))
+
+        // Two threads each add 1000. Because every add is atomic, the total is
+        // exactly 2000 every time - a Shared<int> read-modify-write would not
+        // be. `tally` is captured by both closures directly.
+        var tally = new Atomic()
+        var bump = func() {
+            for i in 0..1000 {
+                Atomic.add(tally, 1)
+            }
+        }
+        var t1 = Thread.start(bump)
+        var t2 = Thread.start(bump)
+        Thread.join(t1)
+        Thread.join(t2)
+        log("tally " + Atomic.load(tally))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// initial 0
+// stored 10
+// add 5 -> 15
+// now 15
+// flag true
+// tally 2000
+// --- End expected output ---

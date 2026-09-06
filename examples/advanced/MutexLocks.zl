@@ -1,0 +1,73 @@
+// ============================================================================
+// ZL Examples - Advanced - Mutex
+//
+// `Mutex.withLock(mutex, closure)` runs the closure while holding the lock and
+// returns whatever the closure returns, so a critical section is one expression
+// and the lock is released when it finishes.
+//
+//   import zl.lang.Mutex
+//   var m = new Mutex()
+//   var r = Mutex.withLock(m, func() => ... )
+//
+// THREE CAVEATS, each found by running code like this:
+//
+//   * Do NOT let the body throw. An exception escaping a withLock body is not
+//     delivered cleanly to the caller's try/catch: the continuation resumes
+//     twice and the run ends in a spurious "'return' used outside of a func".
+//     Validate before entering the critical section instead.
+//   * Contention has a ceiling. Two threads doing 50 locked increments each
+//     complete every time (5/5 runs, `total=100`); at 2 x 100 the same program
+//     hangs forever with no output. This holds for `Shared<T>.withLock` too, so
+//     it is the lock path rather than either wrapper. Keep critical sections
+//     small, or use Atomic for counters (see Atomics.zl).
+// ============================================================================
+
+import zl.lang.Mutex
+
+class MutexLocks {
+    func main(): void {
+        var m = new Mutex()
+
+        // The closure's value becomes withLock's value.
+        log("returned " + Mutex.withLock(m, func() => 21 * 2))
+
+        // One lock can guard several independent critical sections in a row.
+        var state = new Shared<int>(0)
+        Mutex.withLock(m, func() => state.setValue(state.get() + 10))
+        log("after first " + state.get())
+        Mutex.withLock(m, func() => state.setValue(state.get() + 5))
+        log("after second " + state.get())
+
+        // Guard a read as well as a write, so the value cannot change between
+        // the check and the use.
+        var doubled = Mutex.withLock(m, func() => state.get() * 2)
+        log("doubled under lock " + doubled)
+        log("final " + Mutex.withLock(m, func() => state.get()))
+
+        // A Mutex can now be captured by a thread directly - no Shared<Mutex>
+        // wrapper needed. Two threads bump the counter 50 times each; because
+        // every read-modify-write happens under the lock, none is lost and the
+        // total is exactly 100. (50 is deliberate: see the contention caveat
+        // above.)
+        var guarded = new Shared<int>(0)
+        var bump = func() {
+            for i in 0..50 {
+                Mutex.withLock(m, func() { guarded.setValue(guarded.get() + 1) })
+            }
+        }
+        var t1 = Thread.start(bump)
+        var t2 = Thread.start(bump)
+        Thread.join(t1)
+        Thread.join(t2)
+        log("guarded total " + guarded.get())
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// returned 42
+// after first 10
+// after second 15
+// doubled under lock 30
+// final 15
+// guarded total 100
+// --- End expected output ---

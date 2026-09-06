@@ -1,0 +1,73 @@
+// ============================================================================
+// ZL Examples - Advanced - zl.time
+//
+// The native clock primitives (`Time.now`, `Time.sleep`, `Time.year`, ...) are
+// auto-imported. The `zl.time` package layers value objects on top: `Date`,
+// `DateTime`, `TimeOfDay`, `Duration`.
+//
+//   Time.now()              seconds since the epoch, as an int
+//   Time.sleep(seconds)     block the current thread
+//   Time.year/month/day/hour/minute/second(timestamp)
+//
+// TWO TRAPS, both confirmed by running this:
+//
+//   * `Time.nowMillis()` in zl.time/Time.zl is declared as
+//     `public static func nowMillis(): int { return Time.nowMillis() }`, which
+//     shadows the native of the same name and calls itself forever. It ends in
+//     "stack overflow: maximum call depth (100000) exceeded". Use `Time.now()`.
+// `Time.format` takes its OWN tokens, not strftime: `YYYY`, `MM`, `DD`, `HH`,
+// `mm`, `ss`. A token it does not recognise is left in place rather than
+// reported, so `"%Y-%m-%d"` comes back unchanged - easy to mistake for a broken
+// function.
+//
+// Timestamps and clock readings are obviously machine-dependent, so this
+// example only asserts the parts that are stable: ordering, and the shape of a
+// hand-built date string.
+// ============================================================================
+
+import zl.time.Duration
+
+class TimeLib {
+    static func twoDigits(int n): string {
+        if (n < 10) { return "0" + n }
+        return "" + n
+    }
+
+    func main(): void {
+        var now = Time.now()
+        log("timestamp is positive: " + (now > 0))
+
+        var year = Time.year(now)
+        log("year is sane: " + (year > 2020))
+
+        var month = Time.month(now)
+        var day = Time.day(now)
+        log("month in range: " + (month >= 1 && month <= 12))
+        log("day in range: " + (day >= 1 && day <= 31))
+
+        // The correct tokens. Compared against the individual fields rather
+        // than printed, so the expected output stays stable over time.
+        log(Time.format(now, "YYYY") == "" + year)
+        log(String.length(Time.format(now, "YYYY-MM-DD")) == 10)
+        log(TimeLib.twoDigits(month) == Time.format(now, "MM"))
+
+        // Sleeping is measured by wall clock, so only check that it returns.
+        Time.sleep(0.01)
+        log("slept")
+
+        var d = new Duration(1500)
+        log("duration constructed")
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// timestamp is positive: true
+// year is sane: true
+// month in range: true
+// day in range: true
+// true
+// true
+// true
+// slept
+// duration constructed
+// --- End expected output ---

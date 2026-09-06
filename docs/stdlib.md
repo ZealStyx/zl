@@ -9,6 +9,7 @@ See [native.md](native.md) for the boundary rule.
 - [`zl.test`](#zltest)
 - [`zl.logging`](#zllogging)
 - [`zl.text`](#zltext)
+- [Regular expressions](#regular-expressions)
 - [`zl.serialize`](#zlserialize)
 - [`zl.time`](#zltime)
 - [`zl.crypto`](#zlcrypto)
@@ -50,6 +51,10 @@ non-positive inputs. `Math.exp` reports finite-input overflow. `Math.clamp`,
 `Math.randomInt`, and `Math.randomFloat` reject a minimum greater than the maximum. The
 random functions use a process-local pseudorandom generator and are **not**
 cryptographically secure.
+
+`sqrt` is the exception to the domain-error rule above: it is **not** checked, so
+`Math.sqrt(-1.0)` returns `nan` rather than throwing. Check for a negative argument
+yourself if you need an error.
 
 High-level helpers (`clamp`, `sign`, `lerp`, `degrees`, `radians`) are ZL-owned static
 methods; genuinely primitive operations (`sqrt`, `sin`, `cbrt`, random generation) stay
@@ -111,6 +116,55 @@ Text.regexReplace("a1b2", "[0-9]", "X")
 Convenience and composition methods are ZL-owned. `String.*` remains the low-level
 native string boundary; the regex and formatting engines stay native.
 
+## Regular expressions
+
+Two surfaces sit over the same native engine.
+
+`Text.regex*` is the shortcut form, and `Regex` is the pattern object:
+
+```zl
+import zl.text.Text
+
+Text.regexMatches("abc123", "[0-9]+")     // true - matches ANYWHERE
+Text.regexFindAll("a12 b34", "[0-9]+")
+Text.regexReplace("a1b2", "[0-9]", "X")
+
+var digits = new Regex("[0-9]+")
+digits.matches("12345")                   // true  - anchored, whole string
+digits.matches("abc123")                  // false
+var found = new Regex("([a-z]+)=([0-9]+)").find("width=800")
+found.group(1)                            // "width"
+```
+
+Note the difference: `Text.regexMatches` searches, while `Regex.matches` is anchored.
+
+### The fluent builder
+
+`Regex` also builds patterns, so metacharacters do not have to be escaped by hand.
+Every step returns the same `Regex`, and `source()` shows what has been assembled:
+
+```zl
+var pin = new Regex("")
+pin.startOfLine().digit().exact(4).endOfLine()
+pin.source()          // ^\d\d\d\d$
+pin.matches("1234")   // true
+```
+
+Builders: `then` (literal, escaped), `raw`, `digit`, `wordCharacter`,
+`unicodeProperty`, `any`, `startOfLine`, `endOfLine`, `alternate`, `named`,
+`backreference`, `atomic`, and the lookahead/lookbehind forms.
+
+Quantifiers rewrite the element added immediately before them: `exact(n)`,
+`range(min, max)`, `oneOrMore`, `zeroOrMore`, `optional`, and the lazy and
+possessive variants. On an empty builder they throw rather than silently produce a
+broken pattern, so `.oneOrMore()` with nothing before it is an error.
+
+`startOfLine`/`endOfLine` simply append their anchor, so they only make sense as the
+first or last step in a chain.
+
+The builder is available with no `import`. Worked examples:
+`examples/advanced/RegexBasics.zl` and `examples/advanced/RegexBuilder.zl`.
+
 ## `zl.serialize`
 
 ```zl
@@ -130,6 +184,25 @@ strings, arrays/lists, and string-keyed objects/maps.
 Provides `Date`, `DateTime`, `TimeOfDay`, and `Duration` value objects over the native
 clock primitives. Higher-level operations — `Time.nowDateTime()`, `Time.today()`,
 `Date.addDays()`, `DateTime.addHours()`, `DateTime.difference()` — are implemented in ZL.
+
+`Time.format(timestamp, pattern)` renders a timestamp using ZL's own tokens, **not**
+strftime:
+
+| Token | Meaning |
+| --- | --- |
+| `YYYY` | 4-digit year |
+| `MM` | 2-digit month |
+| `DD` | 2-digit day |
+| `HH` | 2-digit hour (24h) |
+| `mm` | 2-digit minute |
+| `ss` | 2-digit second |
+
+```zl
+Time.format(Time.now(), "YYYY-MM-DD HH:mm:ss")   // 2026-09-06 16:32:44
+```
+
+An unrecognised token is left in place rather than reported, so a strftime pattern
+such as `"%Y-%m-%d"` is returned unchanged.
 
 ## `zl.crypto`
 

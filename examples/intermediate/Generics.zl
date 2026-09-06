@@ -1,0 +1,60 @@
+// ============================================================================
+// ZL Examples - Intermediate - Generics
+//
+// `class Box<T>` declares a generic class; `T` is the type parameter. Each
+// instantiation (`Box<int>`, `Box<string>`) is compiled separately, so a wrong
+// element type is caught by ordinary overload resolution rather than at runtime.
+//
+// The standard library's List<T>, Map<K,V> and Set<T> are real generic classes
+// built on exactly this machinery - not native tags.
+//
+// See _lib/Box.zl for the generic class itself.
+// ============================================================================
+
+import Box
+
+class Generics {
+    // Generic METHODS are not supported yet - only generic classes are. The
+    // `<T>` after a func name is a syntax error, so a helper that works for any
+    // element type has to be written per type or take an untyped list.
+    static func firstInt(List<int> items, int fallback): int {
+        if (items.isEmpty()) { return fallback }
+        return items.get(0)
+    }
+
+    static func firstString(List<string> items, string fallback): string {
+        if (items.isEmpty()) { return fallback }
+        return items.get(0)
+    }
+
+    func main(): void {
+        var ints = new Box<int>(7)
+        log(ints.get())
+
+        ints.replace(42)
+        log(ints.get())
+
+        var text = new Box<string>("hello")
+        log(text.get())
+
+        // The generic class can still take a `func` and stay generic.
+        var mapped = ints.convert(func(int x) => x * 2)
+        log(mapped.get())
+
+        var nums = new List<int>()
+        nums.push(3)
+        log(Generics.firstInt(nums, -1))
+
+        var empty = new List<string>()
+        log(Generics.firstString(empty, "none"))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 7
+// 42
+// hello
+// 84
+// 3
+// none
+// --- End expected output ---

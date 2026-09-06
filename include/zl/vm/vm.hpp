@@ -15,7 +15,7 @@ namespace zl {
 
 class VM : public std::enable_shared_from_this<VM> {
 public:
-    explicit VM(RuntimeScheduler* sharedScheduler = nullptr);
+    explicit VM(std::shared_ptr<RuntimeScheduler> sharedScheduler = nullptr);
     ~VM();
     // Runs a chunk to completion (until Halt). Returns a process exit code.
     // Throws std::runtime_error on a runtime fault (undefined variable,
@@ -54,8 +54,12 @@ private:
     bool rangeContinue(const Value& current, const Value& end, const Value& step) const;
 
     ExecutionState state_;
-    RuntimeScheduler ownedScheduler_;
-    RuntimeScheduler* scheduler_{nullptr};
+    // Shared ownership is deliberate. A child VM created for an async
+    // invocation can outlive the root VM - the task continuation holds it - so
+    // a raw pointer to the root's scheduler would dangle and a worker thread
+    // would then enqueue into freed memory.
+    std::shared_ptr<RuntimeScheduler> ownedScheduler_;
+    std::shared_ptr<RuntimeScheduler> scheduler_;
 
     struct AsyncInvocation {
         std::shared_ptr<const Chunk> chunk;
@@ -67,6 +71,10 @@ private:
         bool started{false};
     };
     std::optional<AsyncInvocation> asyncInvocation_;
+    // When `main` itself is an async func, the top-level call yields a Task that
+    // nothing holds. Remember it so VM::run can wait for it instead of tearing
+    // the VM down while a worker is still going to resume it.
+    TaskRef entryTask_;
     std::exception_ptr pendingResumeException_;
     std::vector<std::vector<Value>> nativeRootFrames_;
     const Chunk* activeChunk_{nullptr};

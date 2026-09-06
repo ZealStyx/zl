@@ -1,0 +1,20 @@
+// Shared module source for Interfaces.zl - not a runnable example.
+import Shape
+
+class Circle implements Shape {
+    public double radius
+
+    func Circle(double radius): void {
+        this.radius = radius
+    }
+
+    @Override
+    public func area(): double {
+        return 3.0 * this.radius * this.radius
+    }
+
+    @Override
+    public func name(): string {
+        return "circle"
+    }
+}

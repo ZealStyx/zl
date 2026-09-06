@@ -1,0 +1,21 @@
+// ============================================================================
+// ZL Examples - Basics - Hello World
+//
+// Two rules make ZL files different from most scripting languages:
+//
+//   1. Every .zl file declares exactly ONE class, and that class must be named
+//      after the file. This file is HelloWorld.zl, so the class is HelloWorld.
+//   2. Execution always starts at `main`. There is no top-level code.
+//
+// `log(...)` writes a line to standard output.
+// ============================================================================
+
+class HelloWorld {
+    func main(): void {
+        log("Hello, World!")
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// Hello, World!
+// --- End expected output ---

@@ -1,0 +1,66 @@
+// ============================================================================
+// ZL Examples - Advanced - Regular Expressions
+//
+// The regex ENGINE is native; `zl.text.Text` exposes the convenience surface
+// and `Regex` is the pattern object (see RegexBuilder.zl for its fluent form).
+//
+//   Text.regexMatches(subject, pattern)           does the pattern match ANYWHERE?
+//   Text.regexFindAll(subject, pattern)           every non-overlapping match
+//   Text.regexReplace(subject, pattern, with)     substitute every match
+//
+// A `Regex` object adds `find`, which returns a RegexMatch carrying the match
+// offsets, positional groups, and named groups.
+// ============================================================================
+
+import zl.text.Text
+
+class RegexBasics {
+    func main(): void {
+        // Text.regexMatches is a SEARCH: true if the pattern matches anywhere
+        // in the subject. For a whole-string match use Regex.matches(), which
+        // is anchored - see the bottom of this file.
+        log(Text.regexMatches("abc123", "[0-9]+"))
+        log(Text.regexMatches("12345", "[0-9]+"))
+        log(Text.regexMatches("no digits here", "[0-9]+"))
+
+        log(Text.regexReplace("a1b2c3", "[0-9]", "X"))
+        log(Text.regexReplace("2026-09-06", "-", "/"))
+
+        list<string> hits = Text.regexFindAll("a12 b34 c5", "[0-9]+")
+        log("hits " + Collection.length(hits))
+        for i in 0..Collection.length(hits) {
+            log("hit " + Collection.get(hits, i))
+        }
+
+        // Capturing groups through a Regex object.
+        var pattern = new Regex("([a-z]+)=([0-9]+)")
+        var found = pattern.find("width=800")
+        log("whole " + found.value)
+        log("group 1 " + found.group(1))
+        log("group 2 " + found.group(2))
+        log("groups " + found.groupCount())
+
+        // Regex.matches() IS anchored, unlike Text.regexMatches.
+        var digits = new Regex("[0-9]+")
+        log("anchored 12345: " + digits.matches("12345"))
+        log("anchored abc123: " + digits.matches("abc123"))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// true
+// true
+// false
+// aXbXcX
+// 2026/09/06
+// hits 3
+// hit 12
+// hit 34
+// hit 5
+// whole width=800
+// group 1 width
+// group 2 800
+// groups 2
+// anchored 12345: true
+// anchored abc123: false
+// --- End expected output ---

@@ -14,6 +14,23 @@
 namespace zl {
 
 namespace {
+// Whether a captured local is safe to carry across a thread boundary.
+// `Shared<T>` is the explicit opt-in wrapper; the rest are the runtime's own
+// synchronisation primitives, whose state is guarded internally and which are
+// exactly what the diagnostic tells you to use. Keep this list in step with
+// isThreadSafeClassName in src/vm/native.cpp.
+bool capturedValueCrossesThreadBoundary(const SymbolTable& symbols, const std::string& captured) {
+    const auto info = symbols.lookupVar(captured);
+    if (!info || info->type != ZlType::OBJECT) return false;
+    const auto& cls = info->className;
+    const bool threadSafe = cls == "Shared" || cls.rfind("Shared<", 0) == 0 ||
+                            cls == "Atomic" || cls == "Mutex" || cls == "RwLock" ||
+                            cls == "Semaphore" || cls == "Channel" || cls == "Condition";
+    return !threadSafe;
+}
+} // namespace
+
+namespace {
 bool genericCollectionCompatible(const std::string& from, const std::string& to) {
     if (from.empty() || to.empty()) return true;
     if (from == to) return true;
@@ -2741,7 +2758,17 @@ void collectThreadRefs(const AstNode* node, std::unordered_set<std::string>& ref
         case NodeKind::UnaryExpr: { auto* n=static_cast<const UnaryExpr*>(node); collectThreadRefs(n->operand.get(),refs,usesThis,params); break; }
         case NodeKind::AwaitExpr: { auto* n=static_cast<const AwaitExpr*>(node); collectThreadRefs(n->operand.get(),refs,usesThis,params); break; }
         case NodeKind::BinaryExpr: { auto* n=static_cast<const BinaryExpr*>(node); collectThreadRefs(n->left.get(),refs,usesThis,params); collectThreadRefs(n->right.get(),refs,usesThis,params); break; }
-        case NodeKind::CallExpr: { auto* n=static_cast<const CallExpr*>(node); for(auto& a:n->arguments) collectThreadRefs(a.get(),refs,usesThis,params); break; }
+        case NodeKind::CallExpr: { auto* n=static_cast<const CallExpr*>(node);
+            // The callee is a NAME, not a child node, so walking only the
+            // arguments misses it. `f(g(x))` references both f and g, and a
+            // lambda that calls a captured func value must capture it - only
+            // names that actually resolve to a local are captured at runtime,
+            // so recording a class or method name here is harmless.
+            if (n->namespaceName.empty() && !n->calleeName.empty() && !params.count(n->calleeName)) {
+                refs.insert(n->calleeName);
+            }
+            for (auto& a : n->arguments) { collectThreadRefs(a.get(), refs, usesThis, params); }
+            break; }
         case NodeKind::AssignExpr: { auto* n=static_cast<const AssignExpr*>(node); if(!params.count(n->name)) refs.insert(n->name); collectThreadRefs(n->value.get(),refs,usesThis,params); break; }
         case NodeKind::MoveExpr: { auto* n=static_cast<const MoveExpr*>(node); if(!params.count(n->name)) refs.insert(n->name); break; }
         case NodeKind::FieldAccessExpr: { auto* n=static_cast<const FieldAccessExpr*>(node); collectThreadRefs(n->object.get(),refs,usesThis,params); break; }
@@ -2761,6 +2788,22 @@ void collectThreadRefs(const AstNode* node, std::unordered_set<std::string>& ref
         case NodeKind::TryStmt: { auto* n=static_cast<const TryStmt*>(node); collectThreadRefs(n->tryBlock.get(),refs,usesThis,params);for(auto& c:n->catches)collectThreadRefs(c.block.get(),refs,usesThis,params);collectThreadRefs(n->finallyBlock.get(),refs,usesThis,params);break; }
         case NodeKind::ThrowStmt: { auto* n=static_cast<const ThrowStmt*>(node); collectThreadRefs(n->value.get(),refs,usesThis,params); break; }
         case NodeKind::ExprStmt: { auto* n=static_cast<const ExprStmt*>(node); collectThreadRefs(n->expression.get(),refs,usesThis,params); break; }
+        case NodeKind::LambdaExpr: {
+            // A lambda nested in this body needs whatever IT references, so the
+            // enclosing lambda has to carry those names across for it: at
+            // runtime MakeClosure captures from the frame it executes in, and
+            // that frame holds exactly this lambda's captures. Without this,
+            // `func() { var inner = func() => n; inner() }` captures nothing
+            // for `inner` to see and dies with "undefined variable 'n'".
+            // The nested lambda's own parameters shadow outer names, so they
+            // must not be recorded as captures.
+            auto* n = static_cast<const LambdaExpr*>(node);
+            std::unordered_set<std::string> nestedParams(params);
+            for (const auto& p : n->params) nestedParams.insert(p.name);
+            collectThreadRefs(n->hasExprBody ? n->exprBody.get() : n->blockBody.get(),
+                              refs, usesThis, nestedParams);
+            break;
+        }
         default: break;
     }
 }
@@ -2780,8 +2823,16 @@ void TypeChecker::validateThreadLambda(const LambdaExpr* node, const char* apiNa
     for (const auto& name : node->captureNames) {
         auto info=symbols_.lookupVar(name);
         if (!info) continue;
-        if (!(info->type==ZlType::OBJECT && (info->className=="Shared" || info->className.rfind("Shared<", 0)==0)))
-            typeError(std::string(apiName)+" cannot capture '"+name+"' across a thread boundary; use Atomic or Mutex for mutable shared state", node->line);
+        // Shared<T> is the explicit opt-in wrapper. The synchronisation
+        // primitives are also allowed: their state is guarded internally, and
+        // they are what this message tells you to reach for. Keep this list in
+        // step with isThreadSafeClassName in src/vm/native.cpp.
+        const auto& cls = info->className;
+        const bool threadSafe = cls == "Shared" || cls.rfind("Shared<", 0) == 0 ||
+                                cls == "Atomic" || cls == "Mutex" || cls == "RwLock" ||
+                                cls == "Semaphore" || cls == "Channel" || cls == "Condition";
+        if (!(info->type==ZlType::OBJECT && threadSafe))
+            typeError(std::string(apiName)+" cannot capture '"+name+"' across a thread boundary; use Shared<T>, Atomic, or Mutex for mutable shared state", node->line);
     }
 }
 TypeChecker::InferredType TypeChecker::inferExpr(const AstNode* node) {
@@ -3586,9 +3637,8 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                 if (info->functionUsesThis)
                     typeError("Task.spawn cannot use a func value that captures 'this'; wrap the object in Shared<T>", node->line);
                 for (const auto& captured : info->functionCaptureNames) {
-                    const auto capInfo = symbols_.lookupVar(captured);
-                    if (capInfo && !(capInfo->type == ZlType::OBJECT && (capInfo->className == "Shared" || capInfo->className.rfind("Shared<", 0) == 0)))
-                        typeError("Task.spawn cannot cross thread boundary with captured '" + captured + "'; use Atomic or Mutex for mutable shared state", node->line);
+                    if (capturedValueCrossesThreadBoundary(symbols_, captured))
+                        typeError("Task.spawn cannot cross thread boundary with captured '" + captured + "'; use Shared<T>, Atomic, or Mutex for mutable shared state", node->line);
                 }
             }
         }
@@ -3613,9 +3663,8 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                 if (info->functionUsesThis)
                     typeError("Thread.start cannot use a func value that captures 'this'; wrap the object in Shared<T>", node->line);
                 for (const auto& captured : info->functionCaptureNames) {
-                    const auto capInfo = symbols_.lookupVar(captured);
-                    if (capInfo && !(capInfo->type == ZlType::OBJECT && (capInfo->className == "Shared" || capInfo->className.rfind("Shared<", 0) == 0)))
-                        typeError("Thread.start cannot cross thread boundary with captured '" + captured + "'; use Atomic or Mutex for mutable shared state", node->line);
+                    if (capturedValueCrossesThreadBoundary(symbols_, captured))
+                        typeError("Thread.start cannot cross thread boundary with captured '" + captured + "'; use Shared<T>, Atomic, or Mutex for mutable shared state", node->line);
                 }
             }
         }

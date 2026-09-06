@@ -10,6 +10,7 @@ Reference for the language surface. For the standard library see
 - [Static methods](#static-methods)
 - [Operator overloading](#operator-overloading)
 - [Record values (`data`)](#record-values-data)
+- [`Option<T>` and `Result<T,E>`](#optiont-and-resultte)
 - [Reflection](#reflection)
 - [Memory-model direction](#memory-model-direction)
 
@@ -99,7 +100,8 @@ classic counter pattern:
 ```zl
 func makeCounter(): func {
     var count = 0
-    var inc = func() { count = count + 1; return count }
+    var inc = func() { count = count + 1
+        return count }
     return inc
 }
 var c = makeCounter()
@@ -172,6 +174,9 @@ log(values.any(func(x) => x > 3))
 Available: `contains`, `indexOf`, `count`, `any`, `all`, `filter`, `forEach`,
 `transform`, `reduce`, `sort`, and `reversed`. These are implemented in ZL against the
 existing `Collection.*` native storage boundary rather than as algorithm-specific C++.
+
+`count(item)` is the odd one out: unlike `any`/`all`/`filter` it takes a value, not a
+predicate, and returns how many times that value occurs.
 
 ### Typed collection literals
 
@@ -270,6 +275,57 @@ instance `func` methods — including `toString()` — which use ordinary dispat
 reflection infrastructure, but they may not reassign their own fields. Record
 inheritance and destructuring remain roadmap work.
 
+## `Option<T>` and `Result<T,E>`
+
+Two built-in generic sum types, available with no `import`. They model absence and
+failure as values rather than as exceptions you might forget to handle.
+
+```zl
+var present = new Some<int>(42)
+var absent  = new None<int>()
+
+present.isSome()                              // true
+present.unwrap()                              // 42 - throws on None
+absent.unwrapOr(-1)                           // -1
+absent.unwrapOrElse(func() => expensive())    // lazy fallback
+present.isSomeAnd(func(v) => v > 40)          // true
+```
+
+`Result<T,E>` is the two-parameter sibling: a success value of type `T`, or an error of
+type `E`, for when the failure carries information the caller needs.
+
+```zl
+var ok  = new Ok<int, string>(42)
+var err = new Err<int, string>("division by zero")
+
+ok.unwrap()          // 42
+err.unwrapErr()      // "division by zero"
+err.unwrapOr(-1)     // -1
+err.isErrAnd(func(e) => e == "division by zero")
+```
+
+Full member list: `Option` has `isSome`, `isNone`, `unwrap`, `unwrapOr`, `unwrapOrElse`,
+`expect`, `contains`, `isSomeAnd`. `Result` adds `isOk`, `isErr`, `unwrapErr`,
+`unwrapErrOr`, and `isOkAnd`/`isErrAnd`.
+
+A function may declare either as its return type or a parameter type, and a
+subclass instantiation widens to its parameterized parent - `Some<int>` satisfies
+`Option<int>`, while `Some<string>` does not:
+
+```zl
+static func find(int n): Option<int> {
+    if (n > 0) { return new Some<int>(n) }
+    return new None<int>()
+}
+
+static func label(Option<int> o): string {
+    if (o.isSome()) { return "found " + o.unwrap() }
+    return "empty"
+}
+```
+
+See `examples/advanced/OptionType.zl` and `examples/advanced/ResultType.zl`.
+
 ## Reflection
 
 A minimal, name-based `Type` API for runtime inspection:
@@ -289,3 +345,23 @@ annotations, and writable reflection are reserved for future phases.
 The planned memory model combines ownership with tracing GC. Unannotated managed and
 reference values default to GC-managed, thread-confined semantics. `shared` is explicit
 rather than the default.
+
+Thread confinement is enforced at compile time: a closure passed to `Thread.start` or
+`Task.spawn` may only capture values that are safe to carry across the boundary. The
+accepted set is `Shared<T>` plus the runtime's own synchronisation primitives —
+`Atomic`, `Mutex`, `RwLock`, `Semaphore`, `Channel` and `Condition` — since each of them
+guards its state internally. Capturing anything else is a compile error:
+
+```zl
+var total = 0
+Thread.start(func() { total += 1 })
+// compile error: Thread.start cannot capture 'total' across a thread boundary;
+//                use Atomic or Mutex for mutable shared state
+
+var counter = new Atomic()
+Thread.start(func() { Atomic.add(counter, 1) })   // fine
+```
+
+Wrapping a value in `Shared<T>` makes the capture legal, not automatically safe:
+`get()`/`setValue()` on their own can still interleave a read-modify-write, so use
+`Atomic` for counters and `Mutex` or `RwLock` for larger critical sections.

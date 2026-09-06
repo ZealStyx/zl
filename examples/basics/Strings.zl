@@ -1,0 +1,37 @@
+// ============================================================================
+// ZL Examples - Basics - Strings
+//
+// The low-level string primitives live on `String.*` and are available without
+// any import (they are part of the auto-imported zl.lang package).
+//
+// String.substring(s, start, end) is end-EXCLUSIVE: substring("hello", 1, 3)
+// yields the two characters at index 1 and 2.
+// ============================================================================
+
+class Strings {
+    func main(): void {
+        string s = "Hello, ZL"
+
+        log(String.length(s))
+        log(String.upper(s))
+        log(String.lower(s))
+        log(String.substring(s, 0, 5))
+        log(String.substring(s, 7, 9))
+        log(String.replace(s, "ZL", "World"))
+        log(String.contains(s, "ZL"))
+        log(String.contains(s, "nope"))
+        log(s + "!")
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 9
+// HELLO, ZL
+// hello, zl
+// Hello
+// ZL
+// Hello, World
+// true
+// false
+// Hello, ZL!
+// --- End expected output ---

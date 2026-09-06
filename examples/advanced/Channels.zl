@@ -1,0 +1,54 @@
+// ============================================================================
+// ZL Examples - Advanced - Channels
+//
+// A channel is a bounded, thread-safe queue - often a cleaner way to move data
+// between threads than sharing mutable state.
+//
+//   Channel.create(capacity)      a channel holding at most `capacity` values
+//   Channel.send(c, value)        enqueue (blocks when full)
+//   Channel.receive(c)            dequeue (blocks when empty)
+//   Channel.size(c)               how many values are waiting
+//
+// `Channel.sendAsync` / `Channel.receiveAsync` return a Task for use from async
+// code.
+//
+// Handing a channel to a worker thread works by capturing it directly: the
+// capture rule accepts `Channel` (like `Atomic`, `Mutex`, `RwLock`,
+// `Semaphore` and `Condition`) as well as `Shared<T>`.
+// ============================================================================
+
+import zl.lang.Channel
+
+class Channels {
+    func main(): void {
+        var c = Channel.create(4)
+        log("size " + Channel.size(c))
+
+        Channel.send(c, "first")
+        Channel.send(c, "second")
+        log("size " + Channel.size(c))
+
+        log("got " + Channel.receive(c))
+        log("size " + Channel.size(c))
+        log("got " + Channel.receive(c))
+        log("size " + Channel.size(c))
+
+        // A producer thread feeding the main thread.
+        var pipe = Channel.create(8)
+        var producer = Thread.start(func() {
+            Channel.send(pipe, "from-worker")
+        })
+        log("received " + Channel.receive(pipe))
+        Thread.join(producer)
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// size 0
+// size 2
+// got first
+// size 1
+// got second
+// size 0
+// received from-worker
+// --- End expected output ---

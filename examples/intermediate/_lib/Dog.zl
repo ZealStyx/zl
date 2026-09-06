@@ -1,0 +1,17 @@
+// Shared module source for Inheritance.zl - not a runnable example.
+import Animal
+
+class Dog extends Animal {
+    func Dog(string name): void {
+        super(name)
+    }
+
+    @Override
+    public func speak(): string {
+        return "Woof"
+    }
+
+    public func fetch(): string {
+        return this.name + " fetches the ball"
+    }
+}

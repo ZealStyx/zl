@@ -1,0 +1,47 @@
+// ============================================================================
+// ZL Examples - Basics - Native Lists
+//
+// The lowercase `list<T>` annotation is the native, unboxed list. You build and
+// read it through the `Collection.*` primitives, which are auto-imported.
+//
+// This is the low-level representation. Most code should prefer the generic
+// `List<T>` class from the next example - it has the same storage underneath
+// but carries a real compile-time element type and the full algorithm suite.
+// ============================================================================
+
+class Arrays {
+    func main(): void {
+        list<int> nums = [4, 8, 15, 16]
+
+        log(Collection.length(nums))
+        log(Collection.get(nums, 0))
+        log(Collection.get(nums, 3))
+
+        Collection.push(nums, 23)
+        log(Collection.length(nums))
+
+        Collection.set(nums, 0, 1)
+        log(Collection.get(nums, 0))
+
+        log(Collection.pop(nums))
+        log(Collection.length(nums))
+
+        for i in 0..Collection.length(nums) {
+            log("[" + i + "] = " + Collection.get(nums, i))
+        }
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 4
+// 4
+// 16
+// 5
+// 1
+// 23
+// 4
+// [0] = 1
+// [1] = 8
+// [2] = 15
+// [3] = 16
+// --- End expected output ---

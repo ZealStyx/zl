@@ -1,0 +1,53 @@
+// ============================================================================
+// ZL Examples - Intermediate - Enums
+//
+// `enum` declares a fixed set of named members, accessed as `EnumName.MEMBER`.
+//
+// Enum values are genuinely statically typed: a variable declared as the enum
+// rejects a raw string at COMPILE time, so `Color c = "red"` does not compile.
+// ============================================================================
+
+enum Color {
+    Red
+    Green
+    Blue
+}
+
+enum Direction {
+    North
+    South
+    East
+    West
+}
+
+class Enums {
+    static func describe(Color c): string {
+        if (c == Color.Red) { return "stop" }
+        if (c == Color.Green) { return "go" }
+        return "caution"
+    }
+
+    func main(): void {
+        var c = Color.Green
+        log(c)
+        log(Enums.describe(Color.Red))
+        log(Enums.describe(Color.Green))
+        log(Enums.describe(Color.Blue))
+
+        log(c == Color.Green)
+        log(c == Color.Blue)
+
+        var d = Direction.North
+        log(d)
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// Green
+// stop
+// go
+// caution
+// true
+// false
+// North
+// --- End expected output ---

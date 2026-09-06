@@ -1,0 +1,50 @@
+// ============================================================================
+// ZL Examples - Basics - Operators
+//
+// Arithmetic, comparison, logical, bitwise and shift operators all behave as
+// they do in C-family languages. `+` also concatenates strings.
+// ============================================================================
+
+class Operators {
+    func main(): void {
+        log(10 + 3)
+        log(10 - 3)
+        log(10 * 3)
+        log(10 / 3)
+
+        log(10 > 3)
+        log(10 == 3)
+        log(10 != 3)
+
+        log(true && false)
+        log(true || false)
+        log(!true)
+
+        log(12 & 10)
+        log(12 | 10)
+        log(12 ^ 10)
+        log(1 << 4)
+        log(32 >> 2)
+
+        log("ZL" + " " + "rocks")
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 13
+// 7
+// 30
+// 3
+// true
+// false
+// true
+// false
+// true
+// false
+// 8
+// 14
+// 6
+// 16
+// 8
+// ZL rocks
+// --- End expected output ---

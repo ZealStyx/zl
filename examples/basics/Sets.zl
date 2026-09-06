@@ -1,0 +1,39 @@
+// ============================================================================
+// ZL Examples - Basics - Set<T>
+//
+// `Set<T>` holds unique values: adding an element that is already present is a
+// no-op, so a set never contains duplicates.
+// ============================================================================
+
+class Sets {
+    func main(): void {
+        var tags = new Set<string>()
+        tags.add("red")
+        tags.add("green")
+        tags.add("red")          // duplicate - ignored
+
+        log(tags.length())
+        log(tags.has("green"))
+        log(tags.has("blue"))
+
+        tags.remove("red")
+        log(tags.length())
+        log(tags.has("red"))
+
+        var nums = new Set<int>()
+        nums.add(1)
+        nums.add(2)
+        nums.add(2)
+        nums.add(3)
+        log(nums.length())
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 2
+// true
+// false
+// 1
+// false
+// 3
+// --- End expected output ---
