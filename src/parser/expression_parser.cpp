@@ -307,7 +307,7 @@ NodePtr ExpressionParser::parsePrimary() {
             while (parser_.match({TokenType::COMMA})) {
                 node->typeArgs.push_back(parser_.parseTypeAnnotation());
             }
-            parser_.expect(TokenType::GT, "Expected '>' to close type argument list");
+            parser_.expectTypeAngleClose("Expected '>' to close type argument list");
         }
         parser_.expect(TokenType::LPAREN, "Expected '(' after class name in 'new'");
         if (!parser_.check(TokenType::RPAREN)) {
@@ -554,7 +554,7 @@ NodePtr ExpressionParser::parseMatchExpr() {
                 pattern->typePattern.typeArgs.push_back(parser_.parseTypeAnnotation());
                 while (parser_.match({TokenType::COMMA}))
                     pattern->typePattern.typeArgs.push_back(parser_.parseTypeAnnotation());
-                parser_.expect(TokenType::GT, "Expected '>' to close generic type pattern");
+                parser_.expectTypeAngleClose("Expected '>' to close generic type pattern");
                 if (parser_.check(TokenType::IDENTIFIER) && parser_.peek().lexeme != "when") {
                     Token binding = parser_.advance();
                     pattern->bindingName = binding.lexeme;

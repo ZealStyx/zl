@@ -212,6 +212,78 @@ parameter is not recorded as an outer capture.
 Verified against upstream `fe91b12` built side by side: the snippet above prints
 `got 7` on both. `MutexLocks.zl` and `Channels.zl` exercise the threaded form.
 
+### 9. Nested generic type arguments could not be written
+
+```zl
+var grid = new List<List<int>>()
+-> syntax error: Expected '>' to close type argument list -- got ">>"
+```
+
+The same happened for `Map<string, List<int>>`, `Box<List<int>>`, and anything
+else that closed two type argument lists in a row. Adding a space -
+`new List<List<int> >` - parsed fine, which is what gave the cause away.
+
+**Cause.** The lexer runs without context, so the trailing `>>` becomes a single
+`SHR` token, and all ten places in the parser that close a type construct did a
+plain `expect(TokenType::GT, ...)`. This is the classic C++ `>>` problem.
+
+**Fix.** `Parser::expectTypeAngleClose` (`src/parser/parser.cpp`) accepts `GT`,
+or splits a fused `SHR`/`USHR` back into the `>` characters it was made of,
+consuming exactly one and leaving the rest in the stream for the enclosing list.
+All ten call sites in `parser.cpp` and `expression_parser.cpp` now go through it.
+
+Shift expressions are untouched, because they are never parsed by these paths -
+`32 >> 2` is `8`, `64 >> 2 >> 1` is `8`, `256 >>> 4` is `16`.
+`intermediate/NestedGenerics.zl` covers both halves.
+
+### 10. Any zero-argument method named `get` was treated as a `Shared` payload read
+
+```zl
+class Holder<T> {
+    public T item
+    public func get(): T { return this.item }
+}
+var h = new Holder<List<int>>(new List<int>())
+log("len " + h.get().length())
+-> compile error: protected Shared payload access requires Shared.withLock on 'h'
+```
+
+`h` is not a `Shared` and there is no payload to protect. Renaming the method to
+`fetch` or `value` made the identical program compile, which pinned it to the
+name.
+
+**Cause.** `sharedPayloadOwnerForExpr` recognised a payload read purely by shape
+- a zero-argument method called `get` - and then resolved its receiver through
+`resolveSharedCellAlias`, which answers for *any* identifier by returning it
+unchanged. So every `x.get()` counted as a protected `Shared` cell.
+
+Fixing that alone made the guard fire on nothing at all, which exposed a second,
+opposite bug: a cell built directly by `new Shared<T>(...)` was never registered.
+Registration only happened for `var alias = existingCell`, because
+`resolveSharedCellAlias` returns `nullopt` for a `NewExpr`. The guard therefore
+only ever worked by accident, on copies.
+
+**Fix.** Three changes in `src/compiler/type_checker.cpp`:
+
+- `trackedSharedCellForExpr` only treats `x.get()` as a payload read when `x` is
+  actually a tracked cell.
+- `var c = new Shared<T>(...)` now registers `c` as its own canonical cell.
+- `resolveSharedCellAlias` treats a self-edge as canonical rather than as a
+  cycle, so the registration above resolves instead of failing the loop guard.
+
+Verified both directions. Still rejected, as intended:
+
+| Guarded | |
+| --- | --- |
+| `c.get().length()` on a direct cell | error |
+| `alias.get().length()` on a copy | error |
+| `var items = c.get()` then `items.length()` | error |
+| `var items = c.get()` then `items[0]` | error |
+
+Allowed: `c.get() + 1` on a `Shared<int>` (no member access), any payload access
+inside `withLock`, a plain class's `get()`, and `Map.get(key)` (takes an
+argument, so it was never matched).
+
 ## Still open
 
 Ranked by how quickly a new user hits them. Entries marked **(fixed)** no longer
@@ -460,6 +532,49 @@ The examples were therefore built by compiling `src/**/*.cpp` directly with the
 same flags the `zl_language` target uses, and the project's own regression suite
 could not be run. `examples/run_all.sh` is the only executable check available
 here.
+
+### O18 - String operations count and index bytes, not characters
+
+Every `String.*` / `Text.*` operation works on UTF-8 bytes rather than code
+points. `String.length` is a plain `.size()` (`src/vm/native.cpp:466`). Nothing
+under `docs/` mentions Unicode, UTF-8, or code points at all, so the behaviour is
+undocumented either way.
+
+```zl
+Text.length("héllo")            // 6, not 5      ("é" is two bytes)
+Text.length("日本語")            // 9, not 3
+Text.charAt("héllo", 1)         // the single byte 0xC3, half of "é"
+Text.substring("héllo wörld", 0, 3)   // "hé"  - three bytes, two characters
+Text.indexOf("héllo wörld", "w")      // 7, not 6
+Text.upper("héllo")             // "HéLLO" - only ASCII is cased
+```
+
+The one that is clearly wrong rather than merely surprising is `Text.reverse`,
+which walks the string by byte index and concatenates - so it emits the bytes of
+a multi-byte character in the wrong order. Confirmed with `od -c` rather than
+terminal rendering:
+
+```text
+Text.reverse("héllo")  ->  o l l \251 \303 h
+```
+
+`é` went in as `\303\251` and came out as `\251\303`, which is not valid UTF-8.
+ASCII-only input is unaffected (`Text.reverse("ab")` is `ba`), so this only bites
+once someone stores a non-ASCII name, and then it corrupts the value silently.
+
+The same byte/character confusion would affect `Text.repeatText`, `padLeft` /
+`padRight` widths, and `startsWith` / `endsWith` when the prefix ends mid-character,
+though only `length`, `charAt`, `substring`, `indexOf` and `reverse` were
+directly verified.
+
+Two smaller notes found in the same pass:
+
+- `string` has no methods at all. `s.length()` fails with `cannot call method
+  'length' on value of type string`; the `Text.length(s)` free-function form is
+  the only option. Every other collection type is method-based, so this reads as
+  an inconsistency rather than a decision.
+- `List.pop()` reports `Collection.pop: cannot pop from an empty list` while
+  `List.first()` reports `List.first called on empty list`. Cosmetic.
 
 ## Verdict on the previously reported F6-F9
 

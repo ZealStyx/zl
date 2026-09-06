@@ -39,6 +39,15 @@ private:
     bool match(std::initializer_list<TokenType> types);
     const Token& advance();
     const Token& expect(TokenType type, const std::string& errorMessage);
+    // Consume the '>' that closes a type argument / parameter list.
+    //
+    // The lexer runs without context, so the `>>` at the end of
+    // `List<List<int>>` arrives as a single SHR token and the parse fails.
+    // This splits a fused shift token back into the '>' characters it was
+    // made of, consuming exactly one and leaving the rest in the stream for
+    // the enclosing list to consume - the same trick C++ and Java parsers
+    // use. Shift expressions are unaffected: they are never parsed here.
+    const Token& expectTypeAngleClose(const std::string& errorMessage);
     [[noreturn]] void error(const std::string& message) const;
 
     // --- top-level declarations ---

@@ -42,6 +42,27 @@ const Token& Parser::expect(TokenType type, const std::string& errorMessage) {
     error(errorMessage);
 }
 
+const Token& Parser::expectTypeAngleClose(const std::string& errorMessage) {
+    if (check(TokenType::GT)) return advance();
+
+    // `List<List<int>>` lexes as LT int SHR. Split the fused token: overwrite
+    // it with a single '>' that this call consumes, and insert the remainder
+    // just after it so the enclosing list can close on the next pass. `>>>`
+    // leaves a `>>` behind for the same reason.
+    if (check(TokenType::SHR) || check(TokenType::USHR)) {
+        const bool wasTriple = peek().type == TokenType::USHR;
+        const std::size_t line = peek().line;
+        const std::size_t column = peek().column;
+        tokens_[pos_] = Token{TokenType::GT, ">", line, column};
+        tokens_.insert(tokens_.begin() + static_cast<std::ptrdiff_t>(pos_) + 1,
+                       Token{wasTriple ? TokenType::SHR : TokenType::GT,
+                             wasTriple ? ">>" : ">", line, column + 1});
+        return advance();
+    }
+
+    error(errorMessage);
+}
+
 void Parser::error(const std::string& message) const {
     const Token& tok = peek();
     throw ParseError(message + " -- got \"" + tok.lexeme + "\" at line " + std::to_string(tok.line));
@@ -199,7 +220,7 @@ NodePtr Parser::parseClassDecl(std::vector<Annotation> annotations) {
                 }
             }
         }
-        expect(TokenType::GT, "Expected '>' to close type parameter list");
+        expectTypeAngleClose("Expected '>' to close type parameter list");
     }
 
     if (match({TokenType::KW_EXTENDS})) {
@@ -218,7 +239,7 @@ NodePtr Parser::parseClassDecl(std::vector<Annotation> annotations) {
             while (match({TokenType::COMMA})) {
                 node->extendsTypeArgs.push_back(parseTypeAnnotation());
             }
-            expect(TokenType::GT, "Expected '>' to close type argument list");
+            expectTypeAngleClose("Expected '>' to close type argument list");
         }
     }
 
@@ -381,7 +402,7 @@ NodePtr Parser::parseDataDecl() {
         extendsName = expect(TokenType::IDENTIFIER, "Expected parent data type name after 'extends'").lexeme;
         if (match({TokenType::LT})) {
             do { extendsTypeArgs.push_back(parseTypeAnnotation()); } while (match({TokenType::COMMA}));
-            expect(TokenType::GT, "Expected ' > ' after data parent type arguments");
+            expectTypeAngleClose("Expected ' > ' after data parent type arguments");
         }
     }
     expect(TokenType::LBRACE, "Expected '{' after data type name");
@@ -672,19 +693,19 @@ TypeAnnotation Parser::parseTypeAnnotation() {
         }
         expect(TokenType::LT, "Expected '<' to start array's element type, e.g. array<int>");
         type.typeArgs.push_back(parseTypeAnnotation());
-        expect(TokenType::GT, "Expected '>' to close array<...>");
+        expectTypeAngleClose("Expected '>' to close array<...>");
     } else if (check(TokenType::KW_LIST)) {
         advance();
         type.name = "list";
         expect(TokenType::LT, "Expected '<' to start list's element type, e.g. list<int>");
         type.typeArgs.push_back(parseTypeAnnotation());
-        expect(TokenType::GT, "Expected '>' to close list<...>");
+        expectTypeAngleClose("Expected '>' to close list<...>");
     } else if (check(TokenType::KW_SET)) {
         advance();
         type.name = "set";
         expect(TokenType::LT, "Expected '<' to start set's element type, e.g. set<int>");
         type.typeArgs.push_back(parseTypeAnnotation());
-        expect(TokenType::GT, "Expected '>' to close set<...>");
+        expectTypeAngleClose("Expected '>' to close set<...>");
     } else if (check(TokenType::KW_MAP)) {
         advance();
         type.name = "map";
@@ -692,7 +713,7 @@ TypeAnnotation Parser::parseTypeAnnotation() {
         type.typeArgs.push_back(parseTypeAnnotation()); // key type
         expect(TokenType::COMMA, "Expected ',' between map's key and value types");
         type.typeArgs.push_back(parseTypeAnnotation()); // value type
-        expect(TokenType::GT, "Expected '>' to close map<...>");
+        expectTypeAngleClose("Expected '>' to close map<...>");
     } else if (check(TokenType::KW_VOID)) {
         advance();
         type.name = "void";
@@ -733,7 +754,7 @@ TypeAnnotation Parser::parseTypeAnnotation() {
             while (match({TokenType::COMMA})) {
                 type.typeArgs.push_back(parseTypeAnnotation());
             }
-            expect(TokenType::GT, "Expected '>' to close type argument list");
+            expectTypeAngleClose("Expected '>' to close type argument list");
         }
     }
 

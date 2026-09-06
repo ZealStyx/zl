@@ -116,6 +116,16 @@ Text.regexReplace("a1b2", "[0-9]", "X")
 Convenience and composition methods are ZL-owned. `String.*` remains the low-level
 native string boundary; the regex and formatting engines stay native.
 
+Indices and lengths are **bytes, not characters**. `Text.length("héllo")` is `6`,
+because `é` is two UTF-8 bytes, and `charAt` / `substring` / `indexOf` index on the
+same byte basis. `upper` and `lower` only case ASCII. Keep this in mind for any
+non-ASCII input, and do not use `Text.reverse` on it — it reverses bytes and so
+emits the two bytes of a multi-byte character in the wrong order, producing invalid
+UTF-8. See `examples/REVIEW.md` (O18).
+
+`string` has no methods of its own: `s.length()` is a compile error, so use the
+`Text.length(s)` free-function form.
+
 ## Regular expressions
 
 Two surfaces sit over the same native engine.

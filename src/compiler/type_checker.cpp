@@ -1933,9 +1933,13 @@ static std::optional<std::string> resolveSharedCellAlias(
     std::string name = static_cast<const Identifier*>(expr)->name;
     std::unordered_set<std::string> seen;
     while (true) {
-        if (!seen.insert(name).second) return std::nullopt;
         auto it = aliases.find(name);
         if (it == aliases.end()) return name;
+        // A cell created by `new Shared<T>(...)` is registered as its own
+        // canonical name. That is a self-edge, not a cycle, and has to
+        // terminate here rather than fall through to the loop guard.
+        if (it->second == name) return name;
+        if (!seen.insert(name).second) return std::nullopt;
         name = it->second;
     }
 }
@@ -1954,6 +1958,25 @@ static std::optional<std::string> resolveLockAlias(
     }
 }
 
+// Resolve an identifier to the Shared cell it aliases, but only when it is
+// actually a tracked cell. `resolveSharedCellAlias` answers for any identifier,
+// returning it unchanged when it is not in the map - which is what it has to do
+// when *registering* an alias, but is wrong here: it made every zero-argument
+// `get()` on any object look like a protected Shared payload read, so a plain
+// `class Holder<T> { func get(): T }` was rejected with "protected Shared
+// payload access requires Shared.withLock".
+static std::optional<std::string> trackedSharedCellForExpr(
+    const AstNode* expr,
+    const std::unordered_map<std::string, std::string>& owners,
+    const std::unordered_map<std::string, std::string>& aliases) {
+    if (!expr || expr->kind != NodeKind::Identifier) return std::nullopt;
+    const std::string& name = static_cast<const Identifier*>(expr)->name;
+    if (aliases.count(name)) return resolveSharedCellAlias(expr, aliases);
+    auto it = owners.find(name);
+    if (it != owners.end()) return it->second;
+    return std::nullopt;
+}
+
 static std::optional<std::string> sharedPayloadOwnerForExpr(
     const AstNode* expr,
     const std::unordered_map<std::string, std::string>& owners,
@@ -1967,7 +1990,7 @@ static std::optional<std::string> sharedPayloadOwnerForExpr(
     if (expr->kind == NodeKind::MethodCallExpr) {
         const auto* call = static_cast<const MethodCallExpr*>(expr);
         if (call->methodName == "get" && call->arguments.empty())
-            return resolveSharedCellAlias(call->object.get(), aliases);
+            return trackedSharedCellForExpr(call->object.get(), owners, aliases);
     }
     return std::nullopt;
 }
@@ -2199,11 +2222,24 @@ void TypeChecker::checkVarDecl(const VarDecl* node) {
         else
             sharedPayloadOwners_.erase(node->name);
 
+        // A `new Shared<T>(...)` infers the bare class name "Shared" while a
+        // copy of an existing cell keeps the instantiated "Shared<T>", so both
+        // spellings have to register the var as a cell. Without the bare form
+        // the cell was never tracked, and the payload guard only appeared to
+        // work because it used to treat every zero-argument `get()` as a
+        // Shared read.
         const bool looksLikeSharedCell =
-            initType == ZlType::OBJECT && initClassName.rfind("Shared<", 0) == 0;
+            initType == ZlType::OBJECT &&
+            (initClassName == "Shared" || initClassName.rfind("Shared<", 0) == 0);
         if (looksLikeSharedCell) {
             if (auto alias = resolveSharedCellAlias(node->initializer.get(), sharedCellAliases_))
                 sharedCellAliases_[node->name] = *alias;
+            else
+                // `new Shared<T>(...)` is not an alias of anything else - it is
+                // a fresh cell, so it has to register as its own. Without this
+                // only copies of a cell were tracked and the cell built by the
+                // `new` itself escaped the payload guard entirely.
+                sharedCellAliases_[node->name] = node->name;
         } else {
             sharedCellAliases_.erase(node->name);
         }

@@ -58,6 +58,7 @@ examples that `import` them resolve.
 | [Lambdas.zl](intermediate/Lambdas.zl) | Expression and block bodies, `func` as a type |
 | [Closures.zl](intermediate/Closures.zl) | By-value capture, independent snapshots, the counter pattern |
 | [Generics.zl](intermediate/Generics.zl) | User-defined `class Box<T>`, instantiation, current limits |
+| [NestedGenerics.zl](intermediate/NestedGenerics.zl) | `List<List<int>>`, `Map<K, List<V>>`, three levels deep, `>>` still shifts |
 | [CollectionAlgorithms.zl](intermediate/CollectionAlgorithms.zl) | `transform`, `filter`, `reduce`, `sort`, `forEach`, `any`/`all` |
 | [Exceptions.zl](intermediate/Exceptions.zl) | `throw`, Java-style `catch`, exception subclasses |
 | [Modules.zl](intermediate/Modules.zl) | Dotted imports, the auto-imported `zl.lang`, local modules |
