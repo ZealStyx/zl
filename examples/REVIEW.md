@@ -624,6 +624,49 @@ Two smaller notes found in the same pass:
 - `List.pop()` reports `Collection.pop: cannot pop from an empty list` while
   `List.first()` reports `List.first called on empty list`. Cosmetic.
 
+### O19 - `INT64_MIN` cannot be written as a literal
+
+```zl
+var min = -9223372036854775808
+-> compile error: integer literal is out of range '9223372036854775808'
+```
+
+The lexer hands the type checker the unsigned magnitude, and both
+`TypeChecker::inferLiteral` (`type_checker.cpp:3402`) and `Compiler::compileLiteral`
+(`compiler.cpp:694`) validate it with `std::stoll`, whose ceiling is `INT64_MAX`.
+The unary minus is a separate node applied afterwards, so the one value that needs
+the extra slot is rejected before the negation is ever considered.
+
+Everything else at the boundary is correct, and the value is reachable by
+arithmetic:
+
+```zl
+var max = 9223372036854775807        // fine
+(0 - max) - 1                        // -9223372036854775808, prints correctly
+((0 - max) - 1) - 1                  // runtime error: integer overflow in subtraction
+```
+
+Deliberately **not** fixed. A correct fix has to allow the magnitude only in a
+negation context, and the codegen side has no such context at the literal site -
+so accepting it outright would also accept `9223372036854775808` as a positive
+literal, which is wrong. Left as a documented limitation with the arithmetic
+workaround.
+
+### O20 - `Shared<T>` really does lose updates; measured
+
+`SharedState.zl` warns that `Shared<T>` makes a capture *legal* but not *safe*.
+That is not a hypothetical. Two threads doing 2000 unsynchronised read-modify-write
+increments each, run alongside two threads using `Atomic` for the same work:
+
+```text
+plain  (expect <= 4000)  2490     <- 1510 updates lost
+atomic (expect 4000)     4000     <- exact
+```
+
+So the guidance in that example is load-bearing, and `Atomic` is correct under
+real contention rather than merely in the small counts the examples use. Recorded
+here as evidence, not as a defect.
+
 ## Verdict on the previously reported F6-F9
 
 | | Claim | Verdict |
