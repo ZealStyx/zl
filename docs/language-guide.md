@@ -1,0 +1,291 @@
+# ZL Language Guide
+
+Reference for the language surface. For the standard library see
+[stdlib.md](stdlib.md); for imports and dependencies see [packages.md](packages.md).
+
+- [File and class rule](#file-and-class-rule)
+- [Values and declarations](#values-and-declarations)
+- [Lambda expressions](#lambda-expressions)
+- [Generic collections](#generic-collections)
+- [Static methods](#static-methods)
+- [Operator overloading](#operator-overloading)
+- [Record values (`data`)](#record-values-data)
+- [Reflection](#reflection)
+- [Memory-model direction](#memory-model-direction)
+
+## File and class rule
+
+Each `.zl` file must contain a class whose name matches the file stem exactly:
+
+```text
+TestProgram.zl   -> class TestProgram
+type_mismatch.zl -> class type_mismatch
+```
+
+This is enforced by the compiler pipeline. Errors are reported in three categories:
+`syntax error`, `compile error`, and `runtime error`.
+
+## Values and declarations
+
+- `var` (rebindable) and `let` (single assignment) declarations, with inference or
+  explicit types
+- Primitives: `int`, `double`, `decimal`, `bool`, `string`
+- Union-style values such as `int|string`
+- Arrays, lists, maps, and sets via the collection helpers
+- Arithmetic, comparison, logical, bitwise, and shift operators
+- `if`, `elif`, `else if`, `else`, `for`, `while`, `repeat`, `break`, `continue`
+- `func` declarations, methods, constructors, and return values
+- `class` and `data` declarations, plus `enum`
+- Access modifiers: `public`, `private`, `protected`
+
+`enum` members are accessed as `EnumName.MEMBER` and are genuinely statically typed —
+a variable or parameter typed as the enum rejects a raw string at compile time.
+
+**Map ordering is a guarantee, not an accident.** `map` is insertion-ordered by
+construction: it is a vector-backed association list, not a hash table. New keys append
+at the end, re-setting an existing key updates it in place, and removing a key does not
+reorder the rest.
+
+**Static fields** support inherited qualified access. A derived class resolves an
+inherited static field to its declaring class, so reads and writes share the same
+backing storage. Access modifiers are enforced against the declaring owner: protected
+inherited access works from subclasses, private inherited access is rejected, and
+interface-qualified static-field access is rejected because interfaces own no static
+storage.
+
+## Lambda expressions
+
+An anonymous function *value* — assignable to a variable, passable as an argument, or
+returnable from a function:
+
+```zl
+var square = func(x) => x * x         // expression body - `return` is implied
+log(square(5))                        // 25
+
+var greet = func(name) {              // block body - explicit `return` required
+    log("Hi " + name)
+}
+greet("Zeal")
+
+func applyTwice(func f, int x): int { // `func` as a parameter/return type
+    return f(f(x))
+}
+log(applyTwice(func(x) => x * 2, 3))  // 12
+```
+
+**Syntax.** `func` — the same keyword as a named declaration, reused in expression
+position — followed by a parameter list, then either `=> expr` (single expression,
+return implied) or `{ statements }` (block body, explicit `return` required; falling off
+the end returns `nil`). Parameters may be untyped (`x`) or typed (`int x`), using the
+same `Type Name` order as named functions. `func` alone, with no parameter list, is also
+a valid *type* name for a slot holding a function value: `callback: func`.
+
+**Capture is by value.** A lambda snapshots every variable in scope at the moment it is
+*evaluated* (not declared) — a copy, not a live reference:
+
+```zl
+var n = 10
+var readN = func() => n
+n = 999
+log(readN())   // 10 - NOT 999
+```
+
+Two lambdas created from the same scope, for example on different loop iterations, get
+independent snapshots; one closure's execution never affects another's. Within a single
+closure, mutating one of its own captured variables persists across repeated calls to
+*that same* closure, since a closure privately owns its snapshot from creation — the
+classic counter pattern:
+
+```zl
+func makeCounter(): func {
+    var count = 0
+    var inc = func() { count = count + 1; return count }
+    return inc
+}
+var c = makeCounter()
+log(c())  // 1
+log(c())  // 2
+```
+
+**Known gap.** Full function-type signatures — parameter and return types on a
+`func`-typed slot — are not checked yet. Calling a `func`-typed value with the wrong
+number of arguments is caught at runtime, not at compile time.
+
+## Generic collections
+
+`List<T>`, `Map<K,V>`, and `Set<T>` are real generic classes, not native tags.
+`push`/`pop`/`get`/`put`/`length` and `add`/`has`/`remove` are genuinely compiled
+methods, so a wrong element, key, or value type is a compile-time error:
+
+```zl
+var nums = new List<int>()
+nums.push(1)
+nums.push(2)
+nums.push("oops")   // compile error: no overload of 'push' matches (int), got (string)
+
+int first = nums.get(0)    // get()'s return type narrows to int for THIS instantiation
+nums.put(0, 99)            // index-assignment - see the naming note below
+
+var ages = new Map<string, int>()
+ages.put("ada", 36)
+log(ages.get("ada"))       // 36
+log(ages.has("grace"))     // false
+ages.remove("ada")
+
+var tags = new Set<string>()
+tags.add("x")
+tags.add("x")              // no-op, sets don't duplicate
+log(tags.length())         // 1
+```
+
+These are always available; no `import` is needed. They are backed by the same native
+list/map/set storage that the lowercase `list<T>`/`map<K,V>`/`set<T>` type annotations
+use — only the compile-time type surface is new, layered on the same generic-class
+machinery that user-defined generics (`class Box<T>`) already use. A mismatched type is
+caught by ordinary overload resolution, with the same error-message quality as any other
+method call.
+
+**Naming note.** The index/key-assignment method is `put`, not `set`, because `set` is a
+reserved keyword (the lowercase `set<T>` annotation). This is a keyword-collision
+workaround, not a design preference.
+
+### Algorithms
+
+`List<T>` owns the high-level collection algorithms in ZL while C++ provides only the
+storage primitives:
+
+```zl
+var values = new List<int>()
+values.push(4)
+values.push(1)
+values.push(3)
+
+var doubled = values.transform(func(x) => x * 2)
+var total = values.reduce(func(a, b) => a + b, 0)
+values.sort(func(a, b) => a < b)
+
+log(values.contains(2))
+var evens = values.filter(func(x) => x % 2 == 0)
+log(values.any(func(x) => x > 3))
+```
+
+Available: `contains`, `indexOf`, `count`, `any`, `all`, `filter`, `forEach`,
+`transform`, `reduce`, `sort`, and `reversed`. These are implemented in ZL against the
+existing `Collection.*` native storage boundary rather than as algorithm-specific C++.
+
+### Typed collection literals
+
+The expected declared type participates in literal checking and construction. Lists
+support `[...]`; map and set literals use `{...}`:
+
+```zl
+list<int> nums = [1, 2, 3]
+map<string, int> ages = {"ada": 36, "alan": 41}
+set<string> names = {"ada", "alan", "ada"}
+
+List<int> genericNums = [4, 5, 6]
+Map<string, int> genericAges = {"ada": 36}
+Set<int> genericSet = [1, 2, 2]
+```
+
+Every element, key, and value is checked against the expected generic type. Typed
+`List`/`Map`/`Set` literals construct normal generic ZL collection objects; lowercase
+`list`/`map`/`set` annotations keep their native representation.
+
+## Static methods
+
+Classes may declare `static func` members, called through the class name with no `this`
+receiver:
+
+```zl
+class Helpers {
+    public static func clamp(double x): double {
+        if (x < 0.0) { return 0.0 }
+        return x
+    }
+}
+
+log(Helpers.clamp(-2.0))
+```
+
+Using `this` from a static function is a compile-time error. The standard library uses
+static methods to move high-level policy into ZL without replacing the small native
+runtime primitives underneath.
+
+## Operator overloading
+
+Classes define operators with the `operator` declaration. Operators use normal method
+dispatch and overload resolution, and are public by default but may be marked `private`
+or `protected`:
+
+```zl
+class Number {
+    public int value
+
+    func Number(int value) {
+        this.value = value
+    }
+
+    operator +(Number other): Number {
+        return new Number(this.value + other.value)
+    }
+
+    operator -(): Number {
+        return new Number(-this.value)
+    }
+}
+```
+
+Arithmetic, comparison, bitwise, shift, and unary `+`/`-`/`!`/`~` declarations are
+supported. Built-in operators remain the fallback for primitives; object operands use a
+declared operator when one exists. Overloads are class-aware, so different object
+parameter types coexist, while generic operator parameters keep shared runtime dispatch
+with concrete compile-time checking. Numeric mixed-type overloads, operator visibility,
+inheritance, and interface operator contracts are supported. Unsupported or ambiguous
+object operators are compile-time errors.
+
+## Record values (`data`)
+
+A `data` declaration defines a named record with typed public fields:
+
+```zl
+data Point {
+    x: int
+    y: int
+}
+
+var a = Point { x: 10, y: 20 }
+var b = Point { x: 10, y: 20 }
+
+log(a == b) // true
+```
+
+Record literals must provide every declared field exactly once; unknown, missing, or
+duplicate fields are compile-time errors. Records of the same `data` type compare
+structurally, including nested records, with numeric fields using normal ZL numeric
+equality.
+
+Records are value-oriented and immutable after construction. They may declare public
+instance `func` methods — including `toString()` — which use ordinary dispatch and
+reflection infrastructure, but they may not reassign their own fields. Record
+inheritance and destructuring remain roadmap work.
+
+## Reflection
+
+A minimal, name-based `Type` API for runtime inspection:
+
+```zl
+Type.name(value)       // runtime type/class name
+Type.fields(object)    // effective field names, including inherited fields
+Type.methods(object)   // effective method names, including inherited methods
+Type.base(object)      // direct base class name, or nil for a root class
+```
+
+Reflection metadata is intentionally small. Generic type arguments, method signatures,
+annotations, and writable reflection are reserved for future phases.
+
+## Memory-model direction
+
+The planned memory model combines ownership with tracing GC. Unannotated managed and
+reference values default to GC-managed, thread-confined semantics. `shared` is explicit
+rather than the default.
