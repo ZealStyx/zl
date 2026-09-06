@@ -5,6 +5,17 @@ class Duration {
     public func seconds(): double { return this.millis / 1000.0 }
     public func minutes(): double { return this.millis / 60000.0 }
     public func hours(): double { return this.millis / 3600000.0 }
+    public func milliseconds(): int { return this.millis }
     public func add(Duration other): Duration { return new Duration(this.millis + other.millis) }
     public func subtract(Duration other): Duration { return new Duration(this.millis - other.millis) }
+    public func negate(): Duration { return new Duration(-this.millis) }
+    public func abs(): Duration { if (this.millis < 0) { return new Duration(-this.millis) } return new Duration(this.millis) }
+    public func isZero(): bool { return this.millis == 0 }
+    public func isNegative(): bool { return this.millis < 0 }
+    public func isPositive(): bool { return this.millis > 0 }
+    public func compare(Duration other): int {
+        if (this.millis < other.millis) { return -1 }
+        if (this.millis > other.millis) { return 1 }
+        return 0
+    }
 }

@@ -1,3 +1,4 @@
 // zl.net.Network - portable DNS/network discovery facade.
 class Network {
+    public static func lookup(string host): string { return Network.resolve(host) }
 }

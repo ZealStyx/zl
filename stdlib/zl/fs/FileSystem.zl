@@ -6,4 +6,7 @@ class FileSystem {
     public static func appendText(string path, string content): void { FileSystem.appendFile(path, content) }
     public static func fileExists(string path): bool { return FileSystem.exists(path) }
     public static func remove(string path): void { FileSystem.deleteFile(path) }
+    public static func replaceText(string path, string content): void { FileSystem.writeFile(path, content) }
+    public static func ensureFile(string path): void { if (!FileSystem.exists(path)) { FileSystem.writeFile(path, "") } }
+    public static func readOr(string path, string fallback): string { try { return FileSystem.readFile(path) } catch e { return fallback } }
 }

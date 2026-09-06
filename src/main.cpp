@@ -351,6 +351,24 @@ int main(int argc, char** argv) {
     } catch (const zl::TypeCheckError& e) {
         std::cerr << "compile error: " << e.what() << "\n";
         return 1;
+    } catch (const zl::ZlThrownException& e) {
+        std::string message = e.what();
+        if (e.value()) {
+            auto it = e.value()->fields.find("message");
+            if (it != e.value()->fields.end() && std::holds_alternative<std::string>(it->second)) {
+                message = std::get<std::string>(it->second);
+            }
+            auto traceIt = e.value()->fields.find("stackTrace");
+            if (traceIt != e.value()->fields.end() && std::holds_alternative<std::string>(traceIt->second)) {
+                const auto& trace = std::get<std::string>(traceIt->second);
+                if (!trace.empty()) {
+                    std::cerr << "runtime error: " << message << "\n" << trace << "\n";
+                    return 1;
+                }
+            }
+        }
+        std::cerr << "runtime error: " << message << "\n";
+        return 1;
     } catch (const std::exception& e) {
         std::cerr << "runtime error: " << e.what() << "\n";
         return 1;

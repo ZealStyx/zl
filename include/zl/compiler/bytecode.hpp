@@ -68,6 +68,7 @@ enum class OpCode : std::uint8_t {
     TaskIgnore,  // pop a Task and mark its result/failure intentionally ignored; pushes no value
     TaskCancel,  // pop a Task and request cooperative cancellation; pushes no value
     MatchType,    // pop a value and push whether it matches a compile-time type name
+    AssertType,    // pop a value, verify it matches the expected type, then push it back
 
     // Pops step, then end, then i (push order: i, end, step). Pushes a bool:
     // true if the for-loop should keep going. Direction-aware so both

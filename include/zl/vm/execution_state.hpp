@@ -33,6 +33,8 @@ public:
         std::size_t groupId{0};
     };
 
+    explicit ExecutionState(std::size_t maxCallDepth = 100000);
+
     Value pop();
     void push(const Value& value);
     const Value& top() const;
@@ -68,6 +70,7 @@ private:
     std::vector<Value> stack_;
     std::unordered_map<std::string, Value> globals_;
     std::vector<CallFrame> callStack_;
+    std::size_t maxCallDepth_{100000};
     std::vector<Handler> handlers_;
 };
 

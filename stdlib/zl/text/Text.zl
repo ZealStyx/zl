@@ -2,6 +2,8 @@
 // String.* remains the small native string primitive boundary.
 class Text {
     public static func length(string value): int { return String.length(value) }
+    public static func isEmpty(string value): bool { return String.length(value) == 0 }
+    public static func isNotEmpty(string value): bool { return String.length(value) != 0 }
     public static func upper(string value): string { return String.upper(value) }
     public static func lower(string value): string { return String.lower(value) }
     public static func trim(string value): string { return String.trim(value) }
@@ -21,21 +23,70 @@ class Text {
     public static func charAt(string value, int index): string { return String.charAt(value, index) }
     public static func substring(string value, int start, int length): string { return String.substring(value, start, length) }
     public static func replace(string value, string from, string to): string { return String.replace(value, from, to) }
+    public static func remove(string value, string fragment): string { return String.replace(value, fragment, "") }
+    public static func reverse(string value): string {
+        var result = ""
+        var i = String.length(value) - 1
+        while i >= 0 {
+            result = result + String.charAt(value, i)
+            i = i - 1
+        }
+        return result
+    }
     public static func toInt(string value): int { return String.toInt(value) }
     public static func toFloat(string value): double { return String.toFloat(value) }
+    public static func toBool(string value): bool { return Bool.parse(value) }
+    public static func toIntOr(string value, int fallback): int { try { return String.toInt(value) } catch e { return fallback } }
+    public static func toFloatOr(string value, double fallback): double { try { return String.toFloat(value) } catch e { return fallback } }
+    public static func toBoolOr(string value, bool fallback): bool { try { return Bool.parse(value) } catch e { return fallback } }
 
     public static func startsWith(string value, string prefix): bool {
         if (String.length(prefix) > String.length(value)) { return false }
         return String.substring(value, 0, String.length(prefix)) == prefix
     }
-
     public static func endsWith(string value, string suffix): bool {
         var suffixLength = String.length(suffix)
         var valueLength = String.length(value)
         if (suffixLength > valueLength) { return false }
         return String.substring(value, valueLength - suffixLength, valueLength) == suffix
     }
-
+    public static func count(string value, string needle): int {
+        if (String.length(needle) == 0) { return 0 }
+        var result = 0
+        var start = 0
+        while start <= String.length(value) - String.length(needle) {
+            var remaining = String.substring(value, start, String.length(value))
+            var found = String.indexOf(remaining, needle)
+            if found < 0 { return result }
+            result = result + 1
+            start = start + found + String.length(needle)
+        }
+        return result
+    }
+    public static func padLeft(string value, int width, string fill): string {
+        if String.length(fill) == 0 { throw new Exception("Text.padLeft fill must not be empty") }
+        var missing = width - String.length(value)
+        if missing <= 0 { return value }
+        var prefix = ""
+        var i = 0
+        while i < missing {
+            prefix = prefix + String.charAt(fill, i % String.length(fill))
+            i = i + 1
+        }
+        return prefix + value
+    }
+    public static func padRight(string value, int width, string fill): string {
+        if String.length(fill) == 0 { throw new Exception("Text.padRight fill must not be empty") }
+        var missing = width - String.length(value)
+        if missing <= 0 { return value }
+        var suffix = ""
+        var i = 0
+        while i < missing {
+            suffix = suffix + String.charAt(fill, i % String.length(fill))
+            i = i + 1
+        }
+        return value + suffix
+    }
     public static func join(List<string> parts, string separator): string {
         var result = ""
         for i in 0..parts.length() {

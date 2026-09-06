@@ -1,4 +1,6 @@
 // zl.crypto.Crypto - native cryptographic/hash primitives.
 // Higher-level protocols should remain in ZL and use these primitives.
 class Crypto {
+    public static func hash32(string value): string { return Crypto.crc32(value) }
+    public static func digest256(string value): string { return Crypto.sha256(value) }
 }

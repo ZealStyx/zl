@@ -6,6 +6,8 @@
 
 namespace zl {
 
+ExecutionState::ExecutionState(std::size_t maxCallDepth) : maxCallDepth_(maxCallDepth ? maxCallDepth : 1) {}
+
 Value ExecutionState::pop() {
     if (stack_.empty()) {
         throw std::runtime_error("VM stack underflow (this is a compiler bug, not a program bug)");
@@ -85,6 +87,9 @@ void ExecutionState::appendGCRoots(std::vector<Value>& roots) const {
 }
 
 void ExecutionState::enterFrame(CallFrame frame) {
+    if (callStack_.size() >= maxCallDepth_) {
+        throw std::runtime_error("stack overflow: maximum call depth (" + std::to_string(maxCallDepth_) + ") exceeded");
+    }
     callStack_.push_back(std::move(frame));
 }
 

@@ -12,5 +12,16 @@ class DateTime {
     public func addSeconds(int seconds): DateTime { return new DateTime(this.epoch + seconds) }
     public func addMinutes(int minutes): DateTime { return this.addSeconds(minutes * 60) }
     public func addHours(int hours): DateTime { return this.addMinutes(hours * 60) }
+    public func addDays(int days): DateTime { return this.addHours(days * 24) }
+    public func subtractDays(int days): DateTime { return this.addDays(-days) }
+    public func timestamp(): int { return this.epoch }
     public func difference(DateTime other): Duration { return new Duration((this.epoch - other.epoch) * 1000) }
+    public func compare(DateTime other): int {
+        if (this.epoch < other.epoch) { return -1 }
+        if (this.epoch > other.epoch) { return 1 }
+        return 0
+    }
+    public func isBefore(DateTime other): bool { return this.compare(other) < 0 }
+    public func isAfter(DateTime other): bool { return this.compare(other) > 0 }
+    public func equals(DateTime other): bool { return this.compare(other) == 0 }
 }

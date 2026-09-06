@@ -6,4 +6,8 @@ class Serialize {
     public static func integer(unknown value): int { return Serialize.asInt(value) }
     public static func number(unknown value): double { return Serialize.asDouble(value) }
     public static func boolean(unknown value): bool { return Serialize.asBool(value) }
+    public static func stringOr(unknown value, string fallback): string { try { return Serialize.asString(value) } catch e { return fallback } }
+    public static func integerOr(unknown value, int fallback): int { try { return Serialize.asInt(value) } catch e { return fallback } }
+    public static func numberOr(unknown value, double fallback): double { try { return Serialize.asDouble(value) } catch e { return fallback } }
+    public static func booleanOr(unknown value, bool fallback): bool { try { return Serialize.asBool(value) } catch e { return fallback } }
 }

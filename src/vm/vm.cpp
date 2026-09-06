@@ -11,6 +11,7 @@
 #include <chrono>
 #include <thread>
 #include <memory>
+#include <cstdlib>
 
 #include "zl/vm/native.hpp"
 #include "zl/vm/runtime_task.hpp"
@@ -82,7 +83,18 @@ namespace {
 
 VM::VM(RuntimeScheduler* sharedScheduler)
     : scheduler_(sharedScheduler ? sharedScheduler : &ownedScheduler_),
-      gcParticipantId_(GCSafepointCoordinator::instance().registerParticipant()) {}
+      gcParticipantId_(GCSafepointCoordinator::instance().registerParticipant()) {
+    if (const char* env = std::getenv("ZL_MAX_CALL_DEPTH")) {
+        try {
+            const unsigned long long parsed = std::stoull(env);
+            if (parsed > 0 && parsed <= static_cast<unsigned long long>(std::numeric_limits<std::size_t>::max())) {
+                state_ = ExecutionState(static_cast<std::size_t>(parsed));
+            }
+        } catch (...) {
+            // Invalid configuration falls back to the safe default.
+        }
+    }
+}
 
 VM::~VM() {
     if (gcParticipantId_ != 0) {
@@ -359,6 +371,35 @@ bool reflectionTypeSpecsEqual(const ReflectionTypeSpec& a, const ReflectionTypeS
 
 bool reflectiveTypeMatchesName(const Value& value, const std::string& typeName, const Chunk* chunk = nullptr) {
     return reflectiveMatchesSpec(value, ReflectionTypeParser(typeName).parse(), chunk);
+}
+
+std::string runtimeValueTypeName(const Value& value) {
+    if (std::holds_alternative<std::monostate>(value)) return "void";
+    if (std::holds_alternative<std::int64_t>(value)) return "int";
+    if (std::holds_alternative<double>(value)) return "double";
+    if (std::holds_alternative<std::string>(value)) return "string";
+    if (std::holds_alternative<bool>(value)) return "bool";
+    if (std::holds_alternative<ListRef>(value)) return "list";
+    if (std::holds_alternative<MapRef>(value)) return "map";
+    if (auto obj = std::get_if<ObjectRef>(&value); obj && *obj) return (*obj)->className;
+    if (std::holds_alternative<ClosureRef>(value)) return "func";
+    if (std::holds_alternative<TaskRef>(value)) return "Task";
+    if (std::holds_alternative<ThreadRef>(value)) return "Thread";
+    if (std::holds_alternative<NativeHandleRef>(value)) return "NativeHandle";
+    return "unknown";
+}
+
+bool runtimeAssignableToType(const Value& value, const std::string& typeName, const Chunk* chunk) {
+    const ReflectionTypeSpec spec = ReflectionTypeParser(typeName).parse();
+    if (!spec.unionMembers.empty()) return reflectiveMatchesSpec(value, spec, chunk);
+    if (spec.name == "double" && std::holds_alternative<std::int64_t>(value)) return true;
+    if (std::holds_alternative<std::monostate>(value)) {
+        const std::string base = spec.name;
+        return base == "string" || base == "list" || base == "map" || base == "set" ||
+               base == "array" || base == "func" || base == "object" || base == "Task" ||
+               base.find('<') != std::string::npos;
+    }
+    return reflectiveMatchesSpec(value, spec, chunk);
 }
 
 bool reflectiveTypeMatches(const Value& value, const DispatchType& expected) {
@@ -946,6 +987,20 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 break;
             }
 
+            case OpCode::AssertType: {
+                Value value = state_.pop();
+                if (instr.operand >= chunk.names.size()) {
+                    throw std::runtime_error("VM: AssertType name index out of bounds");
+                }
+                const std::string& expected = chunk.names[instr.operand];
+                if (!runtimeAssignableToType(value, expected, &chunk)) {
+                    throw std::runtime_error("type assertion failed: expected " + expected + ", got " + runtimeValueTypeName(value));
+                }
+                state_.push(value);
+                ++ip;
+                break;
+            }
+
             case OpCode::TaskCancel: {
                 Value value = state_.pop();
                 auto* taskRef = std::get_if<TaskRef>(&value);
@@ -1037,11 +1092,17 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 const FunctionInfo& fn = chunk.functions[instr.operand];
                 std::size_t paramCount = fn.paramNames.size();
 
-                if (fn.isAsync) {
-                    std::vector<Value> args(paramCount);
-                    for (std::size_t i = 0; i < paramCount; ++i) {
-                        args[paramCount - 1 - i] = state_.pop();
+                std::vector<Value> args(paramCount);
+                for (std::size_t i = 0; i < paramCount; ++i) {
+                    args[paramCount - 1 - i] = state_.pop();
+                }
+                for (std::size_t i = 0; i < paramCount && i < fn.parameterTypeNames.size(); ++i) {
+                    const auto& expected = fn.parameterTypeNames[i];
+                    if (!expected.empty() && expected != "unknown" && !runtimeAssignableToType(args[i], expected, &chunk)) {
+                        throw std::runtime_error("type assertion failed for argument " + std::to_string(i + 1) + ": expected " + expected + ", got " + runtimeValueTypeName(args[i]));
                     }
+                }
+                if (fn.isAsync) {
                     auto task = std::make_shared<RuntimeTaskState>(fn.returnTypeName.empty() ? "void" : fn.returnTypeName);
                     auto chunkRef = std::make_shared<Chunk>(chunk);
                     std::optional<Value> receiver;
@@ -1056,14 +1117,6 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     state_.push(Value{std::move(task)});
                     ip++;
                     break;
-                }
-
-                // Arguments were pushed left-to-right, so the stack has them
-                // in reverse order on top; pop into a temp vector, then walk
-                // it backwards to bind params in the order they were declared.
-                std::vector<Value> args(paramCount);
-                for (std::size_t i = 0; i < paramCount; ++i) {
-                    args[paramCount - 1 - i] = state_.pop();
                 }
 
                 ExecutionState::CallFrame frame;
@@ -1144,6 +1197,12 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 std::vector<Value> args(argCount);
                 for (std::size_t i = 0; i < argCount; ++i) {
                     args[argCount - 1 - i] = state_.pop();
+                }
+                for (std::size_t i = 0; i < argCount && i < closure.parameterTypeNames.size(); ++i) {
+                    const auto& expected = closure.parameterTypeNames[i];
+                    if (!expected.empty() && expected != "unknown" && !runtimeAssignableToType(args[i], expected, closure.chunk.get())) {
+                        throw std::runtime_error("type assertion failed for argument " + std::to_string(i + 1) + ": expected " + expected + ", got " + runtimeValueTypeName(args[i]));
+                    }
                 }
 
                 if (closure.isAsync) {
@@ -1395,6 +1454,12 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     throw std::runtime_error(
                         "VM: method '" + fn.name + "' expects " + std::to_string(fn.paramNames.size()) +
                         " argument(s), got " + std::to_string(argCount));
+                }
+                for (std::size_t i = 0; i < argCount && i < fn.parameterTypeNames.size(); ++i) {
+                    const auto& expected = fn.parameterTypeNames[i];
+                    if (!expected.empty() && expected != "unknown" && !runtimeAssignableToType(args[i], expected, &chunk)) {
+                        throw std::runtime_error("type assertion failed for argument " + std::to_string(i + 1) + ": expected " + expected + ", got " + runtimeValueTypeName(args[i]));
+                    }
                 }
 
                 if (fn.isAsync) {

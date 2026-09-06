@@ -6,4 +6,15 @@ class TimeOfDay {
     public func minute(): int { return Time.minute(this.epoch) }
     public func second(): int { return Time.second(this.epoch) }
     public func format(string pattern): string { return Time.format(this.epoch, pattern) }
+    public func totalSeconds(): int { return this.hour() * 3600 + this.minute() * 60 + this.second() }
+    public func compare(TimeOfDay other): int {
+        var a = this.totalSeconds()
+        var b = other.totalSeconds()
+        if (a < b) { return -1 }
+        if (a > b) { return 1 }
+        return 0
+    }
+    public func isBefore(TimeOfDay other): bool { return this.compare(other) < 0 }
+    public func isAfter(TimeOfDay other): bool { return this.compare(other) > 0 }
+    public func equals(TimeOfDay other): bool { return this.compare(other) == 0 }
 }

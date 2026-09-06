@@ -34,10 +34,154 @@ class List<T> {
         return this.length() == 0
     }
 
+    public func isNotEmpty(): bool {
+        return this.length() != 0
+    }
+
+    public func firstOr(T fallback): T {
+        if (this.isEmpty()) { return fallback }
+        return this.first()
+    }
+
+    public func lastOr(T fallback): T {
+        if (this.isEmpty()) { return fallback }
+        return this.last()
+    }
+
+    public func remove(T item): bool {
+        var index = this.indexOf(item)
+        if (index < 0) { return false }
+        this.removeAt(index)
+        return true
+    }
+
+    public func removeAll(T item): int {
+        var removed = 0
+        var index = this.indexOf(item)
+        while (index >= 0) {
+            this.removeAt(index)
+            removed = removed + 1
+            index = this.indexOf(item)
+        }
+        return removed
+    }
+
+    public func swap(int first, int second): void {
+        if (first < 0 || second < 0 || first >= this.length() || second >= this.length()) {
+            throw new Exception("List.swap index out of range")
+        }
+        if (first == second) { return }
+        var value = this.get(first)
+        this.put(first, this.get(second))
+        this.put(second, value)
+    }
+
+    public func take(int count): List<T> {
+        if (count < 0) { throw new Exception("List.take count must be non-negative") }
+        var end = count
+        if (end > this.length()) { end = this.length() }
+        return this.slice(0, end)
+    }
+
+    public func drop(int count): List<T> {
+        if (count < 0) { throw new Exception("List.drop count must be non-negative") }
+        var start = count
+        if (start > this.length()) { start = this.length() }
+        return this.slice(start, this.length())
+    }
+
     public func clear(): void {
         while (this.length() > 0) {
             this.pop()
         }
+    }
+
+    public func first(): T {
+        if (this.isEmpty()) {
+            throw new Exception("List.first called on empty list")
+        }
+        return this.get(0)
+    }
+
+    public func last(): T {
+        if (this.isEmpty()) {
+            throw new Exception("List.last called on empty list")
+        }
+        return this.get(this.length() - 1)
+    }
+
+    public func insert(int index, T item): void {
+        if (index < 0 || index > this.length()) {
+            throw new Exception("List.insert index out of range")
+        }
+        if (index == this.length()) {
+            this.push(item)
+            return
+        }
+        this.push(this.last())
+        var i = this.length() - 1
+        while (i > index) {
+            this.put(i, this.get(i - 1))
+            i = i - 1
+        }
+        this.put(index, item)
+    }
+
+    public func removeAt(int index): T {
+        if (index < 0 || index >= this.length()) {
+            throw new Exception("List.removeAt index out of range")
+        }
+        var removed = this.get(index)
+        var i = index
+        while (i + 1 < this.length()) {
+            this.put(i, this.get(i + 1))
+            i = i + 1
+        }
+        this.pop()
+        return removed
+    }
+
+    public func reverse(): void {
+        var left = 0
+        var right = this.length() - 1
+        while (left < right) {
+            var a = this.get(left)
+            this.put(left, this.get(right))
+            this.put(right, a)
+            left = left + 1
+            right = right - 1
+        }
+    }
+
+    public func copy(): List<T> {
+        var result = new List<T>()
+        for i in 0..this.length() {
+            result.push(this.get(i))
+        }
+        return result
+    }
+
+    public func prepend(T item): void {
+        this.insert(0, item)
+    }
+
+    public func extend(List<T> other): void {
+        for i in 0..other.length() {
+            this.push(other.get(i))
+        }
+    }
+
+    public func slice(int start, int end): List<T> {
+        if (start < 0 || end < start || end > this.length()) {
+            throw new Exception("List.slice bounds out of range")
+        }
+        var result = new List<T>()
+        var i = start
+        while (i < end) {
+            result.push(this.get(i))
+            i = i + 1
+        }
+        return result
     }
 
     // High-level collection algorithms are intentionally implemented in ZL.
@@ -161,6 +305,18 @@ class Map<K, V> {
         Collection.mapSet(this.__native, key, value)
     }
 
+    public func putIfAbsent(K key, V value): bool {
+        if (this.has(key)) { return false }
+        this.put(key, value)
+        return true
+    }
+
+    public func removeIfPresent(K key): bool {
+        if (!this.has(key)) { return false }
+        this.remove(key)
+        return true
+    }
+
     public func get(K key): V {
         return Collection.mapGet(this.__native, key)
     }
@@ -197,6 +353,33 @@ class Map<K, V> {
 
     public func isEmpty(): bool {
         return this.length() == 0
+    }
+
+    public func isNotEmpty(): bool {
+        return this.length() != 0
+    }
+
+    public func containsKey(K key): bool {
+        return this.has(key)
+    }
+
+    public func getOr(K key, V fallback): V {
+        if (this.has(key)) {
+            return this.get(key)
+        }
+        return fallback
+    }
+
+    public func clear(): void {
+        var snapshot = this.keys()
+        for i in 0..snapshot.length() {
+            this.remove(snapshot.get(i))
+        }
+    }
+
+    public func containsValue(V value): bool {
+        var values = this.values()
+        return values.contains(value)
     }
 
     public func forEach(func action): void {
@@ -237,6 +420,60 @@ class Set<T> {
         return this.length() == 0
     }
 
+    public func isNotEmpty(): bool {
+        return this.length() != 0
+    }
+
+    public func contains(T item): bool {
+        return this.has(item)
+    }
+
+    public func addAll(List<T> values): void {
+        for i in 0..values.length() {
+            this.add(values.get(i))
+        }
+    }
+
+    public func union(Set<T> other): Set<T> {
+        var result = new Set<T>()
+        result.addAll(this.items())
+        result.addAll(other.items())
+        return result
+    }
+
+    public func intersection(Set<T> other): Set<T> {
+        var result = new Set<T>()
+        var snapshot = this.items()
+        for i in 0..snapshot.length() {
+            if (other.has(snapshot.get(i))) { result.add(snapshot.get(i)) }
+        }
+        return result
+    }
+
+    public func difference(Set<T> other): Set<T> {
+        var result = new Set<T>()
+        var snapshot = this.items()
+        for i in 0..snapshot.length() {
+            if (!other.has(snapshot.get(i))) { result.add(snapshot.get(i)) }
+        }
+        return result
+    }
+
+    public func isSubsetOf(Set<T> other): bool {
+        var snapshot = this.items()
+        for i in 0..snapshot.length() {
+            if (!other.has(snapshot.get(i))) { return false }
+        }
+        return true
+    }
+
+    public func clear(): void {
+        var snapshot = this.items()
+        for i in 0..snapshot.length() {
+            this.remove(snapshot.get(i))
+        }
+    }
+
     public func forEach(func action): void {
         var snapshot = this.items()
         for i in 0..snapshot.length() {
@@ -268,6 +505,9 @@ class Option<T> {
     public func expect(string message): T {
         throw new Exception(message)
     }
+    public func contains(T candidate): bool { return false }
+    public func isSomeAnd(func predicate): bool { return false }
+    public func unwrapOrElse(func makeFallback): T { throw new Exception("Option.unwrapOrElse called on invalid Option") }
 }
 
 class Some<T> extends Option<T> {
@@ -287,6 +527,12 @@ class Some<T> extends Option<T> {
     public func unwrapOr(T fallback): T { return this.value }
     @Override
     public func expect(string message): T { return this.value }
+    @Override
+    public func contains(T candidate): bool { return this.value == candidate }
+    @Override
+    public func isSomeAnd(func predicate): bool { return predicate(this.value) }
+    @Override
+    public func unwrapOrElse(func makeFallback): T { return this.value }
 }
 
 class None<T> extends Option<T> {
@@ -305,6 +551,13 @@ class None<T> extends Option<T> {
     public func expect(string message): T {
         throw new Exception(message)
     }
+    @Override
+    public func contains(T candidate): bool { return false }
+    @Override
+    public func isSomeAnd(func predicate): bool { return false }
+    @Override
+    @Override
+    public func unwrapOrElse(func makeFallback): T { return makeFallback() }
 }
 
 )ZL";
@@ -320,6 +573,11 @@ class Result<T, E> {
         throw new Exception("Result.unwrapErr called on Ok")
     }
     public func unwrapOr(T fallback): T { return fallback }
+    public func expect(string message): T { throw new Exception(message) }
+    public func contains(T candidate): bool { return false }
+    public func isOkAnd(func predicate): bool { return false }
+    public func isErrAnd(func predicate): bool { return true }
+    public func unwrapErrOr(E fallback): E { return fallback }
 }
 
 class Ok<T, E> extends Result<T, E> {
@@ -341,6 +599,16 @@ class Ok<T, E> extends Result<T, E> {
     }
     @Override
     public func unwrapOr(T fallback): T { return this.value }
+    @Override
+    public func expect(string message): T { return this.value }
+    @Override
+    public func contains(T candidate): bool { return this.value == candidate }
+    @Override
+    public func isOkAnd(func predicate): bool { return predicate(this.value) }
+    @Override
+    public func isErrAnd(func predicate): bool { return false }
+    @Override
+    public func unwrapErrOr(E fallback): E { return fallback }
 }
 
 class Err<T, E> extends Result<T, E> {
@@ -362,6 +630,16 @@ class Err<T, E> extends Result<T, E> {
     public func unwrapErr(): E { return this.error }
     @Override
     public func unwrapOr(T fallback): T { return fallback }
+    @Override
+    public func expect(string message): T { throw new Exception(message) }
+    @Override
+    public func contains(T candidate): bool { return false }
+    @Override
+    public func isOkAnd(func predicate): bool { return false }
+    @Override
+    public func isErrAnd(func predicate): bool { return predicate(this.error) }
+    @Override
+    public func unwrapErrOr(E fallback): E { return this.error }
 }
 
 )ZL";
@@ -816,6 +1094,26 @@ class Math {
 
     public static func radians(double degrees): double {
         return degrees * (Math.PI / 180.0)
+    }
+
+    public static func gcd(int a, int b): int {
+        if (a < 0) { a = -a }
+        if (b < 0) { b = -b }
+        while (b != 0) {
+            var r = a % b
+            a = b
+            b = r
+        }
+        return a
+    }
+
+    public static func lcm(int a, int b): int {
+        if (a == 0 || b == 0) { return 0 }
+        return Math.abs((a / Math.gcd(a, b)) * b)
+    }
+
+    public static func hypot(double a, double b): double {
+        return Math.sqrt(a * a + b * b)
     }
 }
 )ZL";

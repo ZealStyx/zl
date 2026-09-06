@@ -187,6 +187,7 @@ Chunk Compiler::compile(const Program& program) {
         const FunctionDecl* fn = allFunctions[i];
         chunk_.functions[i].entryAddress = chunk_.code.size();
         currentClassName_ = fn->ownerClassName;
+        currentReturnTypeName_ = fn->returnType.name.empty() ? "void" : describeTypeAnnotation(fn->returnType);
         auto parentIt = classParents_.find(currentClassName_);
         currentParentClassName_ = (parentIt != classParents_.end()) ? parentIt->second : std::string();
         activeOwnedLocalNames_.clear();
@@ -316,6 +317,9 @@ void Compiler::compileVarDecl(const VarDecl* node) {
     // AST. At runtime this behaves exactly like `var x = 5`.
     if (node->initializer) {
         compileExpression(node->initializer.get());
+        if (node->hasExplicitType) {
+            emit(OpCode::AssertType, chunk_.addName(describeTypeAnnotation(node->type)), node->line);
+        }
     } else {
         std::size_t nilIdx = chunk_.addConstant(Value{});
         emit(OpCode::PushConst, nilIdx, node->line);
@@ -350,6 +354,15 @@ void Compiler::compileReturnStmt(const ReturnStmt* node) {
     } else {
         std::size_t nilIdx = chunk_.addConstant(Value{});
         emit(OpCode::PushConst, nilIdx, node->line);
+    }
+    // Typed returns form a dynamic-to-static boundary: a function declared to
+    // return int/double/object must not silently leak an unknown/dynamic value
+    // of another runtime type. The VM assertion preserves the value on stack.
+    // Bare/unknown returns remain unrestricted.
+    // The source AST carries the exact annotation, so this also supports
+    // unions and parameterized object names through the VM's reflection matcher.
+    if (!currentReturnTypeName_.empty() && currentReturnTypeName_ != "void" && currentReturnTypeName_ != "unknown") {
+        emit(OpCode::AssertType, chunk_.addName(currentReturnTypeName_), node->line);
     }
     // Return performs lexical cleanup before leaving the function. Finalizers
     // are emitted inner-to-outer. compileActiveFinallyCleanup temporarily

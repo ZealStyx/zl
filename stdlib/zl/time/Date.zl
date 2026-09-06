@@ -7,4 +7,13 @@ class Date {
     public func day(): int { return Time.day(this.epoch) }
     public func format(string pattern): string { return Time.format(this.epoch, pattern) }
     public func addDays(int days): Date { return new Date(this.epoch + days * 86400) }
+    public func subtractDays(int days): Date { return this.addDays(-days) }
+    public func compare(Date other): int {
+        if (this.epoch < other.epoch) { return -1 }
+        if (this.epoch > other.epoch) { return 1 }
+        return 0
+    }
+    public func isBefore(Date other): bool { return this.compare(other) < 0 }
+    public func isAfter(Date other): bool { return this.compare(other) > 0 }
+    public func equals(Date other): bool { return this.compare(other) == 0 }
 }

@@ -2781,7 +2781,7 @@ void TypeChecker::validateThreadLambda(const LambdaExpr* node, const char* apiNa
         auto info=symbols_.lookupVar(name);
         if (!info) continue;
         if (!(info->type==ZlType::OBJECT && (info->className=="Shared" || info->className.rfind("Shared<", 0)==0)))
-            typeError(std::string(apiName)+" cannot capture '"+name+"' across a thread boundary; use Shared<T>", node->line);
+            typeError(std::string(apiName)+" cannot capture '"+name+"' across a thread boundary; use Atomic or Mutex for mutable shared state", node->line);
     }
 }
 TypeChecker::InferredType TypeChecker::inferExpr(const AstNode* node) {
@@ -3588,7 +3588,7 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                 for (const auto& captured : info->functionCaptureNames) {
                     const auto capInfo = symbols_.lookupVar(captured);
                     if (capInfo && !(capInfo->type == ZlType::OBJECT && (capInfo->className == "Shared" || capInfo->className.rfind("Shared<", 0) == 0)))
-                        typeError("Task.spawn cannot cross thread boundary with captured '" + captured + "'; use Shared<T>", node->line);
+                        typeError("Task.spawn cannot cross thread boundary with captured '" + captured + "'; use Atomic or Mutex for mutable shared state", node->line);
                 }
             }
         }
@@ -3615,7 +3615,7 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                 for (const auto& captured : info->functionCaptureNames) {
                     const auto capInfo = symbols_.lookupVar(captured);
                     if (capInfo && !(capInfo->type == ZlType::OBJECT && (capInfo->className == "Shared" || capInfo->className.rfind("Shared<", 0) == 0)))
-                        typeError("Thread.start cannot cross thread boundary with captured '" + captured + "'; use Shared<T>", node->line);
+                        typeError("Thread.start cannot cross thread boundary with captured '" + captured + "'; use Atomic or Mutex for mutable shared state", node->line);
                 }
             }
         }

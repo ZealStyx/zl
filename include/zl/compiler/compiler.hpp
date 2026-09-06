@@ -110,6 +110,7 @@ private:
     // compileSuperCallExpr/compileSuperMethodCallExpr don't need to re-look
     // it up on every use.
     std::string currentParentClassName_;
+    std::string currentReturnTypeName_;
     std::unordered_map<DispatchSignature, std::size_t, DispatchSignatureHash> methodSlots_;
 
     // className -> its `extends` parent (or absent, if none), used during

@@ -1,3 +1,6 @@
-// zl.log.Log - structured logging facade.
+// zl.logging.Log - structured logging facade.
 class Log {
+    public static func infoLine(unknown value): void { Log.info(value) }
+    public static func warnLine(unknown value): void { Log.warn(value) }
+    public static func errorLine(unknown value): void { Log.error(value) }
 }
