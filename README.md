@@ -18,11 +18,6 @@ include/zl/    Public headers for the language runtime and compiler
 src/           C++ implementation of the compiler, VM, and natives
 zlpkg/         C++ implementation of the zlpkg dependency-manager CLI (separate binary/target)
 stdlib/        Standard-library packages beyond auto-imported zl.lang (e.g. zl/util/Queue.zl) - copied next to the built binary
-examples/      Small curated showcase programs for users and documentation
-tests/zl/       Permanent ZL valid/invalid regression fixtures
-tests/         C++ test files for lexer, parser, compiler, and VM
-docs/          Organized architecture, design, guide, reference, status, and archive documentation
-docs/status/IMPLEMENTED_ONLY_SCORECARD.md  Current implemented-only maturity scorecard and verified test baseline
 scripts/       Build, run, regression, native-gate, and binding helper scripts
 build/         Generated build directory created locally by CMake / scripts/build.bat (not committed)
 ```
