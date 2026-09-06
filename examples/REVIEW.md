@@ -284,6 +284,40 @@ Allowed: `c.get() + 1` on a `Shared<int>` (no member access), any payload access
 inside `withLock`, a plain class's `get()`, and `Map.get(key)` (takes an
 argument, so it was never matched).
 
+### 11. `Task<T>` lost its type argument when read out of a `List` by index
+
+```zl
+var ts = new List<Task<int>>()
+ts.push(inst.work(3))
+log("v " + ts[0].block())
+-> compile error: type error: type 'Task' has no method 'block'
+
+log("v " + ts.get(0).block())   // the same thing, and this one worked
+```
+
+So the two equivalent reads of the same element disagreed, which made it
+impossible to fan tasks out into a collection and collect the results - the
+natural way to write concurrent code.
+
+**Cause.** `TypeChecker::inferIndexAccess` derived the element type from the
+`List<...>` class name with a hardcoded list that only covered the four
+primitives (`int`, `double`, `string`, `bool`) and sent everything else to
+`ZlType::OBJECT`. `Task` is its own type kind, not an object whose class name
+happens to be `"Task<int>"`, so `block` could not be resolved on it. The other
+element-type mappers in the same file already handled `Task`, `func`, `nil`,
+`list`, `map`, `set` and `array`; this one had drifted.
+
+**Fix.** `inferIndexAccess` now uses the same canonical mapping. A subtlety the
+first attempt got wrong: the mapping matches on the *base* name (`list`, not
+`List`), so a class element must keep its full instantiation as its class name -
+otherwise `List<List<int>>` indexed once became plain `List` and the next index
+failed with "indexed access requires a List<T>". `intermediate/NestedGenerics.zl`
+caught that immediately.
+
+Verified: `List<Task<int>>[i].block()`, `List<Task<string>>[i].block()`, a 50-task
+fan-out summed through indices (`sum 1225`), and no change to `List<int>`,
+`List<List<int>>` or `List<Shared<int>>`.
+
 ## Still open
 
 Ranked by how quickly a new user hits them. Entries marked **(fixed)** no longer
@@ -430,6 +464,20 @@ static func describe(Shape s): string { return s.name() }
 ```
 
 An interface-typed *variable* works, so `Interfaces.zl` uses one.
+
+Re-confirmed on a minimal case: `static func describe(Shape s): double { return
+s.area() }` with `Circle implements Shape`. Calling `describe` directly on the
+instance works (`new Circle(2.0).area()` is fine); only the static entry point
+fails.
+
+The failure is late - it is a `Compiler:` error at emit time, not a type error.
+`Compiler::compileCall` resolves `Namespace.callee` by scanning
+`chunk_.functions` for a static whose `dispatchSignature` equals the call site's
+`node->resolvedDispatch`, and only falls through to the native table if nothing
+matches (`src/compiler/compiler.cpp:1336-1351`). So the two signatures disagree
+for an interface-typed parameter, the static is never found, and the lookup ends
+up asking the native table for `R3.describe`. Which side of the comparison is
+wrong is not yet pinned down.
 
 ### O9 - `Time.nowMillis()` recursed until the stack ran out (fixed)
 

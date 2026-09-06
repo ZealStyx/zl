@@ -2015,11 +2015,48 @@ TypeChecker::InferredType TypeChecker::inferIndexAccess(const IndexAccessExpr* n
         const std::string prefix = "List<";
         if (object.className.rfind(prefix, 0) == 0 && object.className.back() == '>') {
             const std::string elem = object.className.substr(prefix.size(), object.className.size() - prefix.size() - 1);
-            if (elem == "int") result.type = ZlType::INT;
-            else if (elem == "double") result.type = ZlType::DOUBLE;
-            else if (elem == "string") result.type = ZlType::STRING;
-            else if (elem == "bool") result.type = ZlType::BOOL;
-            else { result.type = ZlType::OBJECT; result.className = elem; }
+            // An element name can carry its own type arguments (`Task<int>`),
+            // so match on the base name and keep the full instantiation.
+            auto canonicalOf = [](const std::string& name, std::string& klass) {
+                if (name == "int") return ZlType::INT;
+                if (name == "double") return ZlType::DOUBLE;
+                if (name == "string") return ZlType::STRING;
+                if (name == "bool") return ZlType::BOOL;
+                if (name == "nil") return ZlType::NIL;
+                if (name == "func") return ZlType::FUNCTION;
+                if (name == "Task") return ZlType::TASK;
+                if (name == "list") return ZlType::LIST;
+                if (name == "map") return ZlType::MAP;
+                if (name == "set") return ZlType::SET;
+                if (name == "array") return ZlType::ARRAY;
+                klass = name;
+                return ZlType::OBJECT;
+            };
+            const std::size_t angle = elem.find('<');
+            const std::string base = angle == std::string::npos ? elem : elem.substr(0, angle);
+            std::string elemClass;
+            result.type = canonicalOf(base, elemClass);
+            result.className = elemClass;
+            if (result.type == ZlType::OBJECT) {
+                // A class keeps its full instantiation as its name -
+                // `List<int>`, `Shared<int>`, `Widget`. The base name alone
+                // would drop the type arguments, so the next indexed access on
+                // the result would no longer see a `List<T>`.
+                result.className = elem;
+            }
+            if (result.type == ZlType::TASK) {
+                // `Task<T>` is its own type kind, not an OBJECT whose class name
+                // happens to be "Task<int>". Reporting it as OBJECT made
+                // `xs[0].block()` fail with "type 'Task' has no method 'block'"
+                // while the equivalent `xs.get(0).block()` worked.
+                result.className = elem;
+                if (angle != std::string::npos && elem.back() == '>' && elem.size() > angle + 1) {
+                    std::string valueClass;
+                    result.taskValueType =
+                        canonicalOf(elem.substr(angle + 1, elem.size() - angle - 2), valueClass);
+                    result.taskValueClassName = valueClass;
+                }
+            }
             return result;
         }
     }
