@@ -7,7 +7,11 @@ cmake_install.cmake
 compile_commands.json
 Makefile
 *.cmake
-/docs/
+
+# Generated API documentation (hand-written docs under /docs/ are tracked)
+/docs/api/
+/docs/html/
+/docs/xml/
 
 # IDE/editor files
 .vscode/
