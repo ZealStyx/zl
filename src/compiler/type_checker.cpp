@@ -3365,6 +3365,19 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
             typeError("non-exhaustive match: union subject requires a wildcard or irrefutable variable pattern", node->line);
         if (subject.type == ZlType::BOOL && !(matchedTrue && matchedFalse))
             typeError("non-exhaustive match: bool subject requires both true and false or a wildcard", node->line);
+        // Integers, doubles and strings have an open value space, so a set of
+        // literal patterns can never cover it. Reaching the end of the arm list
+        // evaluates the match to the SUBJECT itself, which has a different type
+        // from the arms: `match n { 1 => "one" }` yields the int 3 when n is 3.
+        // That either surfaces later as a runtime type assertion, or not at all
+        // when the result is untyped, so reject it here. An irrefutable variable
+        // pattern already counts as a wildcard (rootCatchAll above).
+        if (!subjectIsUnion &&
+            (subject.type == ZlType::INT || subject.type == ZlType::DOUBLE ||
+             subject.type == ZlType::STRING)) {
+            typeError("non-exhaustive match: " + zlTypeName(subject.type) +
+                      " subject requires a wildcard or irrefutable variable pattern", node->line);
+        }
         if (subject.type == ZlType::OBJECT && !subject.className.empty()) {
             const auto* shape = semanticModel_.findClass(subject.className);
             if (shape && shape->isEnumType) {

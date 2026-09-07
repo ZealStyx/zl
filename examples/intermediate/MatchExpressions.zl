@@ -1,0 +1,101 @@
+// ============================================================================
+// ZL Examples - Intermediate - match
+//
+// `match` is an expression: every arm produces a value, and the whole thing
+// evaluates to it.
+//
+//   var label = match n {
+//       1 => "one"
+//       2 => "two"
+//       _ => "other"        // wildcard - required, see below
+//   }
+//
+// All arms must produce the same type. A guard is written `when` after the
+// pattern. Bindings introduced by a variable pattern are scoped to their arm.
+//
+// EXHAUSTIVENESS IS CHECKED AT COMPILE TIME. A match that can fail to match any
+// arm is rejected rather than falling through at runtime:
+//
+//   * int / double / string  need a wildcard (or an irrefutable variable
+//     pattern) - the value space is open, so a list of literals can never cover
+//     it
+//   * bool                   needs both true and false, or a wildcard
+//   * enum                   needs every member, or a wildcard
+//
+// Without that check the fallthrough value is the SUBJECT itself, which has a
+// different type from the arms - `match n { 1 => "one" }` yields the int 3 when
+// n is 3.
+//
+// Note that matching on Option / Result is NOT currently possible; see
+// examples/REVIEW.md (O21). Use `if (opt.isSome())` instead.
+// ============================================================================
+
+enum Level { LOW MEDIUM HIGH }
+
+class MatchExpressions {
+    static func nameOf(int n): string {
+        return match n {
+            0 => "zero"
+            1 => "one"
+            2 => "two"
+            _ => "many"
+        }
+    }
+
+    static func size(int n): string {
+        // A guard refines an arm without needing a separate pattern.
+        return match n {
+            v when v < 0 => "negative"
+            0 => "zero"
+            _ => "positive"
+        }
+    }
+
+    static func label(Level level): string {
+        // Every enum member is covered, so no wildcard is needed.
+        return match level {
+            Level.LOW => "low"
+            Level.MEDIUM => "medium"
+            Level.HIGH => "high"
+        }
+    }
+
+    static func parity(bool flag): string {
+        return match flag {
+            true => "on"
+            false => "off"
+        }
+    }
+
+    func main(): void {
+        log(MatchExpressions.nameOf(0))
+        log(MatchExpressions.nameOf(2))
+        log(MatchExpressions.nameOf(9))
+        log(MatchExpressions.size(-3))
+        log(MatchExpressions.size(0))
+        log(MatchExpressions.size(4))
+        log(MatchExpressions.label(Level.MEDIUM))
+        log(MatchExpressions.parity(true))
+
+        // A variable pattern binds the subject for the arm, and is irrefutable,
+        // so it also serves as the catch-all.
+        var n = 42
+        var described = match n {
+            0 => "nothing"
+            v => "value " + v
+        }
+        log(described)
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// zero
+// two
+// many
+// negative
+// zero
+// positive
+// medium
+// on
+// value 42
+// --- End expected output ---

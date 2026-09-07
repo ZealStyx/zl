@@ -318,6 +318,37 @@ Verified: `List<Task<int>>[i].block()`, `List<Task<string>>[i].block()`, a 50-ta
 fan-out summed through indices (`sum 1225`), and no change to `List<int>`,
 `List<List<int>>` or `List<Shared<int>>`.
 
+### 12. A non-exhaustive `match` on an int, double or string compiled, then mistyped itself
+
+```zl
+var n = 3
+var m = match n { 1 => "one" }
+log("m = " + m)          // m is the int 3, not a string
+```
+
+No arm matches, so the match falls through and evaluates to the *subject* - which
+has a different type from every arm. With no declared type the value just leaks
+out as an `int`; declaring one turns it into a runtime failure instead:
+
+```zl
+string m = match n { 1 => "one" }
+-> runtime error: type assertion failed: expected string, got int
+```
+
+The exhaustiveness checker already rejected incomplete matches for union, `bool`,
+`enum`, `Option` and `Result` subjects (`type_checker.cpp:3360-3390`). It simply
+had no rule for the plain scalar subjects, which is where the open value space
+makes a list of literals provably insufficient.
+
+**Fix.** An `int`, `double` or `string` subject now requires a wildcard or an
+irrefutable variable pattern. An irrefutable variable pattern already counted as
+a wildcard through `rootCatchAll`, so `v => ...` still works as the catch-all.
+
+Verified: int, double and string subjects without a catch-all are all rejected at
+compile time; with a wildcard, with a variable pattern, and the existing `bool`
+and `enum` forms all still compile and run. `intermediate/MatchExpressions.zl`
+covers the accepted shapes, including a `when` guard.
+
 ## Still open
 
 Ranked by how quickly a new user hits them. Entries marked **(fixed)** no longer
@@ -666,6 +697,39 @@ atomic (expect 4000)     4000     <- exact
 So the guidance in that example is load-bearing, and `Atomic` is correct under
 real contention rather than merely in the small counts the examples use. Recorded
 here as evidence, not as a defect.
+
+### O21 - `match` cannot pattern-match on `Option` or `Result` at all
+
+The exhaustiveness checker has explicit rules for exactly these subjects -
+"Option subject requires both Some and None or a wildcard", "Result subject
+requires both Ok and Err or a wildcard" - so matching on them is clearly
+intended. But no pattern spelling is accepted:
+
+```zl
+var r = new Ok<int, string>(7)
+match r { Ok v => ...  Err e => ... }
+-> type error: generic type 'Ok' requires 2 type argument(s), for example 'Ok<...>'
+
+match r { Ok<int, string> v => ...  Err<int, string> e => ... }
+-> type error: match type pattern does not match subject type
+```
+
+The first form is rejected before it gets anywhere; the second is rejected by the
+type-pattern compatibility test at `type_checker.cpp:3044`, which routes through
+`isAssignable`. `Ok<T,E> extends Result<T,E>`, so that check needs to accept an
+instantiated subclass against its parameterized parent - the same widening that
+fix 7 added on the runtime side in `reflectiveObjectMatches`, but for the static
+assignability model.
+
+`enum` subjects work fine, so the pattern machinery itself is sound.
+
+The practical consequence is that those two exhaustiveness rules are unreachable
+dead code, and `ResultType.zl` / `OptionType.zl` use `if (r.isOk())` rather than
+`match` - which reads as a style choice but is in fact the only option.
+
+Not fixed: widening `isAssignable` for generic instantiations touches every
+assignment in the language, which is well beyond what the finding justifies on its
+own.
 
 ## Verdict on the previously reported F6-F9
 
