@@ -1435,7 +1435,17 @@ void Compiler::compileCollectionLiteral(const CollectionLiteral* node) {
         const std::string& className = node->targetCollectionKind;
         std::size_t classIdx = chunk_.addName(className);
         const std::size_t ctorSlot = methodSlot(DispatchSignature{className, {}});
-        emit(OpCode::NewObject, classIdx, node->line);
+        // Tag the new object with its concrete generic instantiation (e.g.
+        // "List<int>") so runtime method calls substitute the element type -
+        // exactly what `new List<int>()` records via NewObject's operand3.
+        // Without this a typed literal produced an erased bare `List` whose
+        // element type was unknowable at runtime (and failed a List<int>
+        // assignment assertion).
+        Instruction litNewObject{OpCode::NewObject, classIdx, node->line};
+        if (!node->targetCollectionClassName.empty()) {
+            litNewObject.operand3 = chunk_.addName(node->targetCollectionClassName);
+        }
+        chunk_.code.push_back(litNewObject);
         emit(OpCode::Dup, 0, node->line);
         emit(OpCode::InvokeMethod, ctorSlot, node->line, 0);
         emit(OpCode::Pop, 0, node->line);
