@@ -72,21 +72,16 @@ Chunk Compiler::compile(const Program& program) {
 
     chunk_.classReflection = plan.classReflection;
 
-    // A class type parameter (e.g. `T` in `class Box<T>`) names no concrete
-    // type at runtime, so any signature part that mentions one is erased to the
-    // "unknown" wildcard (which the VM treats as "no assertion"); otherwise the
-    // runtime would compare a value against the literal name "T" and reject
-    // every call into a generic method. Erasure works from the annotation AST
-    // (describeTypeForRuntime), not by scanning the rendered string for tokens,
-    // so a concrete type whose name merely coincides with a parameter is kept.
-    const auto& planTypeParams = plan.classTypeParams;
-    auto ownerTypeParams = [&planTypeParams](const std::string& ownerClassName) -> const std::vector<std::string>& {
-        static const std::vector<std::string> none;
-        auto it = planTypeParams.find(ownerClassName);
-        return it == planTypeParams.end() ? none : it->second;
-    };
-    auto eraseTypeParam = [&ownerTypeParams](const std::string& ownerClassName, const TypeAnnotation& type) {
-        return describeTypeForRuntime(type, ownerTypeParams(ownerClassName));
+    // Runtime signature names keep a generic method's own type parameters as
+    // their tokens (e.g. `List<T>.push(T item)` records parameter type "T").
+    // The static type checker already enforces types inside a generic body;
+    // the VM substitutes the receiver's concrete instantiation (T->string for a
+    // List<string>) before asserting at the call boundary, so generic writes
+    // are enforced even where the element type was statically erased. We render
+    // from the annotation AST (describeTypeAnnotation), which keeps concrete
+    // types even if their spelling coincides with a parameter elsewhere.
+    auto runtimeTypeName = [](const TypeAnnotation& type) {
+        return describeTypeAnnotation(type);
     };
 
     // --- pass 1: register every func's signature up front, so calls can ---
@@ -102,12 +97,12 @@ Chunk Compiler::compile(const Program& program) {
         parameterTypeNames.reserve(fn->params.size());
         for (const auto& p : fn->params) {
             paramNames.push_back(p.name);
-            parameterTypeNames.push_back(eraseTypeParam(fn->ownerClassName, p.type));
+            parameterTypeNames.push_back(runtimeTypeName(p.type));
         }
         const DispatchSignature signature = dispatchSignature(*fn, classTypeParams.at(fn->ownerClassName));
         std::string qualifiedName = fn->ownerClassName + "." + signature.describe();
         FunctionInfo info{std::move(qualifiedName), std::move(paramNames), std::move(parameterTypeNames),
-                          (fn->returnType.name.empty() ? "void" : eraseTypeParam(fn->ownerClassName, fn->returnType)), 0, fn->isStatic, fn->isAsync};
+                          (fn->returnType.name.empty() ? "void" : runtimeTypeName(fn->returnType)), 0, fn->isStatic, fn->isAsync};
         info.ownerClassName = fn->ownerClassName;
         info.isNative = std::any_of(fn->annotations.begin(), fn->annotations.end(), [](const Annotation& a) { return a.name == "native"; });
         info.dispatchSignature = signature;
@@ -206,7 +201,12 @@ Chunk Compiler::compile(const Program& program) {
         const FunctionDecl* fn = allFunctions[i];
         chunk_.functions[i].entryAddress = chunk_.code.size();
         currentClassName_ = fn->ownerClassName;
-        currentReturnTypeName_ = fn->returnType.name.empty() ? "void" : eraseTypeParam(fn->ownerClassName, fn->returnType);
+        currentReturnTypeName_ = fn->returnType.name.empty() ? "void" : runtimeTypeName(fn->returnType);
+        auto ownerParamsIt = classTypeParams.find(fn->ownerClassName);
+        currentOwnerTypeParams_ = (ownerParamsIt == classTypeParams.end())
+            ? std::vector<std::string>{} : ownerParamsIt->second;
+        currentReturnIsGeneric_ = !fn->returnType.name.empty() &&
+            typeAnnotationMentionsTypeParam(fn->returnType, currentOwnerTypeParams_);
         auto parentIt = classParents_.find(currentClassName_);
         currentParentClassName_ = (parentIt != classParents_.end()) ? parentIt->second : std::string();
         activeOwnedLocalNames_.clear();
@@ -380,7 +380,12 @@ void Compiler::compileReturnStmt(const ReturnStmt* node) {
     // Bare/unknown returns remain unrestricted.
     // The source AST carries the exact annotation, so this also supports
     // unions and parameterized object names through the VM's reflection matcher.
-    if (!currentReturnTypeName_.empty() && currentReturnTypeName_ != "void" && currentReturnTypeName_ != "unknown") {
+    // Skip the in-body assertion for a generic return (e.g. List.get(): T): the
+    // VM substitutes the receiver's concrete instantiation and enforces it at
+    // the call boundary, so asserting the bare parameter token here would fail
+    // against the correctly-typed value.
+    if (!currentReturnIsGeneric_ &&
+        !currentReturnTypeName_.empty() && currentReturnTypeName_ != "void" && currentReturnTypeName_ != "unknown") {
         emit(OpCode::AssertType, chunk_.addName(currentReturnTypeName_), node->line);
     }
     // Return performs lexical cleanup before leaving the function. Finalizers
@@ -1268,7 +1273,14 @@ void Compiler::compileLambdaExpr(const LambdaExpr* node) {
     // Without this, a block-body lambda returning an int inside a `: func`
     // factory emits AssertType("func") and fails the moment it is invoked.
     const std::string savedReturnTypeName = currentReturnTypeName_;
+    const auto savedOwnerTypeParams = currentOwnerTypeParams_;
+    const bool savedReturnIsGeneric = currentReturnIsGeneric_;
     currentReturnTypeName_ = lambdaReturnTypeName;
+    // A lambda is a standalone function with no generic owner class, so its
+    // own return type is never a type parameter; reset the generic-return flag
+    // so a lambda's return assertions are emitted (and restored below).
+    currentOwnerTypeParams_.clear();
+    currentReturnIsGeneric_ = false;
 
     const auto savedOwnedLocals = activeOwnedLocalNames_;
     activeOwnedLocalNames_.clear();
@@ -1294,6 +1306,8 @@ void Compiler::compileLambdaExpr(const LambdaExpr* node) {
     chunk_.functions[funcIndex].ownedLocalNames = activeOwnedLocalNames_;
     activeOwnedLocalNames_ = savedOwnedLocals;
     currentReturnTypeName_ = savedReturnTypeName;
+    currentOwnerTypeParams_ = savedOwnerTypeParams;
+    currentReturnIsGeneric_ = savedReturnIsGeneric;
     patchJump(skipJump);
     // Capture-by-value happens HERE, at MakeClosure - every time this
     // LambdaExpr is evaluated (e.g. each time through a loop), a fresh

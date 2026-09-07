@@ -1,0 +1,77 @@
+// ============================================================================
+// ZL Examples - Intermediate - Generic Runtime Type Checks
+//
+// List<T>, Map<K,V> and Set<T> are generic classes compiled ONCE, with the
+// type parameter (T/K/V) left in the method signatures. At a call, the VM
+// substitutes the receiver's concrete instantiation (e.g. List<int> -> T=int)
+// and enforces the element type at the boundary - even on fully dynamic
+// (reflection / erased) calls that the compile-time checker cannot see.
+//
+// This example exercises those runtime paths:
+//   * typed writes and generic returns (push/get/first/pop)
+//   * a generic collection built INSIDE another generic (Map.keys() makes a
+//     List<K>), whose element parameter belongs to a different class
+//   * reflective Method.invoke with a correct AND a wrong-typed argument:
+//     the wrong one is rejected at runtime, the correct one is accepted.
+// ============================================================================
+
+class GenericRuntimeChecks {
+    // Reflectively invoke push on a generic list through an object-typed
+    // boundary. The static checker cannot know the element type here; the VM
+    // enforces it from the receiver's concrete instantiation.
+    func reflectivePush(object target, object value): bool {
+        var method = Type.of(target).method("push")
+        var args = [value]
+        try {
+            method.invoke(target, args)
+            return true
+        } catch Exception e {
+            return false
+        }
+    }
+
+    func main(): void {
+        // --- typed writes and generic returns ---
+        var nums = new List<int>()
+        nums.push(10)
+        nums.push(20)
+        log("get " + nums.get(0))
+        log("first " + nums.first())
+        log("pop " + nums.pop())
+
+        // --- generic collection built inside another generic (Map.keys()) ---
+        var ages = new Map<string, int>()
+        ages.put("ada", 36)
+        ages.put("grace", 45)
+        var keys = ages.keys()
+        log("keys " + keys.length())
+        log("key0 " + keys.get(0))
+        var values = ages.values()
+        log("value0 " + values.get(0))
+
+        // --- runtime enforcement on the dynamic boundary ---
+        var strings = new List<string>()
+        var app = new GenericRuntimeChecks()
+        log("good string accepted: " + app.reflectivePush(strings, "hello"))
+        log("bad int rejected: " + app.reflectivePush(strings, 7))
+        log("good int accepted: " + app.reflectivePush(nums, 99))
+        log("bad string rejected: " + app.reflectivePush(nums, "nope"))
+        log("strings length " + strings.length())
+        log("nums length " + nums.length())
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// get 10
+// first 10
+// pop 20
+// keys 2
+// key0 ada
+// value0 36
+// good string accepted: true
+// bad int rejected: false
+// good int accepted: true
+// bad string rejected: false
+// strings length 1
+// nums length 2
+// --- End expected output ---

@@ -16,6 +16,7 @@
 #include "zl/vm/native.hpp"
 #include "zl/vm/runtime_task.hpp"
 #include <algorithm>
+#include <unordered_set>
 
 namespace zl {
 namespace {
@@ -201,6 +202,95 @@ private:
 
 bool reflectiveMatchesSpec(const Value& value, const ReflectionTypeSpec& spec, const Chunk* chunk);
 bool reflectionTypeSpecsEqual(const ReflectionTypeSpec& a, const ReflectionTypeSpec& b);
+std::string reflectionTypeSpecName(const ReflectionTypeSpec& spec);
+
+// Replace whole type-parameter identifier tokens in a rendered type name with
+// their concrete instantiations. Generic methods are compiled once with their
+// owner's parameters (T, K, V) left in the signature names; at a call the
+// receiver carries its concrete instantiation (e.g. "List<string>"), so we
+// substitute T->string before asserting. Tokens are matched as whole
+// identifiers so `T` does not rewrite letters inside another name.
+std::string substituteTypeParams(const std::string& typeName,
+                                 const std::vector<std::string>& params,
+                                 const std::vector<std::string>& args) {
+    if (params.empty() || typeName.empty() || typeName == "unknown" || typeName == "void")
+        return typeName;
+    std::string out;
+    out.reserve(typeName.size());
+    for (std::size_t i = 0; i < typeName.size();) {
+        const unsigned char c = static_cast<unsigned char>(typeName[i]);
+        if (!(std::isalnum(c) || c == '_')) { out.push_back(typeName[i]); ++i; continue; }
+        std::size_t start = i;
+        while (i < typeName.size()) {
+            const unsigned char d = static_cast<unsigned char>(typeName[i]);
+            if (!(std::isalnum(d) || d == '_')) break;
+            ++i;
+        }
+        const std::string token = typeName.substr(start, i - start);
+        std::string replacement = token;
+        for (std::size_t p = 0; p < params.size() && p < args.size(); ++p) {
+            if (token == params[p]) { replacement = args[p]; break; }
+        }
+        out += replacement;
+    }
+    return out;
+}
+
+// Whether a rendered type name still contains an unresolved generic parameter
+// token after substitution. A concrete runtime type is a builtin name (int,
+// string, ...), a generic-class name, or a class present in the chunk's
+// reflection table; anything else left as a bare identifier is a type parameter
+// that could not be resolved from the receiver's instantiation (it belongs to a
+// different generic class or the receiver is un-instantiated) and must be
+// skipped here - the static checker enforces those cases.
+bool typeNameHasUnresolvedParam(const std::string& typeName, const Chunk& chunk) {
+    if (typeName.empty() || typeName == "unknown" || typeName == "void")
+        return false;
+    for (std::size_t i = 0; i < typeName.size();) {
+        const unsigned char c = static_cast<unsigned char>(typeName[i]);
+        if (!(std::isalnum(c) || c == '_')) { ++i; continue; }
+        std::size_t start = i;
+        while (i < typeName.size()) {
+            const unsigned char d = static_cast<unsigned char>(typeName[i]);
+            if (!(std::isalnum(d) || d == '_')) break;
+            ++i;
+        }
+        const std::string token = typeName.substr(start, i - start);
+        static const std::unordered_set<std::string> builtins = {
+            "int", "double", "float", "string", "bool", "void", "nil", "null",
+            "func", "unknown", "list", "map", "set", "array", "Task"
+        };
+        if (builtins.count(token)) continue;
+        // Capitalised generic-class names (List, Map, Set, a user class) are
+        // concrete; they are always followed by arguments which we also walk.
+        if (token == "List" || token == "Map" || token == "Set" || token == "Array" ||
+            chunk.classReflection.count(token))
+            continue;
+        // A bare identifier that is neither a builtin nor a known class is an
+        // unresolved type parameter.
+        return true;
+    }
+    return false;
+}
+
+// Resolve the concrete type-argument instantiation of a generic-object
+// receiver. Returns (parameter names, concrete argument names) for the
+// receiver's class, e.g. for a List<string> receiver (["T"], ["string"]).
+// Empty vectors for a non-generic or un-instantiated receiver.
+std::pair<std::vector<std::string>, std::vector<std::string>>
+receiverTypeArgs(const ObjectBox& receiver, const Chunk& chunk) {
+    const auto metaIt = chunk.classReflection.find(receiver.className);
+    if (metaIt == chunk.classReflection.end() || metaIt->second.typeParameters.empty())
+        return {};
+    const std::vector<std::string>& params = metaIt->second.typeParameters;
+    if (receiver.genericTypeName.empty()) return {};
+    const ReflectionTypeSpec spec = ReflectionTypeParser(receiver.genericTypeName).parse();
+    if (spec.args.empty()) return {};
+    std::vector<std::string> args;
+    args.reserve(spec.args.size());
+    for (const auto& a : spec.args) args.push_back(reflectionTypeSpecName(a));
+    return {params, std::move(args)};
+}
 
 std::string reflectionTypeSpecName(const ReflectionTypeSpec& spec) {
     if (!spec.unionMembers.empty()) {
@@ -1150,7 +1240,12 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 }
                 for (std::size_t i = 0; i < paramCount && i < fn.parameterTypeNames.size(); ++i) {
                     const auto& expected = fn.parameterTypeNames[i];
-                    if (!expected.empty() && expected != "unknown" && !runtimeAssignableToType(args[i], expected, &chunk)) {
+                    // Skip an unresolved generic-parameter signature (a bare
+                    // self-call inside generic code carries no concrete receiver
+                    // here); concrete types are enforced.
+                    if (!expected.empty() && expected != "unknown" &&
+                        !typeNameHasUnresolvedParam(expected, chunk) &&
+                        !runtimeAssignableToType(args[i], expected, &chunk)) {
                         throw std::runtime_error("type assertion failed for argument " + std::to_string(i + 1) + ": expected " + expected + ", got " + runtimeValueTypeName(args[i]));
                     }
                 }
@@ -1258,7 +1353,9 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 }
                 for (std::size_t i = 0; i < argCount && i < closure.parameterTypeNames.size(); ++i) {
                     const auto& expected = closure.parameterTypeNames[i];
-                    if (!expected.empty() && expected != "unknown" && !runtimeAssignableToType(args[i], expected, closure.chunk.get())) {
+                    if (!expected.empty() && expected != "unknown" &&
+                        !typeNameHasUnresolvedParam(expected, *closure.chunk) &&
+                        !runtimeAssignableToType(args[i], expected, closure.chunk.get())) {
                         throw std::runtime_error("type assertion failed for argument " + std::to_string(i + 1) + ": expected " + expected + ", got " + runtimeValueTypeName(args[i]));
                     }
                 }
@@ -1513,9 +1610,25 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                         "VM: method '" + fn.name + "' expects " + std::to_string(fn.paramNames.size()) +
                         " argument(s), got " + std::to_string(argCount));
                 }
+                // A generic method is compiled once with its owner's type
+                // parameters left in the signature names (e.g. List.push(T)).
+                // Substitute the receiver's concrete instantiation (e.g.
+                // List<string> -> T=string) before enforcing, so a wrong-typed
+                // write is caught at the boundary even where the static
+                // checker's element type was erased.
+                const auto [typeParams, typeArgs] = receiverTypeArgs(**objRef, chunk);
                 for (std::size_t i = 0; i < argCount && i < fn.parameterTypeNames.size(); ++i) {
-                    const auto& expected = fn.parameterTypeNames[i];
-                    if (!expected.empty() && expected != "unknown" && !runtimeAssignableToType(args[i], expected, &chunk)) {
+                    const std::string raw = fn.parameterTypeNames[i];
+                    const std::string expected = substituteTypeParams(raw, typeParams, typeArgs);
+                    // Skip when the assertion type still names an unresolved
+                    // generic parameter (an un-instantiated receiver, or a
+                    // parameter owned by a different generic class than the
+                    // receiver - e.g. List.push(T) on a List<K> built inside
+                    // Map.keys()); the static checker enforces those. Concrete
+                    // types are enforced here.
+                    if (!expected.empty() && expected != "unknown" &&
+                        !typeNameHasUnresolvedParam(expected, chunk) &&
+                        !runtimeAssignableToType(args[i], expected, &chunk)) {
                         throw std::runtime_error("type assertion failed for argument " + std::to_string(i + 1) + ": expected " + expected + ", got " + runtimeValueTypeName(args[i]));
                     }
                 }
@@ -1866,11 +1979,20 @@ Value VM::invokeReflectiveMethod(const Value& methodValue, const Value& receiver
             }
         }
     }
+    // Substitute the receiver's concrete generic instantiation (e.g. T=string
+    // for List.push on a List<string>) so a reflective invoke enforces the
+    // element type rather than asserting the raw parameter token.
+    std::vector<std::string> rParams, rArgs;
+    if (!isStatic && std::holds_alternative<ObjectRef>(receiver) && std::get<ObjectRef>(receiver)) {
+        std::tie(rParams, rArgs) = receiverTypeArgs(*std::get<ObjectRef>(receiver), *activeChunk_);
+    }
     for (std::size_t i = 0; i < values.size(); ++i) {
-        const std::string expected = i < reflectedParameterTypes.size()
+        std::string expected = i < reflectedParameterTypes.size()
             ? reflectedParameterTypes[i]
             : (i < fn.parameterTypeNames.size() ? fn.parameterTypeNames[i] : "unknown");
-        if (!reflectiveTypeMatchesName(values[i], expected, activeChunk_))
+        expected = substituteTypeParams(expected, rParams, rArgs);
+        if (expected != "unknown" && !typeNameHasUnresolvedParam(expected, *activeChunk_) &&
+            !reflectiveTypeMatchesName(values[i], expected, activeChunk_))
             throwReflectionException("ReflectionError.InvalidArguments: argument type mismatch at index " + std::to_string(i), activeChunk_, &state_);
     }
     if (fn.isAsync) {
