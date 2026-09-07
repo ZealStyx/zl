@@ -1,6 +1,7 @@
 #include "zl/compiler/type_checker.hpp"
 #include "zl/compiler/operator_rules.hpp"
 #include "zl/compiler/generic_instantiation.hpp"
+#include "zl/compiler/thread_capture.hpp"
 #include "zl/common/type_annotation.hpp"
 
 #include <functional>
@@ -12,23 +13,6 @@
 #include <unordered_set>
 
 namespace zl {
-
-namespace {
-// Whether a captured local is safe to carry across a thread boundary.
-// `Shared<T>` is the explicit opt-in wrapper; the rest are the runtime's own
-// synchronisation primitives, whose state is guarded internally and which are
-// exactly what the diagnostic tells you to use. Keep this list in step with
-// isThreadSafeClassName in src/vm/native.cpp.
-bool capturedValueCrossesThreadBoundary(const SymbolTable& symbols, const std::string& captured) {
-    const auto info = symbols.lookupVar(captured);
-    if (!info || info->type != ZlType::OBJECT) return false;
-    const auto& cls = info->className;
-    const bool threadSafe = cls == "Shared" || cls.rfind("Shared<", 0) == 0 ||
-                            cls == "Atomic" || cls == "Mutex" || cls == "RwLock" ||
-                            cls == "Semaphore" || cls == "Channel" || cls == "Condition";
-    return !threadSafe;
-}
-} // namespace
 
 namespace {
 bool genericCollectionCompatible(const std::string& from, const std::string& to) {
@@ -2014,49 +1998,24 @@ TypeChecker::InferredType TypeChecker::inferIndexAccess(const IndexAccessExpr* n
     if (!object.className.empty()) {
         const std::string prefix = "List<";
         if (object.className.rfind(prefix, 0) == 0 && object.className.back() == '>') {
+            // The element type is the generic argument, e.g. "Task<int>" from
+            // "List<Task<int>>". It can itself be instantiated, so decode the
+            // full name via the shared name<->type helpers rather than
+            // re-matching spellings here: a class keeps its full instantiation
+            // as its name (`List<int>`, `Shared<int>`, `Widget`), and `Task<T>`
+            // carries its value type so `xs[0].block()` type-checks the same as
+            // `xs.get(0).block()`.
             const std::string elem = object.className.substr(prefix.size(), object.className.size() - prefix.size() - 1);
-            // An element name can carry its own type arguments (`Task<int>`),
-            // so match on the base name and keep the full instantiation.
-            auto canonicalOf = [](const std::string& name, std::string& klass) {
-                if (name == "int") return ZlType::INT;
-                if (name == "double") return ZlType::DOUBLE;
-                if (name == "string") return ZlType::STRING;
-                if (name == "bool") return ZlType::BOOL;
-                if (name == "nil") return ZlType::NIL;
-                if (name == "func") return ZlType::FUNCTION;
-                if (name == "Task") return ZlType::TASK;
-                if (name == "list") return ZlType::LIST;
-                if (name == "map") return ZlType::MAP;
-                if (name == "set") return ZlType::SET;
-                if (name == "array") return ZlType::ARRAY;
-                klass = name;
-                return ZlType::OBJECT;
-            };
-            const std::size_t angle = elem.find('<');
-            const std::string base = angle == std::string::npos ? elem : elem.substr(0, angle);
-            std::string elemClass;
-            result.type = canonicalOf(base, elemClass);
-            result.className = elemClass;
-            if (result.type == ZlType::OBJECT) {
-                // A class keeps its full instantiation as its name -
-                // `List<int>`, `Shared<int>`, `Widget`. The base name alone
-                // would drop the type arguments, so the next indexed access on
-                // the result would no longer see a `List<T>`.
-                result.className = elem;
-            }
-            if (result.type == ZlType::TASK) {
-                // `Task<T>` is its own type kind, not an OBJECT whose class name
-                // happens to be "Task<int>". Reporting it as OBJECT made
-                // `xs[0].block()` fail with "type 'Task' has no method 'block'"
-                // while the equivalent `xs.get(0).block()` worked.
-                result.className = elem;
-                if (angle != std::string::npos && elem.back() == '>' && elem.size() > angle + 1) {
-                    std::string valueClass;
-                    result.taskValueType =
-                        canonicalOf(elem.substr(angle + 1, elem.size() - angle - 2), valueClass);
-                    result.taskValueClassName = valueClass;
+            auto inferNamedType = [](InferredType& out, const std::string& fullName) {
+                const auto [base, args] = splitGenericName(fullName);
+                out.type = zlTypeFromBaseName(base);
+                out.className = (out.type == ZlType::OBJECT || out.type == ZlType::TASK) ? fullName : std::string{};
+                if (out.type == ZlType::TASK) {
+                    out.taskValueType = zlTypeFromBaseName(splitGenericName(args).first);
+                    out.taskValueClassName = (out.taskValueType == ZlType::OBJECT) ? args : std::string{};
                 }
-            }
+            };
+            inferNamedType(result, elem);
             return result;
         }
     }
@@ -2817,94 +2776,23 @@ TypeChecker::InferredArguments TypeChecker::inferArguments(const std::vector<Nod
 }
 
 
-namespace {
-void collectThreadRefs(const AstNode* node, std::unordered_set<std::string>& refs, bool& usesThis,
-                       const std::unordered_set<std::string>& params) {
-    if (!node) return;
-    switch (node->kind) {
-        case NodeKind::Identifier: {
-            const auto* n=static_cast<const Identifier*>(node);
-            if (!params.count(n->name)) refs.insert(n->name);
-            break;
-        }
-        case NodeKind::ThisExpr: usesThis=true; break;
-        case NodeKind::UnaryExpr: { auto* n=static_cast<const UnaryExpr*>(node); collectThreadRefs(n->operand.get(),refs,usesThis,params); break; }
-        case NodeKind::AwaitExpr: { auto* n=static_cast<const AwaitExpr*>(node); collectThreadRefs(n->operand.get(),refs,usesThis,params); break; }
-        case NodeKind::BinaryExpr: { auto* n=static_cast<const BinaryExpr*>(node); collectThreadRefs(n->left.get(),refs,usesThis,params); collectThreadRefs(n->right.get(),refs,usesThis,params); break; }
-        case NodeKind::CallExpr: { auto* n=static_cast<const CallExpr*>(node);
-            // The callee is a NAME, not a child node, so walking only the
-            // arguments misses it. `f(g(x))` references both f and g, and a
-            // lambda that calls a captured func value must capture it - only
-            // names that actually resolve to a local are captured at runtime,
-            // so recording a class or method name here is harmless.
-            if (n->namespaceName.empty() && !n->calleeName.empty() && !params.count(n->calleeName)) {
-                refs.insert(n->calleeName);
-            }
-            for (auto& a : n->arguments) { collectThreadRefs(a.get(), refs, usesThis, params); }
-            break; }
-        case NodeKind::AssignExpr: { auto* n=static_cast<const AssignExpr*>(node); if(!params.count(n->name)) refs.insert(n->name); collectThreadRefs(n->value.get(),refs,usesThis,params); break; }
-        case NodeKind::MoveExpr: { auto* n=static_cast<const MoveExpr*>(node); if(!params.count(n->name)) refs.insert(n->name); break; }
-        case NodeKind::FieldAccessExpr: { auto* n=static_cast<const FieldAccessExpr*>(node); collectThreadRefs(n->object.get(),refs,usesThis,params); break; }
-        case NodeKind::IndexAccessExpr: { auto* n=static_cast<const IndexAccessExpr*>(node); collectThreadRefs(n->object.get(),refs,usesThis,params); collectThreadRefs(n->index.get(),refs,usesThis,params); break; }
-        case NodeKind::FieldAssignExpr: { auto* n=static_cast<const FieldAssignExpr*>(node); collectThreadRefs(n->object.get(),refs,usesThis,params); collectThreadRefs(n->value.get(),refs,usesThis,params); break; }
-        case NodeKind::MethodCallExpr: { auto* n=static_cast<const MethodCallExpr*>(node); collectThreadRefs(n->object.get(),refs,usesThis,params); for(auto& a:n->arguments) collectThreadRefs(a.get(),refs,usesThis,params); break; }
-        case NodeKind::NewExpr: { auto* n=static_cast<const NewExpr*>(node); for(auto& a:n->arguments) collectThreadRefs(a.get(),refs,usesThis,params); break; }
-        case NodeKind::CollectionLiteral: { auto* n=static_cast<const CollectionLiteral*>(node); for(auto& a:n->elements) collectThreadRefs(a.get(),refs,usesThis,params); for(auto& e:n->entries){collectThreadRefs(e.first.get(),refs,usesThis,params);collectThreadRefs(e.second.get(),refs,usesThis,params);} break; }
-        case NodeKind::BlockStmt: { auto* n=static_cast<const BlockStmt*>(node); for(auto& a:n->statements) collectThreadRefs(a.get(),refs,usesThis,params); break; }
-        case NodeKind::VarDecl: { auto* n=static_cast<const VarDecl*>(node); collectThreadRefs(n->initializer.get(),refs,usesThis,params); break; }
-        case NodeKind::LogStmt: { auto* n=static_cast<const LogStmt*>(node); collectThreadRefs(n->argument.get(),refs,usesThis,params); break; }
-        case NodeKind::IfStmt: { auto* n=static_cast<const IfStmt*>(node); for(auto& b:n->branches){collectThreadRefs(b.condition.get(),refs,usesThis,params);collectThreadRefs(b.body.get(),refs,usesThis,params);} collectThreadRefs(n->elseBody.get(),refs,usesThis,params); break; }
-        case NodeKind::ReturnStmt: { auto* n=static_cast<const ReturnStmt*>(node); collectThreadRefs(n->value.get(),refs,usesThis,params); break; }
-        case NodeKind::ForStmt: { auto* n=static_cast<const ForStmt*>(node); collectThreadRefs(n->start.get(),refs,usesThis,params);collectThreadRefs(n->end.get(),refs,usesThis,params);collectThreadRefs(n->step.get(),refs,usesThis,params);collectThreadRefs(n->body.get(),refs,usesThis,params); break; }
-        case NodeKind::WhileStmt: { auto* n=static_cast<const WhileStmt*>(node); collectThreadRefs(n->condition.get(),refs,usesThis,params);collectThreadRefs(n->body.get(),refs,usesThis,params); break; }
-        case NodeKind::RepeatStmt: { auto* n=static_cast<const RepeatStmt*>(node); collectThreadRefs(n->body.get(),refs,usesThis,params);collectThreadRefs(n->condition.get(),refs,usesThis,params); break; }
-        case NodeKind::TryStmt: { auto* n=static_cast<const TryStmt*>(node); collectThreadRefs(n->tryBlock.get(),refs,usesThis,params);for(auto& c:n->catches)collectThreadRefs(c.block.get(),refs,usesThis,params);collectThreadRefs(n->finallyBlock.get(),refs,usesThis,params);break; }
-        case NodeKind::ThrowStmt: { auto* n=static_cast<const ThrowStmt*>(node); collectThreadRefs(n->value.get(),refs,usesThis,params); break; }
-        case NodeKind::ExprStmt: { auto* n=static_cast<const ExprStmt*>(node); collectThreadRefs(n->expression.get(),refs,usesThis,params); break; }
-        case NodeKind::LambdaExpr: {
-            // A lambda nested in this body needs whatever IT references, so the
-            // enclosing lambda has to carry those names across for it: at
-            // runtime MakeClosure captures from the frame it executes in, and
-            // that frame holds exactly this lambda's captures. Without this,
-            // `func() { var inner = func() => n; inner() }` captures nothing
-            // for `inner` to see and dies with "undefined variable 'n'".
-            // The nested lambda's own parameters shadow outer names, so they
-            // must not be recorded as captures.
-            auto* n = static_cast<const LambdaExpr*>(node);
-            std::unordered_set<std::string> nestedParams(params);
-            for (const auto& p : n->params) nestedParams.insert(p.name);
-            collectThreadRefs(n->hasExprBody ? n->exprBody.get() : n->blockBody.get(),
-                              refs, usesThis, nestedParams);
-            break;
-        }
-        default: break;
-    }
-}
-}
 void TypeChecker::analyzeLambdaCaptures(LambdaExpr* node) {
-    std::unordered_set<std::string> refs, params;
+    std::unordered_set<std::string> params;
     for (const auto& p : node->params) params.insert(p.name);
-    bool usesThis=false;
-    collectThreadRefs(node->hasExprBody ? node->exprBody.get() : node->blockBody.get(), refs, usesThis, params);
-    node->captureNames.assign(refs.begin(), refs.end());
+    const AstNode* body = node->hasExprBody ? static_cast<const AstNode*>(node->exprBody.get())
+                                            : static_cast<const AstNode*>(node->blockBody.get());
+    const auto refs = collectLambdaCaptureRefs(body, params);
+    node->captureNames.assign(refs.names.begin(), refs.names.end());
     std::sort(node->captureNames.begin(), node->captureNames.end());
-    node->usesThis=usesThis;
+    node->usesThis = refs.usesThis;
 }
 void TypeChecker::validateThreadLambda(const LambdaExpr* node, const char* apiName) {
     if (!node) return;
     if (node->usesThis) typeError(std::string(apiName)+" cannot capture 'this'; wrap the object in Shared<T>", node->line);
+    // Same policy and class list as the func-value spawn/start paths in
+    // inferCall, via the one shared predicate - do not re-inline it here.
     for (const auto& name : node->captureNames) {
-        auto info=symbols_.lookupVar(name);
-        if (!info) continue;
-        // Shared<T> is the explicit opt-in wrapper. The synchronisation
-        // primitives are also allowed: their state is guarded internally, and
-        // they are what this message tells you to reach for. Keep this list in
-        // step with isThreadSafeClassName in src/vm/native.cpp.
-        const auto& cls = info->className;
-        const bool threadSafe = cls == "Shared" || cls.rfind("Shared<", 0) == 0 ||
-                                cls == "Atomic" || cls == "Mutex" || cls == "RwLock" ||
-                                cls == "Semaphore" || cls == "Channel" || cls == "Condition";
-        if (!(info->type==ZlType::OBJECT && threadSafe))
+        if (capturedValueCrossesThreadBoundary(symbols_, name))
             typeError(std::string(apiName)+" cannot capture '"+name+"' across a thread boundary; use Shared<T>, Atomic, or Mutex for mutable shared state", node->line);
     }
 }
@@ -2940,6 +2828,21 @@ TypeChecker::InferredType TypeChecker::inferExpr(const AstNode* node) {
             return ZlType::UNKNOWN;
     }
 }
+
+namespace {
+// Decode one rendered generic argument name (e.g. "int", "Widget",
+// "List<int>") into the (kind, className) used to check a match pattern's
+// children. A generic class keeps its full instantiation as its class name.
+struct DecodedType { ZlType type; std::string className; };
+DecodedType decodeRenderedType(std::string name) {
+    const auto notSpace = [](char c) { return c != ' ' && c != '\t' && c != '\n' && c != '\r'; };
+    name.erase(name.begin(), std::find_if(name.begin(), name.end(), notSpace));
+    name.erase(std::find_if(name.rbegin(), name.rend(), notSpace).base(), name.end());
+    const auto [base, args] = splitGenericName(name);
+    const ZlType type = zlTypeFromBaseName(base);
+    return {type, type == ZlType::OBJECT ? name : std::string{}};
+}
+} // namespace
 
 TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
     const InferredType subject = inferExpr(node->subject.get());
@@ -3068,38 +2971,16 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
 
                     ZlType elementType = ZlType::UNKNOWN;
                     std::string elementClass;
-                    const auto lt = subjectClass.find('<');
-                    if (lt != std::string::npos && subjectClass.back() == '>') {
-                        const std::string body = subjectClass.substr(lt + 1, subjectClass.size() - lt - 2);
-                        std::size_t depth = 0;
-                        std::size_t comma = std::string::npos;
-                        for (std::size_t i = 0; i < body.size(); ++i) {
-                            if (body[i] == '<') ++depth;
-                            else if (body[i] == '>') { if (depth) --depth; }
-                            else if (body[i] == ',' && depth == 0) { comma = i; break; }
-                        }
-                        const std::string rawArg = body.substr(0, comma == std::string::npos ? body.size() : comma);
-                        const auto trim = [](std::string s) {
-                            const auto begin = s.find_first_not_of(" \t\n\r");
-                            const auto end = s.find_last_not_of(" \t\n\r");
-                            if (begin == std::string::npos) return std::string();
-                            return s.substr(begin, end - begin + 1);
-                        };
-                        const std::string arg = trim(rawArg);
-                        if (arg == "int") elementType = ZlType::INT;
-                        else if (arg == "double") elementType = ZlType::DOUBLE;
-                        else if (arg == "string") elementType = ZlType::STRING;
-                        else if (arg == "bool") elementType = ZlType::BOOL;
-                        else if (arg == "nil") elementType = ZlType::NIL;
-                        else if (arg == "func") elementType = ZlType::FUNCTION;
-                        else if (arg == "Task") elementType = ZlType::TASK;
-                        else if (arg == "list") elementType = ZlType::LIST;
-                        else if (arg == "map") elementType = ZlType::MAP;
-                        else if (arg == "set") elementType = ZlType::SET;
-                        else if (arg == "array") elementType = ZlType::ARRAY;
-                        else {
-                            elementType = ZlType::OBJECT;
-                            elementClass = arg;
+                    // A list/set subject carries its element type as the first
+                    // (and only) generic argument in its rendered class name.
+                    {
+                        const auto [subBase, subArgs] = splitGenericName(subjectClass);
+                        if (!subArgs.empty() && (subBase == "List" || subBase == "Set" ||
+                                                 subBase == "list" || subBase == "set")) {
+                            const auto arg = splitGenericArgs(subArgs).front();
+                            const auto decoded = decodeRenderedType(arg);
+                            elementType = decoded.type;
+                            elementClass = decoded.className;
                         }
                     }
                     std::unordered_set<std::string> seenSetElements;
@@ -3125,46 +3006,18 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
 
                     ZlType keyType = ZlType::UNKNOWN, valueType = ZlType::UNKNOWN;
                     std::string keyClass, valueClass;
-                    // Inferred/declaration-level map types preserve their K,V
-                    // arguments in className (e.g. map<string,int>). Decode
-                    // only the top-level comma so nested generic arguments
-                    // remain intact.
-                    const auto lt = subjectClass.find('<');
-                    if (lt != std::string::npos && !subjectClass.empty() && subjectClass.back() == '>') {
-                        const std::string base = subjectClass.substr(0, lt);
-                        if (base == "map" || base == "Map") {
-                            const std::string body = subjectClass.substr(lt + 1, subjectClass.size() - lt - 2);
-                            std::size_t depth = 0, comma = std::string::npos;
-                            for (std::size_t i = 0; i < body.size(); ++i) {
-                                if (body[i] == '<') ++depth;
-                                else if (body[i] == '>' && depth) --depth;
-                                else if (body[i] == ',' && depth == 0) { comma = i; break; }
-                            }
-                            if (comma != std::string::npos) {
-                                auto trim = [](std::string s) {
-                                    const auto b = s.find_first_not_of(" \t\n\r");
-                                    const auto e = s.find_last_not_of(" \t\n\r");
-                                    return b == std::string::npos ? std::string() : s.substr(b, e - b + 1);
-                                };
-                                const std::string k = trim(body.substr(0, comma));
-                                const std::string v = trim(body.substr(comma + 1));
-                                auto resolveCanonical = [&](const std::string& name, std::string& klass) {
-                                    if (name == "int") return ZlType::INT;
-                                    if (name == "double") return ZlType::DOUBLE;
-                                    if (name == "string") return ZlType::STRING;
-                                    if (name == "bool") return ZlType::BOOL;
-                                    if (name == "nil") return ZlType::NIL;
-                                    if (name == "func") return ZlType::FUNCTION;
-                                    if (name == "Task") return ZlType::TASK;
-                                    if (name == "list") return ZlType::LIST;
-                                    if (name == "map") return ZlType::MAP;
-                                    if (name == "set") return ZlType::SET;
-                                    if (name == "array") return ZlType::ARRAY;
-                                    klass = name;
-                                    return ZlType::OBJECT;
-                                };
-                                keyType = resolveCanonical(k, keyClass);
-                                valueType = resolveCanonical(v, valueClass);
+                    // A map subject preserves its K,V arguments in className
+                    // (e.g. map<string,int>); split on the top-level comma so a
+                    // nested generic argument stays intact.
+                    {
+                        const auto [subBase, subArgs] = splitGenericName(subjectClass);
+                        if (!subArgs.empty() && (subBase == "map" || subBase == "Map")) {
+                            const auto kv = splitGenericArgs(subArgs);
+                            if (kv.size() == 2) {
+                                const auto k = decodeRenderedType(kv[0]);
+                                const auto v = decodeRenderedType(kv[1]);
+                                keyType = k.type; keyClass = k.className;
+                                valueType = v.type; valueClass = v.className;
                             }
                         }
                     }

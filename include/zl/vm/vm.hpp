@@ -52,6 +52,12 @@ private:
     Value binaryLogical(OpCode op, const Value& a, const Value& b) const;
     Value unary(OpCode op, const Value& a) const;
     bool rangeContinue(const Value& current, const Value& end, const Value& step) const;
+    // Cooperatively pump ready async frames until `task` settles. A native
+    // async op may complete on a worker thread and enqueue our continuation
+    // later, so after draining what is ready now we briefly sleep and retry
+    // rather than returning while owning the scheduler that must resume the
+    // task. Used by both Task.block() and the top-level async entry point.
+    void pumpSchedulerUntilTerminal(const TaskRef& task);
 
     ExecutionState state_;
     // Shared ownership is deliberate. A child VM created for an async

@@ -273,17 +273,25 @@ bool reflectiveObjectMatches(const ObjectRef& object, const std::string& expecte
             // `class Some<T> extends Option<T>`. Accept it when the object's own
             // instantiation carries the same type arguments as the expected
             // type, which keeps Some<int> -> Option<int> legal while still
-            // rejecting Some<string> -> Option<int>.
-            auto typeArgsOf = [](const std::string& name) -> std::string {
-                const auto open = name.find('<');
-                const auto close = name.rfind('>');
-                if (open == std::string::npos || close == std::string::npos || close <= open) return {};
-                return name.substr(open + 1, close - open - 1);
-            };
+            // rejecting Some<string> -> Option<int>. Reuse the reflection type
+            // parser rather than hand-scanning the angle brackets here.
             if (expectedIsParameterized) {
-                const std::string expectedArgs = typeArgsOf(expectedName);
-                const std::string actualArgs = typeArgsOf(object->genericTypeName);
-                if (!expectedArgs.empty() && actualArgs == expectedArgs) return true;
+                const auto expectedSpec = ReflectionTypeParser(expectedName).parse();
+                const auto actualSpec = ReflectionTypeParser(object->genericTypeName).parse();
+                // Compare the type arguments only - the base names legitimately
+                // differ here (Some vs Option); the parent walk already proved
+                // the relationship. Structural/recursive equality means a nested
+                // generic (`List<int>` vs `List<string>`) is compared by shape.
+                if (!expectedSpec.args.empty() && actualSpec.args.size() == expectedSpec.args.size()) {
+                    bool sameArgs = true;
+                    for (std::size_t i = 0; i < expectedSpec.args.size(); ++i) {
+                        if (!reflectionTypeSpecsEqual(actualSpec.args[i], expectedSpec.args[i])) {
+                            sameArgs = false;
+                            break;
+                        }
+                    }
+                    if (sameArgs) return true;
+                }
             }
         }
         auto it = chunk->classReflection.find(current->baseClassName);
@@ -732,6 +740,19 @@ bool VM::rangeContinue(const Value& current, const Value& end, const Value& step
     throw std::runtime_error("for-loop step cannot be 0 (the loop would never end)");
 }
 
+void VM::pumpSchedulerUntilTerminal(const TaskRef& task) {
+    // The scheduler is cooperative: pump ready async frames while the task is
+    // pending so synchronous code cannot deadlock by blocking the very
+    // scheduler that owns the task. If another executor later completes the
+    // task externally (a native async op finishing on a worker thread enqueues
+    // our continuation), keep pumping rather than sleeping indefinitely while
+    // owning the scheduler that must resume it.
+    while (!task->isTerminal()) {
+        if (scheduler_->runOne()) continue;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
 int VM::run(const Chunk& chunk, const std::vector<std::string>& programArgs) {
     const ExecuteStatus result = execute(chunk, 0, false, programArgs, nullptr);
     if (result == ExecuteStatus::Suspended) {
@@ -741,12 +762,9 @@ int VM::run(const Chunk& chunk, const std::vector<std::string>& programArgs) {
         // `main` is an async func and suspended on an await. Draining only the
         // frames that are ready right now is not enough: a native async
         // operation completes on a worker thread and enqueues our continuation
-        // later. Pump the scheduler until the entry task settles, the same way
-        // TaskBlock does, so the rest of main actually runs.
-        while (!entryTask_->isTerminal()) {
-            if (scheduler_->runOne()) continue;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        // later. Pump the scheduler until the entry task settles so the rest of
+        // main actually runs.
+        pumpSchedulerUntilTerminal(entryTask_);
     }
     scheduler_->runUntilIdle();
     std::vector<Value> roots;
@@ -976,20 +994,11 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 if (!taskRef || !(*taskRef)) {
                     throw std::runtime_error("VM: Task.block() expects a Task value");
                 }
-                // The current scheduler is cooperative. Pump ready async frames
-                // while a task is pending so synchronous code cannot deadlock by
-                // blocking the very scheduler that owns the task. If another
-                // executor later completes the task externally, observe()
-                // safely waits on the task condition variable.
-                while (!(*taskRef)->isTerminal()) {
-                    if (scheduler_->runOne()) continue;
-                    // An external/native async operation may complete on another
-                    // thread and enqueue our continuation. Keep pumping rather
-                    // than entering observe() immediately, otherwise the current
-                    // synchronous caller could sleep forever while owning the VM
-                    // scheduler that must resume the blocked task.
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
+                // Pump the cooperative scheduler until the task settles; once
+                // terminal, observe() collects its result (and safely waits on
+                // the task condition variable if an external executor is still
+                // finalising it).
+                pumpSchedulerUntilTerminal(*taskRef);
                 state_.push((*taskRef)->observe());
                 ++ip;
                 break;
