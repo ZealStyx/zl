@@ -1,0 +1,59 @@
+// ============================================================================
+// ZL Examples - Advanced - Async and Tasks
+//
+// `async func` returns a `Task<T>` instead of a `T`. Inside an async function
+// you suspend on another task with `await`; a native async operation such as
+// `Time.sleepAsync(seconds)` completes on a worker thread, so awaiting it does
+// not block the VM.
+//
+// `main` may itself be `async func`, which is the natural entry point for async
+// code - the runtime waits for it to settle before the process exits.
+//
+// One rule to remember: `main` has no receiver, so `this` is not bound inside
+// it. Create an instance and call through that, as below. See TaskBlocking.zl
+// for driving async work from a synchronous `main` instead.
+// ============================================================================
+
+class AsyncTasks {
+    public async func loadUser(int id): string {
+        await Time.sleepAsync(0.01)
+        return "user-" + id
+    }
+
+    public async func loadTwo(): string {
+        // Sequential awaits inside one async function are fine.
+        var first = await this.loadUser(1)
+        var second = await this.loadUser(2)
+        return first + "," + second
+    }
+
+    public async func compute(int n): int {
+        await Time.sleepAsync(0.01)
+        return n * n
+    }
+
+    public async func main(): void {
+        var svc = new AsyncTasks()
+
+        log("start")
+
+        var user = await svc.loadUser(7)
+        log("loaded " + user)
+
+        // Awaiting a task that itself awaits several others.
+        var pair = await svc.loadTwo()
+        log("pair " + pair)
+
+        log("square " + await svc.compute(9))
+
+        log("end")
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// start
+// loaded user-7
+// pair user-1,user-2
+// square 81
+// end
+// --- End expected output ---

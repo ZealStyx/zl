@@ -1,0 +1,97 @@
+// ============================================================================
+// ZL Examples - Intermediate - Nested generics
+//
+// A type argument can itself be a generic type, and the closing brackets can be
+// written together:
+//
+//   new List<List<int>>()          grid of rows
+//   new Map<string, List<int>>()   named groups
+//   new Box<List<int>>(...)        a user generic wrapping a collection
+//
+// Nesting is not limited to two levels. The lexer emits `>>` as a single
+// right-shift token, so the parser splits it back into the two `>` characters
+// a nested type argument list needs - which is why `>>` still works as a shift
+// operator in ordinary expressions, shown at the end.
+//
+// Note that `List<int> nums = [1, 2, 3]` is still rejected: build the list with
+// `new List<int>()` and `push`, as below.
+// ============================================================================
+
+class Box<T> {
+    public T value
+    func Box(T v): void { this.value = v }
+    public func get(): T { return this.value }
+}
+
+class NestedGenerics {
+    func main(): void {
+        // A 2x3 grid.
+        var grid = new List<List<int>>()
+        var row0 = new List<int>()
+        row0.push(1)
+        row0.push(2)
+        row0.push(3)
+        var row1 = new List<int>()
+        row1.push(4)
+        row1.push(5)
+        row1.push(6)
+        grid.push(row0)
+        grid.push(row1)
+
+        log("rows " + grid.length())
+        log("cols " + grid.first().length())
+        log("grid[1][2] " + grid[1][2])
+
+        // Sum every cell with a nested loop.
+        var total = 0
+        for r in 0..grid.length() {
+            var row = grid[r]
+            for c in 0..row.length() {
+                total = total + row[c]
+            }
+        }
+        log("total " + total)
+
+        // Named groups: a Map whose values are Lists.
+        var groups = new Map<string, List<int>>()
+        var evens = new List<int>()
+        evens.push(2)
+        evens.push(4)
+        var odds = new List<int>()
+        odds.push(1)
+        odds.push(3)
+        groups.put("even", evens)
+        groups.put("odd", odds)
+        log("even count " + groups.get("even").length())
+        log("odd first  " + groups.get("odd").first())
+
+        // A user-defined generic wrapping a collection. `get()` returns the
+        // List, and the result can be used as a receiver.
+        var boxed = new Box<List<int>>(odds)
+        log("boxed len  " + boxed.get().length())
+
+        // Three levels deep.
+        var deep = new List<List<List<int>>>()
+        var level1 = new List<List<int>>()
+        level1.push(odds)
+        deep.push(level1)
+        log("deep " + deep.first().first().first())
+
+        // `>>` and `>>>` are unaffected in ordinary expressions.
+        log("shift " + (32 >> 2))
+        log("ushift " + (256 >>> 4))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// rows 2
+// cols 3
+// grid[1][2] 6
+// total 21
+// even count 2
+// odd first  1
+// boxed len  2
+// deep 1
+// shift 8
+// ushift 16
+// --- End expected output ---

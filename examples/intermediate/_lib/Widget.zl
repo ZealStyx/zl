@@ -1,0 +1,18 @@
+// Shared module source for Reflection.zl - not a runnable example.
+class Widget {
+    public int size
+    private string tag
+
+    func Widget(int size, string tag): void {
+        this.size = size
+        this.tag = tag
+    }
+
+    public func area(): int {
+        return this.size * this.size
+    }
+
+    public func label(): string {
+        return this.tag
+    }
+}

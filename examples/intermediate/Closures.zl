@@ -1,0 +1,55 @@
+// ============================================================================
+// ZL Examples - Intermediate - Closures
+//
+// CAPTURE IS BY VALUE. A lambda snapshots every variable in scope at the moment
+// it is EVALUATED (not declared) - a copy, not a live reference. Reassigning
+// the outer variable afterwards does not change what the closure sees.
+//
+// Two lambdas created from the same scope get independent snapshots. But within
+// ONE closure, mutating a variable it captured persists across repeated calls
+// to that same closure, because the closure privately owns its snapshot - which
+// is what makes the classic counter work.
+// ============================================================================
+
+class Closures {
+    static func makeCounter(): func {
+        var count = 0
+        var inc = func() {
+            count = count + 1
+            return count
+        }
+        return inc
+    }
+
+    static func makeAdder(int base): func {
+        return func(int x) => base + x
+    }
+
+    func main(): void {
+        var n = 10
+        var readN = func() => n
+        n = 999
+        log(readN())              // 10 - the snapshot was taken when n was 10
+
+        var c = Closures.makeCounter()
+        log(c())
+        log(c())
+        log(c())
+
+        // Independent counters do not share state.
+        var other = Closures.makeCounter()
+        log(other())
+
+        var add10 = Closures.makeAdder(10)
+        log(add10(5))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 10
+// 1
+// 2
+// 3
+// 1
+// 15
+// --- End expected output ---

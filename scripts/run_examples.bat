@@ -26,15 +26,27 @@ if not exist "%ZL%" (
     exit /b 2
 )
 
+REM Examples live in topic subdirectories. Files under a `_lib` directory are
+REM importable module sources with no main(), so skip them but hand each one to
+REM the importer via --root.
 set "EXAMPLES=%PROJECT_ROOT%\examples"
-for %%F in ("%EXAMPLES%\*.zl") do (
-    if exist "%%~fF" (
-        echo --- %%~nxF ---
-        "%ZL%" "%%~fF"
-        if errorlevel 1 set "STATUS=1"
-        echo.
-    )
+set "ROOTS="
+for /f "delims=" %%D in ('dir /b /s /ad "%EXAMPLES%\_lib" 2^>nul') do set "ROOTS=!ROOTS! --root %%D"
+
+set "FOUND=0"
+for /f "delims=" %%F in ('dir /b /s /a-d "%EXAMPLES%\*.zl" 2^>nul ^| findstr /v /i "\\_lib\\" ^| sort') do (
+    set "FOUND=1"
+    echo --- %%~nxF ---
+    "%ZL%" !ROOTS! "%%~fF" %*
+    if errorlevel 1 set "STATUS=1"
+    echo.
 )
+if "%FOUND%"=="0" (
+    echo no examples found under %EXAMPLES% >&2
+    exit /b 2
+)
+REM To also diff each example against its embedded expected output, run
+REM examples\run_all.bat instead.
 exit /b %STATUS%
 
 :resolve_compiler

@@ -1,0 +1,55 @@
+// ============================================================================
+// ZL Examples - Advanced - zl.test
+//
+// `Test` provides the assertions and `Runner` provides grouping and accounting.
+//
+//   Test.assertTrue / assertFalse
+//   Test.assertEqual / assertNotEqual
+//   Test.assertNear(actual, expected, epsilon)
+//   Test.fail(message)
+//   tester.assertThrows(closure)     an instance method on a Test
+//
+//   Runner(name).run(testName, closure)   runs one case, logging PASS or FAIL
+//   Runner.report()                       prints the tally, returns the count
+//                                         of failures
+//
+// A failing assertion throws, which is how the Runner detects it - so a test
+// body is just ordinary code that throws when the expectation is wrong.
+// ============================================================================
+
+import zl.test.Test
+import zl.test.Runner
+
+class TestingLib {
+    func main(): void {
+        var runner = new Runner("demo suite")
+
+        runner.run("arithmetic", func() { Test.assertEqual(2 + 2, 4) })
+        runner.run("truth", func() { Test.assertTrue(10 > 3) })
+        runner.run("falsehood", func() { Test.assertFalse(10 < 3) })
+        runner.run("inequality", func() { Test.assertNotEqual("a", "b") })
+        runner.run("near", func() { Test.assertNear(0.1 + 0.2, 0.3, 0.0001) })
+        runner.run("throws", func() {
+            var tester = new Test()
+            tester.assertThrows(func() { throw new Exception("expected") })
+        })
+
+        // A deliberately failing case, so the FAIL path is visible too.
+        runner.run("intentional failure", func() { Test.assertEqual(1, 2) })
+
+        var failures = runner.report()
+        log("failures reported: " + failures)
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// PASS arithmetic
+// PASS truth
+// PASS falsehood
+// PASS inequality
+// PASS near
+// PASS throws
+// FAIL intentional failure: Test.assertEqual failed: expected 1 == 2
+// demo suite: 6 passed, 1 failed
+// failures reported: 1
+// --- End expected output ---

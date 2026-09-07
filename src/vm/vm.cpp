@@ -81,8 +81,9 @@ namespace {
 } // namespace
 
 
-VM::VM(RuntimeScheduler* sharedScheduler)
-    : scheduler_(sharedScheduler ? sharedScheduler : &ownedScheduler_),
+VM::VM(std::shared_ptr<RuntimeScheduler> sharedScheduler)
+    : ownedScheduler_(sharedScheduler ? nullptr : std::make_shared<RuntimeScheduler>()),
+      scheduler_(sharedScheduler ? std::move(sharedScheduler) : ownedScheduler_),
       gcParticipantId_(GCSafepointCoordinator::instance().registerParticipant()) {
     if (const char* env = std::getenv("ZL_MAX_CALL_DEPTH")) {
         try {
@@ -265,8 +266,25 @@ bool reflectiveObjectMatches(const ObjectRef& object, const std::string& expecte
     while (current && !current->baseClassName.empty() && guard++ < 1024) {
         if (current->baseClassName == baseName) {
             if (!expectedIsParameterized) return true;
-            // The parent dispatch name is intentionally erased. Continue to its
-            // runtime metadata so Base<int> is distinguishable from Base<string>.
+            // The parent dispatch name is intentionally erased, so continue to
+            // its runtime metadata to keep Base<int> distinguishable from
+            // Base<string>. But a real subclass instantiation still has to widen
+            // to its parameterized parent - that is the whole point of
+            // `class Some<T> extends Option<T>`. Accept it when the object's own
+            // instantiation carries the same type arguments as the expected
+            // type, which keeps Some<int> -> Option<int> legal while still
+            // rejecting Some<string> -> Option<int>.
+            auto typeArgsOf = [](const std::string& name) -> std::string {
+                const auto open = name.find('<');
+                const auto close = name.rfind('>');
+                if (open == std::string::npos || close == std::string::npos || close <= open) return {};
+                return name.substr(open + 1, close - open - 1);
+            };
+            if (expectedIsParameterized) {
+                const std::string expectedArgs = typeArgsOf(expectedName);
+                const std::string actualArgs = typeArgsOf(object->genericTypeName);
+                if (!expectedArgs.empty() && actualArgs == expectedArgs) return true;
+            }
         }
         auto it = chunk->classReflection.find(current->baseClassName);
         if (it != chunk->classReflection.end() && it->second.runtimeType) {
@@ -391,6 +409,20 @@ std::string runtimeValueTypeName(const Value& value) {
 
 bool runtimeAssignableToType(const Value& value, const std::string& typeName, const Chunk* chunk) {
     const ReflectionTypeSpec spec = ReflectionTypeParser(typeName).parse();
+    // An enum member is stored as its name string, so a runtime type name of
+    // "string" is correct for a parameter or return annotated with the enum.
+    // Without this, every call that passes an enum value fails the assertion
+    // even though the compile-time check already proved it is a valid member.
+    if (chunk && spec.unionMembers.empty() && spec.args.empty() &&
+        std::holds_alternative<std::string>(value)) {
+        auto enumIt = chunk->classReflection.find(spec.name);
+        if (enumIt != chunk->classReflection.end() && enumIt->second.isEnumType) {
+            const auto& members = enumIt->second.enumMembers;
+            if (members.empty()) return true;
+            const auto& member = std::get<std::string>(value);
+            return std::find(members.begin(), members.end(), member) != members.end();
+        }
+    }
     if (!spec.unionMembers.empty()) return reflectiveMatchesSpec(value, spec, chunk);
     if (spec.name == "double" && std::holds_alternative<std::int64_t>(value)) return true;
     if (std::holds_alternative<std::monostate>(value)) {
@@ -704,6 +736,17 @@ int VM::run(const Chunk& chunk, const std::vector<std::string>& programArgs) {
     const ExecuteStatus result = execute(chunk, 0, false, programArgs, nullptr);
     if (result == ExecuteStatus::Suspended) {
         throw std::runtime_error("VM: top-level execution unexpectedly suspended");
+    }
+    if (entryTask_ && !entryTask_->isTerminal()) {
+        // `main` is an async func and suspended on an await. Draining only the
+        // frames that are ready right now is not enough: a native async
+        // operation completes on a worker thread and enqueues our continuation
+        // later. Pump the scheduler until the entry task settles, the same way
+        // TaskBlock does, so the rest of main actually runs.
+        while (!entryTask_->isTerminal()) {
+            if (scheduler_->runOne()) continue;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
     }
     scheduler_->runUntilIdle();
     std::vector<Value> roots;
@@ -1114,6 +1157,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     auto child = std::make_shared<VM>(scheduler_);
                     child->beginAsyncInvocation(chunkRef, instr.operand, std::move(args), receiver, task);
                     scheduler_->enqueue(std::make_shared<AsyncFrame>([child]() mutable { child->resumeAsyncInvocation(); }));
+                    if (!state_.inFunction() && !entryTask_) entryTask_ = task;
                     state_.push(Value{std::move(task)});
                     ip++;
                     break;
@@ -1167,9 +1211,14 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 const auto scope = state_.snapshotScope();
                 if (!fn.capturesEvaluationScope) {
                     // Named function values have no lexical environment.
-                } else if (fn.captureNames.empty()) {
-                    box->captured = scope;
                 } else {
+                    // captureNames is computed for every lambda by
+                    // TypeChecker::analyzeLambdaCaptures, so an empty list means
+                    // the body references nothing - capture nothing. Snapshotting
+                    // the whole scope instead made a closure that used no
+                    // variables carry every local in the enclosing function,
+                    // which then failed the Shared<T> check on Thread.start even
+                    // for locals it never touched.
                     for (const auto& name : fn.captureNames) {
                         auto it = scope.find(name);
                         if (it != scope.end()) box->captured.emplace(name, it->second);

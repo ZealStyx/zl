@@ -1,0 +1,64 @@
+// ============================================================================
+// ZL Examples - Intermediate - Reflection
+//
+// A minimal, name-based reflection API. `Type.of(value)` returns a `Type`
+// handle you can interrogate:
+//
+//   name() / kind() / base()      identity
+//   fields() / methods()          members, including inherited ones
+//   isData() / isEnum()           declaration kind
+//
+// fields() yields `Field` objects and methods() yields `Method` objects; both
+// are themselves interrogable (name(), type()/returnType(), access()).
+//
+// The metadata is intentionally small - no generic type arguments, no
+// annotations, and reflection is read-only.
+//
+// See _lib/Widget.zl for the reflected class.
+// ============================================================================
+
+import Widget
+
+class Reflection {
+    func main(): void {
+        var w = new Widget(3, "panel")
+
+        var t = Type.of(w)
+        log("name " + t.name())
+        log("kind " + t.kind())
+        log("isData " + t.isData())
+
+        // fields() and methods() hand back native `list<...>` values, so walk
+        // them with the Collection.* primitives rather than List<T> methods.
+        list<Field> fields = t.fields()
+        log("field count " + Collection.length(fields))
+        for i in 0..Collection.length(fields) {
+            // Collection.get is untyped, so name the element type explicitly
+            // before calling a Field method on it.
+            Field f = Collection.get(fields, i)
+            log("field " + f.name() + ": " + f.type() + " (" + f.access() + ")")
+        }
+
+        list<Method> methods = t.methods()
+        log("method count " + Collection.length(methods))
+        for i in 0..Collection.length(methods) {
+            Method m = Collection.get(methods, i)
+            log("method " + m.name() + " -> " + m.returnType())
+        }
+
+        log("plain int kind " + Type.of(7).name())
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// name Widget
+// kind object
+// isData false
+// field count 2
+// field size: int (public)
+// field tag: string (private)
+// method count 2
+// method area -> int
+// method label -> string
+// plain int kind int
+// --- End expected output ---

@@ -1,0 +1,91 @@
+// ============================================================================
+// ZL Examples - Intermediate - Collection Algorithms
+//
+// List<T> owns the high-level algorithms; C++ provides only the storage
+// primitives underneath.
+//
+//   forEach(action)          run a side effect per element
+//   transform(f)             map to a NEW list, leaving the original alone
+//   filter(predicate)        new list of the elements that pass
+//   reduce(combine, start)   fold into a single value
+//   sort(less)               stable insertion sort, IN PLACE, returns void
+//   reversed()               a NEW list in the opposite order
+//   any / all                short-circuiting predicates
+//   contains / indexOf / count  membership. Note count(item) counts
+//                               OCCURRENCES of a value - it is not a predicate.
+//
+// KNOWN LIMITATION. A list produced by transform()/filter()/reversed() is built
+// inside a generic method, where the element type is erased, so the result
+// loses its instantiated identity: it is a `List`, not a `List<int>`. Passing
+// one to a parameter annotated `List<int>` is rejected at runtime with
+//
+//     type assertion failed: expected List<int>, got List
+//
+// Until that is fixed, keep such a list in a `var` local and read it with its
+// own methods - which is what this example does - rather than handing it to a
+// function that declares a parameterized list parameter.
+// ============================================================================
+
+class CollectionAlgorithms {
+    func main(): void {
+        var nums = new List<int>()
+        nums.push(4)
+        nums.push(1)
+        nums.push(3)
+        nums.push(4)
+
+        // Printing is inlined rather than factored into a helper, because a
+        // helper would need a List<int> parameter - see the note above.
+        var text = ""
+        for i in 0..nums.length() {
+            if (i > 0) { text = text + "," }
+            text = text + nums.get(i)
+        }
+        log("original [" + text + "]")
+
+        var doubled = nums.transform(func(int x) => x * 2)
+        log("doubled length " + doubled.length())
+        log("doubled first " + doubled.get(0))
+
+        var big = nums.filter(func(int x) => x > 2)
+        log("over 2 length " + big.length())
+
+        log("sum " + nums.reduce(func(int a, int b) => a + b, 0))
+        log("count of 4 is " + nums.count(4))
+        log("index of 3 is " + nums.indexOf(3))
+        log("contains 99: " + nums.contains(99))
+        log("any over 3: " + nums.any(func(int x) => x > 3))
+        log("all positive: " + nums.all(func(int x) => x > 0))
+
+        nums.forEach(func(int x) => log("saw " + x))
+
+        nums.sort(func(int a, int b) => a < b)
+        log("sorted first " + nums.get(0))
+        log("sorted last " + nums.last())
+
+        var backwards = nums.reversed()
+        log("reversed first " + backwards.get(0))
+        log("still sorted first " + nums.get(0))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// original [4,1,3,4]
+// doubled length 4
+// doubled first 8
+// over 2 length 3
+// sum 12
+// count of 4 is 2
+// index of 3 is 2
+// contains 99: false
+// any over 3: true
+// all positive: true
+// saw 4
+// saw 1
+// saw 3
+// saw 4
+// sorted first 1
+// sorted last 4
+// reversed first 4
+// still sorted first 1
+// --- End expected output ---

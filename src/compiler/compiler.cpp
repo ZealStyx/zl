@@ -5,6 +5,7 @@
 #include <functional>
 
 #include <algorithm>
+#include <cctype>
 #include <stdexcept>
 #include <cmath>
 #include <limits>
@@ -68,7 +69,33 @@ Chunk Compiler::compile(const Program& program) {
     const auto* mainFn = plan.mainFunction;
     const auto& classTypeParams = plan.classTypeParams;
     classParents_ = plan.classParents;
+
     chunk_.classReflection = plan.classReflection;
+
+    // A bare class type parameter (e.g. `T`) is erased at runtime: it names no
+    // concrete type, so it must never reach a runtime type assertion. The VM
+    // would otherwise compare an argument or a returned value against the
+    // literal name "T" and reject every call into a generic method.
+    const auto& planTypeParams = plan.classTypeParams;
+    auto eraseTypeParam = [&planTypeParams](const std::string& ownerClassName, const std::string& described) {
+        auto it = planTypeParams.find(ownerClassName);
+        if (it == planTypeParams.end() || it->second.empty()) return described;
+        // A type mentions a type parameter when that parameter appears as a whole
+        // identifier token anywhere in it. That covers the bare case (`T`) and the
+        // nested cases (`List<T>`, `func():T`), all of which are equally unchecked
+        // after erasure.
+        for (std::size_t i = 0; i < described.size();) {
+            if (!(std::isalpha(static_cast<unsigned char>(described[i])) || described[i] == '_')) { ++i; continue; }
+            std::size_t start = i;
+            while (i < described.size() &&
+                   (std::isalnum(static_cast<unsigned char>(described[i])) || described[i] == '_')) ++i;
+            const std::string token = described.substr(start, i - start);
+            for (const auto& typeParam : it->second) {
+                if (token == typeParam) return std::string("unknown");
+            }
+        }
+        return described;
+    };
 
     // --- pass 1: register every func's signature up front, so calls can ---
     // --- resolve regardless of declaration order (forward references work) ---
@@ -83,12 +110,12 @@ Chunk Compiler::compile(const Program& program) {
         parameterTypeNames.reserve(fn->params.size());
         for (const auto& p : fn->params) {
             paramNames.push_back(p.name);
-            parameterTypeNames.push_back(describeTypeAnnotation(p.type));
+            parameterTypeNames.push_back(eraseTypeParam(fn->ownerClassName, describeTypeAnnotation(p.type)));
         }
         const DispatchSignature signature = dispatchSignature(*fn, classTypeParams.at(fn->ownerClassName));
         std::string qualifiedName = fn->ownerClassName + "." + signature.describe();
         FunctionInfo info{std::move(qualifiedName), std::move(paramNames), std::move(parameterTypeNames),
-                          (fn->returnType.name.empty() ? "void" : describeTypeAnnotation(fn->returnType)), 0, fn->isStatic, fn->isAsync};
+                          (fn->returnType.name.empty() ? "void" : eraseTypeParam(fn->ownerClassName, describeTypeAnnotation(fn->returnType))), 0, fn->isStatic, fn->isAsync};
         info.ownerClassName = fn->ownerClassName;
         info.isNative = std::any_of(fn->annotations.begin(), fn->annotations.end(), [](const Annotation& a) { return a.name == "native"; });
         info.dispatchSignature = signature;
@@ -187,7 +214,7 @@ Chunk Compiler::compile(const Program& program) {
         const FunctionDecl* fn = allFunctions[i];
         chunk_.functions[i].entryAddress = chunk_.code.size();
         currentClassName_ = fn->ownerClassName;
-        currentReturnTypeName_ = fn->returnType.name.empty() ? "void" : describeTypeAnnotation(fn->returnType);
+        currentReturnTypeName_ = fn->returnType.name.empty() ? "void" : eraseTypeParam(fn->ownerClassName, describeTypeAnnotation(fn->returnType));
         auto parentIt = classParents_.find(currentClassName_);
         currentParentClassName_ = (parentIt != classParents_.end()) ? parentIt->second : std::string();
         activeOwnedLocalNames_.clear();
@@ -1244,6 +1271,13 @@ void Compiler::compileLambdaExpr(const LambdaExpr* node) {
                             lambdaCallableReturnType, entryAddress, false, node->isAsync, false, "", {}, node->captureNames};
     chunk_.functions.push_back(std::move(lambdaInfo));
 
+    // A lambda body is its own function: its `return` must be checked against
+    // the lambda's own return type, never the enclosing named function's.
+    // Without this, a block-body lambda returning an int inside a `: func`
+    // factory emits AssertType("func") and fails the moment it is invoked.
+    const std::string savedReturnTypeName = currentReturnTypeName_;
+    currentReturnTypeName_ = lambdaReturnTypeName;
+
     const auto savedOwnedLocals = activeOwnedLocalNames_;
     activeOwnedLocalNames_.clear();
     for (const auto& param : node->params) {
@@ -1267,6 +1301,7 @@ void Compiler::compileLambdaExpr(const LambdaExpr* node) {
 
     chunk_.functions[funcIndex].ownedLocalNames = activeOwnedLocalNames_;
     activeOwnedLocalNames_ = savedOwnedLocals;
+    currentReturnTypeName_ = savedReturnTypeName;
     patchJump(skipJump);
     // Capture-by-value happens HERE, at MakeClosure - every time this
     // LambdaExpr is evaluated (e.g. each time through a loop), a fresh

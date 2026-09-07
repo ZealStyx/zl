@@ -1,0 +1,21 @@
+// Shared module source for Generics.zl - not a runnable example.
+// A user-defined generic class. `T` is the type parameter.
+class Box<T> {
+    T value
+
+    func Box(T value): void {
+        this.value = value
+    }
+
+    public func get(): T {
+        return this.value
+    }
+
+    public func replace(T value): void {
+        this.value = value
+    }
+
+    public func convert(func transform): Box<T> {
+        return new Box<T>(transform(this.value))
+    }
+}

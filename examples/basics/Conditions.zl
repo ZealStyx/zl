@@ -1,0 +1,38 @@
+// ============================================================================
+// ZL Examples - Basics - Conditions
+//
+// ZL spells the "else if" branch `elif`. Both `elif` and the two-word
+// `else if` are accepted.
+// ============================================================================
+
+class Conditions {
+    static func grade(int score): string {
+        if (score >= 90) {
+            return "A"
+        } elif (score >= 80) {
+            return "B"
+        } elif (score >= 70) {
+            return "C"
+        } else {
+            return "F"
+        }
+    }
+
+    func main(): void {
+        log(Conditions.grade(95))
+        log(Conditions.grade(85))
+        log(Conditions.grade(72))
+        log(Conditions.grade(40))
+
+        var n = 4
+        if (n % 2 == 0) { log("even") } else { log("odd") }
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// A
+// B
+// C
+// F
+// even
+// --- End expected output ---

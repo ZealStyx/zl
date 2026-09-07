@@ -1,0 +1,49 @@
+// ============================================================================
+// ZL Examples - Intermediate - Classes and Objects
+//
+// A class bundles fields (state) and methods (behaviour). Its constructor is a
+// method with the same name as the class. Inside an instance method, `this`
+// refers to the receiver.
+//
+// Objects are created with `new ClassName(args)`.
+// ============================================================================
+
+class Classes {
+    public string title
+    public int pages
+    public bool read
+
+    func Classes(string title, int pages): void {
+        this.title = title
+        this.pages = pages
+        this.read = false
+    }
+
+    public func summary(): string {
+        return this.title + " (" + this.pages + " pages)"
+    }
+
+    public func finish(): void {
+        this.read = true
+    }
+
+    func main(): void {
+        var book = new Classes("The Pragmatic Programmer", 352)
+
+        log(book.summary())
+        log(book.read)
+
+        book.finish()
+        log(book.read)
+
+        book.pages = 360
+        log(book.summary())
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// The Pragmatic Programmer (352 pages)
+// false
+// true
+// The Pragmatic Programmer (360 pages)
+// --- End expected output ---

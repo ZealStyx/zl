@@ -1,0 +1,55 @@
+// ============================================================================
+// ZL Examples - Intermediate - Static Members
+//
+// `static func` belongs to the class, not to an instance: call it through the
+// class name with no receiver. A static function may not use `this` - doing so
+// is a compile-time error.
+//
+// Static fields work the same way and support inherited qualified access: a
+// derived class reading an inherited static field resolves it to the declaring
+// class, so both names share one backing slot.
+// ============================================================================
+
+class StaticMembers {
+    public static int instances
+
+    public static func clamp(int value, int lo, int hi): int {
+        if (value < lo) { return lo }
+        if (value > hi) { return hi }
+        return value
+    }
+
+    public static func isPalindrome(string s): bool {
+        var left = 0
+        var right = String.length(s) - 1
+        while (left < right) {
+            if (String.substring(s, left, left + 1) != String.substring(s, right, right + 1)) {
+                return false
+            }
+            left = left + 1
+            right = right - 1
+        }
+        return true
+    }
+
+    func main(): void {
+        log(StaticMembers.clamp(15, 0, 10))
+        log(StaticMembers.clamp(-4, 0, 10))
+        log(StaticMembers.clamp(5, 0, 10))
+
+        log(StaticMembers.isPalindrome("racecar"))
+        log(StaticMembers.isPalindrome("hello"))
+
+        StaticMembers.instances = 3
+        log(StaticMembers.instances)
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 10
+// 0
+// 5
+// true
+// false
+// 3
+// --- End expected output ---

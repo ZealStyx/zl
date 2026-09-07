@@ -1,0 +1,37 @@
+// ============================================================================
+// ZL Examples - Basics - Variables
+//
+//   var   rebindable - you may assign to it again
+//   let   single assignment - assigning twice is an error
+//
+// Both forms accept an inferred type (from the initializer) or an explicit
+// `Type name = value` annotation.
+// ============================================================================
+
+class Variables {
+    func main(): void {
+        var greeting = "Hello"      // inferred: string
+        let year = 2026             // inferred: int, cannot be rebound
+        int count = 7               // explicit: int
+        double ratio = 1.5          // explicit: double
+        bool ready = true           // explicit: bool
+
+        log(greeting)
+        log(year)
+        log(count * 2)
+        log(ratio)
+        log(ready)
+
+        count = count + 1           // fine - `count` was declared with var
+        log(count)
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// Hello
+// 2026
+// 14
+// 1.5
+// true
+// 8
+// --- End expected output ---

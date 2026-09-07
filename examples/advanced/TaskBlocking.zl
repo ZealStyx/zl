@@ -1,0 +1,45 @@
+// ============================================================================
+// ZL Examples - Advanced - Collecting a Task from synchronous code
+//
+// When `main` is an ordinary (non-async) function you cannot `await`, but a
+// `Task<T>` still has to be collected. `.block()` waits for the task and returns
+// its value, pumping the scheduler while it waits so a synchronous caller cannot
+// deadlock the very scheduler that owns the task.
+//
+// Use this when only part of the program is async, or when you want to mix
+// synchronous setup with an occasional async call. If the whole program is
+// async, prefer `async func main` with `await` - see AsyncTasks.zl.
+//
+// A blocked call is sequential: `block()` returns before the next statement
+// runs, so the ordering below is guaranteed.
+// ============================================================================
+
+class TaskBlocking {
+    public async func fetch(string what): string {
+        await Time.sleepAsync(0.01)
+        return what + ":ok"
+    }
+
+    public async func total(int n): int {
+        await Time.sleepAsync(0.01)
+        return n * 3
+    }
+
+    func main(): void {
+        var svc = new TaskBlocking()
+
+        log("before")
+        log(svc.fetch("alpha").block())
+        log(svc.fetch("beta").block())
+        log("total " + svc.total(14).block())
+        log("after")
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// before
+// alpha:ok
+// beta:ok
+// total 42
+// after
+// --- End expected output ---

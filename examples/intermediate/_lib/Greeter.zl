@@ -1,0 +1,16 @@
+// Shared module source for Modules.zl - not a runnable example.
+class Greeter {
+    public string prefix
+
+    func Greeter(string prefix): void {
+        this.prefix = prefix
+    }
+
+    public func greet(string name): string {
+        return this.prefix + ", " + name
+    }
+
+    public static func banner(): string {
+        return "== Greeter =="
+    }
+}

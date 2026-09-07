@@ -785,9 +785,19 @@ Value timeSleepAsync(const std::vector<Value>& args) {
 }
 
 
+// Values that may cross a thread boundary. `Shared<T>` is the explicit opt-in
+// wrapper; the rest are the runtime's own synchronisation primitives, whose
+// state is guarded internally, so sharing the handle is the intended use. The
+// compile-time check in TypeChecker::validateThreadLambda keeps the same list.
+bool isThreadSafeClassName(const std::string& className) {
+    return className == "Shared" || className == "Atomic" || className == "Mutex" ||
+           className == "RwLock" || className == "Semaphore" || className == "Channel" ||
+           className == "Condition";
+}
+
 bool isExplicitlySharedValue(const Value& value) {
     const auto* object = std::get_if<ObjectRef>(&value);
-    return object && *object && ((*object)->className == "Shared");
+    return object && *object && isThreadSafeClassName((*object)->className);
 }
 
 bool capturesAreExplicitlyShared(const ClosureBox& closure) {
@@ -1982,6 +1992,15 @@ std::string toJson(const Value& v) {
         return o + "}";
     }
     if (auto p = std::get_if<ObjectRef>(&v)) {
+        // The generic collection classes are thin wrappers whose only field is
+        // the native storage they delegate to. Encoding the wrapper would emit
+        // `{"__native":{...}}` - the object's plumbing rather than its data - so
+        // encode the payload directly instead.
+        const auto& className = (*p)->className;
+        if (className == "List" || className == "Map" || className == "Set") {
+            auto native = (*p)->fields.find("__native");
+            if (native != (*p)->fields.end()) return toJson(native->second);
+        }
         std::string o = "{";
         bool first = true;
         for (auto& e : (*p)->fields) {

@@ -1,0 +1,60 @@
+// ============================================================================
+// ZL Examples - Advanced - Threads
+//
+// `Thread.start(closure)` runs a closure on a real OS thread and returns a
+// handle; `Thread.join(handle)` waits for it to finish.
+//
+// CAPTURE RULE. A thread closure may only carry `Shared<T>` captures:
+//
+//   * A closure that references a plain local is a COMPILE error:
+//         Thread.start cannot capture 'n' across a thread boundary
+//   * A closure that references nothing captures nothing, so it is always safe.
+//   * A closure that needs to talk back to the main thread references a
+//     `Shared<T>` and writes through it.
+//
+// A closure also may not capture `this`; wrap the object in `Shared<T>` instead.
+//
+// Each worker below reports through a Shared slot and is joined before the next
+// starts, which keeps the output order deterministic - threads themselves are
+// not ordered.
+// ============================================================================
+
+class Threads {
+    func main(): void {
+        // A closure that references nothing needs no Shared at all.
+        var quiet = Thread.start(func() => 1 + 1)
+        Thread.join(quiet)
+        log("quiet worker joined")
+
+        // A closure that reports back does so through a Shared slot.
+        var report = new Shared<string>("")
+
+        var first = Thread.start(func() => report.setValue("worker A finished"))
+        Thread.join(first)
+        log(report.get())
+
+        var second = Thread.start(func() => report.setValue("worker B finished"))
+        Thread.join(second)
+        log(report.get())
+
+        // Starting several before joining any is fine too; only the reporting
+        // order would vary, so this one does not report.
+        var a = Thread.start(func() => 1)
+        var b = Thread.start(func() => 2)
+        var c = Thread.start(func() => 3)
+        Thread.join(a)
+        Thread.join(b)
+        Thread.join(c)
+        log("all three joined")
+
+        log("first still alive: " + Thread.isAlive(first))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// quiet worker joined
+// worker A finished
+// worker B finished
+// all three joined
+// first still alive: false
+// --- End expected output ---

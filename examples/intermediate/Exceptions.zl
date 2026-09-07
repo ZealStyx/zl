@@ -1,0 +1,54 @@
+// ============================================================================
+// ZL Examples - Intermediate - Exceptions
+//
+// `throw` raises; `try { } catch TypeName binding { }` handles. The catch
+// clause is Java-style - there are NO parentheses around the binding.
+//
+// `Exception` carries a `message`, an optional `cause`, and a `stackTrace`.
+// Subclass it to make failures distinguishable by type.
+// ============================================================================
+
+class NotFound extends Exception {
+    func NotFound(string message): void {
+        super(message)
+    }
+}
+
+class Exceptions {
+    static func divide(int a, int b): int {
+        if (b == 0) { throw new Exception("division by zero") }
+        return a / b
+    }
+
+    static func find(string key): string {
+        if (key != "ada") { throw new NotFound("no such key: " + key) }
+        return "36"
+    }
+
+    func main(): void {
+        log(Exceptions.divide(10, 2))
+
+        try {
+            log(Exceptions.divide(1, 0))
+        } catch Exception e {
+            log("caught: " + e.message)
+        }
+
+        try {
+            log(Exceptions.find("grace"))
+        } catch NotFound e {
+            log("missing: " + e.message)
+        }
+
+        log(Exceptions.find("ada"))
+        log("program continued")
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 5
+// caught: division by zero
+// missing: no such key: grace
+// 36
+// program continued
+// --- End expected output ---

@@ -1,0 +1,41 @@
+// ============================================================================
+// ZL Examples - Advanced - Shared<T>
+//
+// Managed objects are thread-confined by default. To let a worker thread touch
+// one, wrap it: `new Shared<T>(value)` marks that value as shareable, and the
+// thread closure captures the Shared wrapper rather than the object itself.
+//
+//   new Shared<T>(value)     wrap
+//   get() / setValue(v)      read / write
+//
+// IMPORTANT: Shared<T> makes the capture LEGAL; it does not make it SAFE.
+// Nothing here prevents two threads from interleaving a read-modify-write, so
+// `get()`/`setValue()` alone can still lose updates. For a real counter use
+// Atomic (Atomics.zl) or a lock (MutexLocks.zl).
+// ============================================================================
+
+class SharedState {
+    func main(): void {
+        var counter = new Shared<int>(0)
+        log("initial " + counter.get())
+
+        counter.setValue(10)
+        log("after set " + counter.get())
+
+        var worker = Thread.start(func() => counter.setValue(counter.get() + 5))
+        Thread.join(worker)
+        log("after worker " + counter.get())
+
+        var label = new Shared<string>("start")
+        var renamer = Thread.start(func() => label.setValue("finished"))
+        Thread.join(renamer)
+        log("label " + label.get())
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// initial 0
+// after set 10
+// after worker 15
+// label finished
+// --- End expected output ---

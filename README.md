@@ -9,7 +9,10 @@ a standard library written mostly in ZL itself, and `zlpkg`, a git/path dependen
 ```zl
 class Hello {
     func main(): void {
-        var names = ["Ada", "Grace", "Alan"]
+        var names = new List<string>()
+        names.push("Ada")
+        names.push("Grace")
+        names.push("Alan")
         names.forEach(func(n) => log("Hello, " + n))
     }
 }
@@ -51,6 +54,7 @@ Convenience wrappers are also provided:
 | Build | `cmake --build build` | `scripts\build.bat` |
 | Run a file | `scripts/zl <file.zl>` | `scripts\run.bat <file.zl>` |
 | Run examples | `scripts/run_examples.sh` | `scripts\run_examples.bat` |
+| Run + verify examples | `examples/run_all.sh` | `examples\run_all.bat` |
 | Run regressions | `scripts/run_regressions.sh` | `scripts\run_regressions.bat` |
 | Native compiler gate | `scripts/native_gate.sh` | `scripts\native_gate.ps1` |
 
@@ -59,7 +63,7 @@ Convenience wrappers are also provided:
 ## Run a program
 
 ```bash
-build/zl_language examples/Hello.zl arg1 arg2
+build/zl_language examples/basics/HelloWorld.zl arg1 arg2
 ```
 
 ```text
@@ -127,6 +131,8 @@ Full syntax and semantics: **[docs/language-guide.md](docs/language-guide.md)**.
 | [docs/packages.md](docs/packages.md) | Imports, the stdlib root, and `zlpkg` dependency management |
 | [docs/native.md](docs/native.md) | Native boundary, `@native` compilation, `zl-bind`, FFI, async |
 | [docs/development.md](docs/development.md) | Build details, stdlib lookup, testing, packaging |
+| [examples/](examples/README.md) | 46 runnable examples, basics through async, each with verified output |
+| [examples/REVIEW.md](examples/REVIEW.md) | Bugs found while writing them, fixed and open |
 | [docs/changelog.md](docs/changelog.md) | Dated development checkpoints by phase |
 
 The memory-model direction — ownership combined with tracing GC, GC-managed and

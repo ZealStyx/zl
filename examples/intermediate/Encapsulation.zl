@@ -1,0 +1,59 @@
+// ============================================================================
+// ZL Examples - Intermediate - Encapsulation
+//
+// Members are `public`, `private`, or `protected`. Fields and methods declared
+// without a modifier are private.
+//
+// A private member is reachable only from inside its own class, which is what
+// lets `balance` stay valid: every mutation goes through deposit()/withdraw(),
+// so the invariant (balance never negative) cannot be bypassed.
+// ============================================================================
+
+class Encapsulation {
+    private int balance
+    public string owner
+
+    func Encapsulation(string owner, int opening): void {
+        this.owner = owner
+        this.balance = opening
+    }
+
+    public func deposit(int amount): void {
+        if (amount <= 0) { return }
+        this.balance = this.balance + amount
+    }
+
+    public func withdraw(int amount): bool {
+        if (amount <= 0 || amount > this.balance) { return false }
+        this.balance = this.balance - amount
+        return true
+    }
+
+    public func currentBalance(): int {
+        return this.balance
+    }
+
+    func main(): void {
+        var account = new Encapsulation("ada", 100)
+
+        account.deposit(50)
+        log(account.currentBalance())
+
+        log(account.withdraw(30))
+        log(account.currentBalance())
+
+        log(account.withdraw(9999))     // refused - would overdraw
+        log(account.currentBalance())
+
+        log(account.owner)              // public field
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 150
+// true
+// 120
+// false
+// 120
+// ada
+// --- End expected output ---

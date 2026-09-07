@@ -1,0 +1,75 @@
+// ============================================================================
+// ZL Examples - Basics - List<T>
+//
+// `List<T>` is the generic list class. It is always available - no import.
+//
+// Because it is a real generic class, a wrong element type is caught at
+// COMPILE time: pushing a string into a List<int> does not run at all.
+//
+//   push / pop / get / put / length      storage operations
+//   first / last / isEmpty / firstOr     convenience accessors
+//   insert / removeAt / remove / clear   mutation
+//   slice / take / drop / copy / extend  bulk operations
+//
+// The index-assignment method is `put`, not `set`, because `set` is a reserved
+// keyword (the lowercase `set<T>` annotation).
+// ============================================================================
+
+class Lists {
+    func main(): void {
+        var nums = new List<int>()
+        nums.push(10)
+        nums.push(20)
+        nums.push(30)
+
+        log(nums.length())
+        log(nums.get(0))
+        log(nums.first())
+        log(nums.last())
+        log(nums.isEmpty())
+
+        nums.put(1, 99)
+        log(nums.get(1))
+
+        nums.insert(0, 5)
+        log(nums.get(0))
+
+        nums.removeAt(1)
+        log(nums.length())
+
+        log(nums.remove(30))
+        log(nums.remove(12345))
+
+        var doubled = nums.slice(0, 2)
+        log(doubled.length())
+        log(doubled.get(0))
+
+        // nums is [5, 99] here: remove(30) above took the third element away.
+        var more = new List<int>()
+        more.push(7)
+        nums.extend(more)
+        log(nums.length())
+
+        var empty = new List<string>()
+        log(empty.isEmpty())
+        log(empty.firstOr("fallback"))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 3
+// 10
+// 10
+// 30
+// false
+// 99
+// 5
+// 3
+// true
+// false
+// 2
+// 5
+// 3
+// true
+// fallback
+// --- End expected output ---

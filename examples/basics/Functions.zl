@@ -1,0 +1,52 @@
+// ============================================================================
+// ZL Examples - Basics - Functions
+//
+// `func name(Type param): ReturnType { ... }`. A `void` function returns
+// nothing; falling off the end of a non-void function returns nil.
+//
+// `static func` belongs to the class rather than an instance, is called
+// through the class name, and may not use `this`. Instance methods are
+// declared the same way without `static`.
+//
+// Note the `Type name` parameter order - the type comes first, as it does for
+// variable declarations.
+// ============================================================================
+
+class Functions {
+    static func add(int a, int b): int {
+        return a + b
+    }
+
+    static func isEven(int n): bool {
+        return n % 2 == 0
+    }
+
+    static func greet(string name): string {
+        return "Hello, " + name
+    }
+
+    static func shout(string name): void {
+        log("HEY " + name)
+    }
+
+    static func fibonacci(int n): int {
+        if (n < 2) { return n }
+        return Functions.fibonacci(n - 1) + Functions.fibonacci(n - 2)
+    }
+
+    func main(): void {
+        log(Functions.add(2, 3))
+        log(Functions.isEven(10))
+        log(Functions.greet("Zeal"))
+        Functions.shout("there")
+        log(Functions.fibonacci(10))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 5
+// true
+// Hello, Zeal
+// HEY there
+// 55
+// --- End expected output ---

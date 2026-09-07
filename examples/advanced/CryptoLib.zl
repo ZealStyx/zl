@@ -1,0 +1,40 @@
+// ============================================================================
+// ZL Examples - Advanced - zl.crypto.Crypto
+//
+// SHA-256 and CRC32 are native primitives; the package owns the public API.
+//
+//   Crypto.sha256(text)     64 lowercase hex characters
+//   Crypto.crc32(text)      8 lowercase hex characters
+//
+// Both are deterministic, so the digests below are fixed - which makes them a
+// handy way to check that the build is behaving.
+//
+// `Math.random` and friends are NOT cryptographic; use this package for
+// anything security-relevant.
+// ============================================================================
+
+import zl.crypto.Crypto
+
+class CryptoLib {
+    func main(): void {
+        log(Crypto.sha256("abc"))
+        log(Crypto.sha256(""))
+        log(Crypto.sha256("abc") == Crypto.sha256("abc"))
+        log(Crypto.sha256("abc") == Crypto.sha256("abd"))
+
+        log(String.length(Crypto.sha256("anything")))
+
+        log(Crypto.crc32("123456789"))
+        log(String.length(Crypto.crc32("123456789")))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+// e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+// true
+// false
+// 64
+// cbf43926
+// 8
+// --- End expected output ---

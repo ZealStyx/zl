@@ -1,0 +1,16 @@
+// Shared module source for Inheritance.zl - not a runnable example.
+class Animal {
+    public string name
+
+    func Animal(string name): void {
+        this.name = name
+    }
+
+    public func speak(): string {
+        return "..."
+    }
+
+    public func describe(): string {
+        return this.name + " says " + this.speak()
+    }
+}

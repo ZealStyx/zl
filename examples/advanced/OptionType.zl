@@ -1,0 +1,94 @@
+// ============================================================================
+// ZL Examples - Advanced - Option<T>
+//
+// `Option<T>` models a value that may be absent, so "no result" is a value you
+// must handle rather than a null you might forget. It has two cases:
+//
+//     new Some<int>(value)      a value is present
+//     new None<int>()           no value
+//
+//   isSome() / isNone()               which case you have
+//   unwrap()                          the value - THROWS on None
+//   unwrapOr(fallback)                the value, or a constant default
+//   unwrapOrElse(makeFallback)        the value, or a lazily computed default
+//   expect(message)                   the value - THROWS with your message
+//   contains(candidate)               is this the value I asked about?
+//   isSomeAnd(predicate)              is there a value, and does it pass?
+//
+// Option<T> is built in - no import needed. A subclass instantiation widens to
+// its parameterized parent, so `Some<int>` satisfies a declared `Option<int>`
+// and functions can take and return Options normally.
+// ============================================================================
+
+class OptionType {
+    // The idiomatic shape: a lookup that may miss returns an Option.
+    static func findEven(List<int> xs): Option<int> {
+        for i in 0..xs.length() {
+            var v = xs.get(i)
+            if (v % 2 == 0) { return new Some<int>(v) }
+        }
+        return new None<int>()
+    }
+
+    static func describe(Option<int> found): string {
+        if (found.isSome()) { return "found " + found.unwrap() }
+        return "no even number"
+    }
+
+    func main(): void {
+        var present = new Some<int>(42)
+        var absent = new None<int>()
+
+        log(present.isSome())
+        log(present.isNone())
+        log(present.unwrap())
+        log(present.unwrapOr(0))
+        log(present.contains(42))
+        log(present.contains(7))
+        log(present.isSomeAnd(func(v) => v > 40))
+
+        log(absent.isSome())
+        log(absent.isNone())
+        log(absent.unwrapOr(-1))
+        log(absent.unwrapOrElse(func() => 99))
+        log(absent.contains(42))
+        log(absent.isSomeAnd(func(v) => v > 40))
+
+        // unwrap() on None throws - catch it rather than crashing.
+        try {
+            log(absent.unwrap())
+        } catch Exception e {
+            log("threw: " + e.message)
+        }
+
+        // Passing Options through functions.
+        var withEven = new List<int>()
+        withEven.push(1)
+        withEven.push(4)
+        var withoutEven = new List<int>()
+        withoutEven.push(1)
+        withoutEven.push(3)
+
+        log(OptionType.describe(OptionType.findEven(withEven)))
+        log(OptionType.describe(OptionType.findEven(withoutEven)))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// true
+// false
+// 42
+// 42
+// true
+// false
+// true
+// false
+// true
+// -1
+// 99
+// false
+// false
+// threw: Option.unwrap called on None
+// found 4
+// no even number
+// --- End expected output ---

@@ -1,0 +1,93 @@
+// ============================================================================
+// ZL Examples - Advanced - zl.text.Text
+//
+// `Text` is the higher-level text package. `String.*` (auto-imported) stays the
+// low-level native boundary; `Text` adds convenience and composition helpers on
+// top and owns formatting plus the regex entry points.
+//
+//   length isEmpty isNotEmpty isBlank
+//   upper lower trim reverse
+//   contains indexOf charAt substring replace remove
+//   startsWith endsWith count
+//   padLeft padRight repeatText join
+//   toInt toFloat toBool   (and toIntOr/toFloatOr/toBoolOr, which fall back
+//                           instead of throwing on bad input)
+//   format regexMatches regexFullMatches regexFindAll regexReplace
+//
+// `format` uses positional placeholders: {0}, {1}, ...
+//
+// Note the substring trap: `String.substring(s, start, end)` is end-EXCLUSIVE,
+// and Text.substring forwards straight to it despite naming the third parameter
+// `length`.
+// ============================================================================
+
+import zl.text.Text
+
+class TextLib {
+    func main(): void {
+        log(Text.length("hello"))
+        log(Text.isEmpty(""))
+        log(Text.isBlank("   "))
+        log(Text.upper("zl"))
+        log(Text.lower("ZL"))
+        log(Text.trim("   padded   "))
+        log(Text.reverse("abc"))
+        log(Text.repeatText("ab", 3))
+
+        log(Text.contains("hello", "ell"))
+        log(Text.indexOf("hello", "l"))
+        log(Text.charAt("hello", 1))
+        log(Text.substring("hello", 1, 3))
+        log(Text.replace("a-b-c", "-", "+"))
+        log(Text.remove("a-b-c", "-"))
+
+        log(Text.startsWith("hello", "he"))
+        log(Text.endsWith("hello", "lo"))
+        log(Text.count("banana", "an"))
+
+        log(Text.padLeft("7", 3, "0"))
+        log(Text.padRight("7", 3, "."))
+
+        var parts = new List<string>()
+        parts.push("a")
+        parts.push("b")
+        parts.push("c")
+        log(Text.join(parts, "-"))
+
+        log(Text.toInt("42") + 1)
+        log(Text.toIntOr("nope", -1))
+
+        log(Text.format("hello {0}", {"ZL"}))
+        log(Text.format("{0} + {1} = {2}", {"1", "1", "2"}))
+
+        log(Text.regexReplace("a1b2", "[0-9]", "X"))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 5
+// true
+// true
+// ZL
+// zl
+// padded
+// cba
+// ababab
+// true
+// 2
+// e
+// el
+// a+b+c
+// abc
+// true
+// true
+// 2
+// 007
+// 7..
+// a-b-c
+// 43
+// -1
+// hello ZL
+// 1 + 1 = 2
+// aXbX
+// --- End expected output ---

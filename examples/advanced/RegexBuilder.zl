@@ -1,0 +1,81 @@
+// ============================================================================
+// ZL Examples - Advanced - The Fluent Regex Builder
+//
+// Hand-writing patterns is error-prone, so `Regex` doubles as a builder. Every
+// step returns the same Regex, so calls chain, and `source()` shows the pattern
+// assembled so far - which makes the builder easy to learn and to debug.
+//
+//     new Regex("")            start empty (or Regex.build())
+//     .then("literal")         append text, with metacharacters escaped
+//     .digit() / .digit(n)     \d, or n of them
+//     .wordCharacter()         \w
+//     .exact(n)                repeat the PREVIOUS element n times
+//     .range(min, max)         repeat it between min and max times
+//     .oneOrMore() / .zeroOrMore() / .optional()
+//     .startOfLine() / .endOfLine() / .any()
+//     .named("x") / .backreference(n) / .alternate(other)
+//     .positiveLookahead(other) / .negativeLookahead(other)
+//
+// The quantifier steps (exact, range, oneOrMore, optional, ...) rewrite the
+// element added immediately before them, so they must follow something - on an
+// empty builder they throw rather than silently producing a broken pattern.
+//
+// The built result is an ordinary Regex: matches(), find(), findAll(),
+// replace() all work on it.
+// ============================================================================
+
+class RegexBuilder {
+    func main(): void {
+        // A four-digit PIN, anchored at both ends.
+        var pin = new Regex("")
+        pin.startOfLine().digit().exact(4).endOfLine()
+        log("pattern: " + pin.source())
+        log(pin.matches("1234"))
+        log(pin.matches("12a4"))
+        log(pin.matches("12345"))
+
+        // then() escapes metacharacters, so the dot stays a literal dot.
+        // Note that startOfLine()/endOfLine() simply APPEND their anchor, so
+        // they only make sense as the first / last step in the chain.
+        var version = Regex.build().startOfLine().then("v1.0").endOfLine()
+        log("pattern: " + version.source())
+        log(version.matches("v1.0"))
+        log(version.matches("v1.0-beta"))
+
+        // A phone-ish shape: three digits, a literal dash, four digits.
+        var phone = Regex.build().digit(3).then("-").digit(4)
+        log("pattern: " + phone.source())
+        log(phone.matches("555-1234"))
+
+        // Named groups, read back by name.
+        var pair = Regex.build().wordCharacter().oneOrMore().named("key")
+                          .then("=").digit().oneOrMore().named("value")
+        log("pattern: " + pair.source())
+        var found = pair.find("width=800")
+        log("key=" + found.group("key"))
+        log("value=" + found.group("value"))
+
+        // Quantifiers need something to quantify - this throws by design.
+        try {
+            Regex.build().oneOrMore()
+        } catch Exception e {
+            log("threw: " + e.message)
+        }
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// pattern: ^\d\d\d\d$
+// true
+// false
+// false
+// pattern: ^v1\.0$
+// true
+// false
+// pattern: \d\d\d-\d\d\d\d
+// true
+// pattern: (?<key>(?:\w)+)=(?<value>(?:\d)+)
+// key=width
+// value=800
+// threw: Regex.oneOrMore requires a preceding builder element
+// --- End expected output ---

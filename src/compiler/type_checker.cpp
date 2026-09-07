@@ -14,6 +14,23 @@
 namespace zl {
 
 namespace {
+// Whether a captured local is safe to carry across a thread boundary.
+// `Shared<T>` is the explicit opt-in wrapper; the rest are the runtime's own
+// synchronisation primitives, whose state is guarded internally and which are
+// exactly what the diagnostic tells you to use. Keep this list in step with
+// isThreadSafeClassName in src/vm/native.cpp.
+bool capturedValueCrossesThreadBoundary(const SymbolTable& symbols, const std::string& captured) {
+    const auto info = symbols.lookupVar(captured);
+    if (!info || info->type != ZlType::OBJECT) return false;
+    const auto& cls = info->className;
+    const bool threadSafe = cls == "Shared" || cls.rfind("Shared<", 0) == 0 ||
+                            cls == "Atomic" || cls == "Mutex" || cls == "RwLock" ||
+                            cls == "Semaphore" || cls == "Channel" || cls == "Condition";
+    return !threadSafe;
+}
+} // namespace
+
+namespace {
 bool genericCollectionCompatible(const std::string& from, const std::string& to) {
     if (from.empty() || to.empty()) return true;
     if (from == to) return true;
@@ -1916,9 +1933,13 @@ static std::optional<std::string> resolveSharedCellAlias(
     std::string name = static_cast<const Identifier*>(expr)->name;
     std::unordered_set<std::string> seen;
     while (true) {
-        if (!seen.insert(name).second) return std::nullopt;
         auto it = aliases.find(name);
         if (it == aliases.end()) return name;
+        // A cell created by `new Shared<T>(...)` is registered as its own
+        // canonical name. That is a self-edge, not a cycle, and has to
+        // terminate here rather than fall through to the loop guard.
+        if (it->second == name) return name;
+        if (!seen.insert(name).second) return std::nullopt;
         name = it->second;
     }
 }
@@ -1937,6 +1958,25 @@ static std::optional<std::string> resolveLockAlias(
     }
 }
 
+// Resolve an identifier to the Shared cell it aliases, but only when it is
+// actually a tracked cell. `resolveSharedCellAlias` answers for any identifier,
+// returning it unchanged when it is not in the map - which is what it has to do
+// when *registering* an alias, but is wrong here: it made every zero-argument
+// `get()` on any object look like a protected Shared payload read, so a plain
+// `class Holder<T> { func get(): T }` was rejected with "protected Shared
+// payload access requires Shared.withLock".
+static std::optional<std::string> trackedSharedCellForExpr(
+    const AstNode* expr,
+    const std::unordered_map<std::string, std::string>& owners,
+    const std::unordered_map<std::string, std::string>& aliases) {
+    if (!expr || expr->kind != NodeKind::Identifier) return std::nullopt;
+    const std::string& name = static_cast<const Identifier*>(expr)->name;
+    if (aliases.count(name)) return resolveSharedCellAlias(expr, aliases);
+    auto it = owners.find(name);
+    if (it != owners.end()) return it->second;
+    return std::nullopt;
+}
+
 static std::optional<std::string> sharedPayloadOwnerForExpr(
     const AstNode* expr,
     const std::unordered_map<std::string, std::string>& owners,
@@ -1950,7 +1990,7 @@ static std::optional<std::string> sharedPayloadOwnerForExpr(
     if (expr->kind == NodeKind::MethodCallExpr) {
         const auto* call = static_cast<const MethodCallExpr*>(expr);
         if (call->methodName == "get" && call->arguments.empty())
-            return resolveSharedCellAlias(call->object.get(), aliases);
+            return trackedSharedCellForExpr(call->object.get(), owners, aliases);
     }
     return std::nullopt;
 }
@@ -1975,11 +2015,48 @@ TypeChecker::InferredType TypeChecker::inferIndexAccess(const IndexAccessExpr* n
         const std::string prefix = "List<";
         if (object.className.rfind(prefix, 0) == 0 && object.className.back() == '>') {
             const std::string elem = object.className.substr(prefix.size(), object.className.size() - prefix.size() - 1);
-            if (elem == "int") result.type = ZlType::INT;
-            else if (elem == "double") result.type = ZlType::DOUBLE;
-            else if (elem == "string") result.type = ZlType::STRING;
-            else if (elem == "bool") result.type = ZlType::BOOL;
-            else { result.type = ZlType::OBJECT; result.className = elem; }
+            // An element name can carry its own type arguments (`Task<int>`),
+            // so match on the base name and keep the full instantiation.
+            auto canonicalOf = [](const std::string& name, std::string& klass) {
+                if (name == "int") return ZlType::INT;
+                if (name == "double") return ZlType::DOUBLE;
+                if (name == "string") return ZlType::STRING;
+                if (name == "bool") return ZlType::BOOL;
+                if (name == "nil") return ZlType::NIL;
+                if (name == "func") return ZlType::FUNCTION;
+                if (name == "Task") return ZlType::TASK;
+                if (name == "list") return ZlType::LIST;
+                if (name == "map") return ZlType::MAP;
+                if (name == "set") return ZlType::SET;
+                if (name == "array") return ZlType::ARRAY;
+                klass = name;
+                return ZlType::OBJECT;
+            };
+            const std::size_t angle = elem.find('<');
+            const std::string base = angle == std::string::npos ? elem : elem.substr(0, angle);
+            std::string elemClass;
+            result.type = canonicalOf(base, elemClass);
+            result.className = elemClass;
+            if (result.type == ZlType::OBJECT) {
+                // A class keeps its full instantiation as its name -
+                // `List<int>`, `Shared<int>`, `Widget`. The base name alone
+                // would drop the type arguments, so the next indexed access on
+                // the result would no longer see a `List<T>`.
+                result.className = elem;
+            }
+            if (result.type == ZlType::TASK) {
+                // `Task<T>` is its own type kind, not an OBJECT whose class name
+                // happens to be "Task<int>". Reporting it as OBJECT made
+                // `xs[0].block()` fail with "type 'Task' has no method 'block'"
+                // while the equivalent `xs.get(0).block()` worked.
+                result.className = elem;
+                if (angle != std::string::npos && elem.back() == '>' && elem.size() > angle + 1) {
+                    std::string valueClass;
+                    result.taskValueType =
+                        canonicalOf(elem.substr(angle + 1, elem.size() - angle - 2), valueClass);
+                    result.taskValueClassName = valueClass;
+                }
+            }
             return result;
         }
     }
@@ -2182,11 +2259,24 @@ void TypeChecker::checkVarDecl(const VarDecl* node) {
         else
             sharedPayloadOwners_.erase(node->name);
 
+        // A `new Shared<T>(...)` infers the bare class name "Shared" while a
+        // copy of an existing cell keeps the instantiated "Shared<T>", so both
+        // spellings have to register the var as a cell. Without the bare form
+        // the cell was never tracked, and the payload guard only appeared to
+        // work because it used to treat every zero-argument `get()` as a
+        // Shared read.
         const bool looksLikeSharedCell =
-            initType == ZlType::OBJECT && initClassName.rfind("Shared<", 0) == 0;
+            initType == ZlType::OBJECT &&
+            (initClassName == "Shared" || initClassName.rfind("Shared<", 0) == 0);
         if (looksLikeSharedCell) {
             if (auto alias = resolveSharedCellAlias(node->initializer.get(), sharedCellAliases_))
                 sharedCellAliases_[node->name] = *alias;
+            else
+                // `new Shared<T>(...)` is not an alias of anything else - it is
+                // a fresh cell, so it has to register as its own. Without this
+                // only copies of a cell were tracked and the cell built by the
+                // `new` itself escaped the payload guard entirely.
+                sharedCellAliases_[node->name] = node->name;
         } else {
             sharedCellAliases_.erase(node->name);
         }
@@ -2741,7 +2831,17 @@ void collectThreadRefs(const AstNode* node, std::unordered_set<std::string>& ref
         case NodeKind::UnaryExpr: { auto* n=static_cast<const UnaryExpr*>(node); collectThreadRefs(n->operand.get(),refs,usesThis,params); break; }
         case NodeKind::AwaitExpr: { auto* n=static_cast<const AwaitExpr*>(node); collectThreadRefs(n->operand.get(),refs,usesThis,params); break; }
         case NodeKind::BinaryExpr: { auto* n=static_cast<const BinaryExpr*>(node); collectThreadRefs(n->left.get(),refs,usesThis,params); collectThreadRefs(n->right.get(),refs,usesThis,params); break; }
-        case NodeKind::CallExpr: { auto* n=static_cast<const CallExpr*>(node); for(auto& a:n->arguments) collectThreadRefs(a.get(),refs,usesThis,params); break; }
+        case NodeKind::CallExpr: { auto* n=static_cast<const CallExpr*>(node);
+            // The callee is a NAME, not a child node, so walking only the
+            // arguments misses it. `f(g(x))` references both f and g, and a
+            // lambda that calls a captured func value must capture it - only
+            // names that actually resolve to a local are captured at runtime,
+            // so recording a class or method name here is harmless.
+            if (n->namespaceName.empty() && !n->calleeName.empty() && !params.count(n->calleeName)) {
+                refs.insert(n->calleeName);
+            }
+            for (auto& a : n->arguments) { collectThreadRefs(a.get(), refs, usesThis, params); }
+            break; }
         case NodeKind::AssignExpr: { auto* n=static_cast<const AssignExpr*>(node); if(!params.count(n->name)) refs.insert(n->name); collectThreadRefs(n->value.get(),refs,usesThis,params); break; }
         case NodeKind::MoveExpr: { auto* n=static_cast<const MoveExpr*>(node); if(!params.count(n->name)) refs.insert(n->name); break; }
         case NodeKind::FieldAccessExpr: { auto* n=static_cast<const FieldAccessExpr*>(node); collectThreadRefs(n->object.get(),refs,usesThis,params); break; }
@@ -2761,6 +2861,22 @@ void collectThreadRefs(const AstNode* node, std::unordered_set<std::string>& ref
         case NodeKind::TryStmt: { auto* n=static_cast<const TryStmt*>(node); collectThreadRefs(n->tryBlock.get(),refs,usesThis,params);for(auto& c:n->catches)collectThreadRefs(c.block.get(),refs,usesThis,params);collectThreadRefs(n->finallyBlock.get(),refs,usesThis,params);break; }
         case NodeKind::ThrowStmt: { auto* n=static_cast<const ThrowStmt*>(node); collectThreadRefs(n->value.get(),refs,usesThis,params); break; }
         case NodeKind::ExprStmt: { auto* n=static_cast<const ExprStmt*>(node); collectThreadRefs(n->expression.get(),refs,usesThis,params); break; }
+        case NodeKind::LambdaExpr: {
+            // A lambda nested in this body needs whatever IT references, so the
+            // enclosing lambda has to carry those names across for it: at
+            // runtime MakeClosure captures from the frame it executes in, and
+            // that frame holds exactly this lambda's captures. Without this,
+            // `func() { var inner = func() => n; inner() }` captures nothing
+            // for `inner` to see and dies with "undefined variable 'n'".
+            // The nested lambda's own parameters shadow outer names, so they
+            // must not be recorded as captures.
+            auto* n = static_cast<const LambdaExpr*>(node);
+            std::unordered_set<std::string> nestedParams(params);
+            for (const auto& p : n->params) nestedParams.insert(p.name);
+            collectThreadRefs(n->hasExprBody ? n->exprBody.get() : n->blockBody.get(),
+                              refs, usesThis, nestedParams);
+            break;
+        }
         default: break;
     }
 }
@@ -2780,8 +2896,16 @@ void TypeChecker::validateThreadLambda(const LambdaExpr* node, const char* apiNa
     for (const auto& name : node->captureNames) {
         auto info=symbols_.lookupVar(name);
         if (!info) continue;
-        if (!(info->type==ZlType::OBJECT && (info->className=="Shared" || info->className.rfind("Shared<", 0)==0)))
-            typeError(std::string(apiName)+" cannot capture '"+name+"' across a thread boundary; use Atomic or Mutex for mutable shared state", node->line);
+        // Shared<T> is the explicit opt-in wrapper. The synchronisation
+        // primitives are also allowed: their state is guarded internally, and
+        // they are what this message tells you to reach for. Keep this list in
+        // step with isThreadSafeClassName in src/vm/native.cpp.
+        const auto& cls = info->className;
+        const bool threadSafe = cls == "Shared" || cls.rfind("Shared<", 0) == 0 ||
+                                cls == "Atomic" || cls == "Mutex" || cls == "RwLock" ||
+                                cls == "Semaphore" || cls == "Channel" || cls == "Condition";
+        if (!(info->type==ZlType::OBJECT && threadSafe))
+            typeError(std::string(apiName)+" cannot capture '"+name+"' across a thread boundary; use Shared<T>, Atomic, or Mutex for mutable shared state", node->line);
     }
 }
 TypeChecker::InferredType TypeChecker::inferExpr(const AstNode* node) {
@@ -3241,6 +3365,19 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
             typeError("non-exhaustive match: union subject requires a wildcard or irrefutable variable pattern", node->line);
         if (subject.type == ZlType::BOOL && !(matchedTrue && matchedFalse))
             typeError("non-exhaustive match: bool subject requires both true and false or a wildcard", node->line);
+        // Integers, doubles and strings have an open value space, so a set of
+        // literal patterns can never cover it. Reaching the end of the arm list
+        // evaluates the match to the SUBJECT itself, which has a different type
+        // from the arms: `match n { 1 => "one" }` yields the int 3 when n is 3.
+        // That either surfaces later as a runtime type assertion, or not at all
+        // when the result is untyped, so reject it here. An irrefutable variable
+        // pattern already counts as a wildcard (rootCatchAll above).
+        if (!subjectIsUnion &&
+            (subject.type == ZlType::INT || subject.type == ZlType::DOUBLE ||
+             subject.type == ZlType::STRING)) {
+            typeError("non-exhaustive match: " + zlTypeName(subject.type) +
+                      " subject requires a wildcard or irrefutable variable pattern", node->line);
+        }
         if (subject.type == ZlType::OBJECT && !subject.className.empty()) {
             const auto* shape = semanticModel_.findClass(subject.className);
             if (shape && shape->isEnumType) {
@@ -3586,9 +3723,8 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                 if (info->functionUsesThis)
                     typeError("Task.spawn cannot use a func value that captures 'this'; wrap the object in Shared<T>", node->line);
                 for (const auto& captured : info->functionCaptureNames) {
-                    const auto capInfo = symbols_.lookupVar(captured);
-                    if (capInfo && !(capInfo->type == ZlType::OBJECT && (capInfo->className == "Shared" || capInfo->className.rfind("Shared<", 0) == 0)))
-                        typeError("Task.spawn cannot cross thread boundary with captured '" + captured + "'; use Atomic or Mutex for mutable shared state", node->line);
+                    if (capturedValueCrossesThreadBoundary(symbols_, captured))
+                        typeError("Task.spawn cannot cross thread boundary with captured '" + captured + "'; use Shared<T>, Atomic, or Mutex for mutable shared state", node->line);
                 }
             }
         }
@@ -3613,9 +3749,8 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                 if (info->functionUsesThis)
                     typeError("Thread.start cannot use a func value that captures 'this'; wrap the object in Shared<T>", node->line);
                 for (const auto& captured : info->functionCaptureNames) {
-                    const auto capInfo = symbols_.lookupVar(captured);
-                    if (capInfo && !(capInfo->type == ZlType::OBJECT && (capInfo->className == "Shared" || capInfo->className.rfind("Shared<", 0) == 0)))
-                        typeError("Thread.start cannot cross thread boundary with captured '" + captured + "'; use Atomic or Mutex for mutable shared state", node->line);
+                    if (capturedValueCrossesThreadBoundary(symbols_, captured))
+                        typeError("Thread.start cannot cross thread boundary with captured '" + captured + "'; use Shared<T>, Atomic, or Mutex for mutable shared state", node->line);
                 }
             }
         }

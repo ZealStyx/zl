@@ -1,0 +1,39 @@
+// ============================================================================
+// ZL Examples - Intermediate - Interfaces
+//
+// An interface declares method signatures with no body. Note the syntax:
+// interface members are written WITHOUT the `func` keyword.
+//
+//     interface Shape {
+//         area(): double
+//     }
+//
+// A class adopts it with `implements`, and each adopted method is marked
+// `@Override`. A variable typed as the interface accepts any implementer.
+// ============================================================================
+
+import Shape
+import Circle
+
+class Interfaces {
+    static func report(Shape s): string {
+        return s.name()
+    }
+
+    func main(): void {
+        var c = new Circle(2.0)
+        log(c.name())
+        log(c.area())
+
+        Shape masked = new Circle(3.0)
+        log(masked.name())
+        log(masked.area())
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// circle
+// 12
+// circle
+// 27
+// --- End expected output ---
