@@ -8,6 +8,29 @@ smaller ones that are recorded but left alone.
 Everything below was reproduced against a build of this tree. Each entry says
 what it is, how to see it, and whether it is fixed here or still open.
 
+## Stabilization update — 2026-09-08
+
+The findings below include the original reproductions. Subsequent hardening has
+closed **O4/F8, O5, and O6**:
+
+- GC now parks actual native waits (including lock acquisition), retains parked
+  roots until reactivation, and prevents resumption during a running collection.
+  Nested lock callbacks participate normally instead of postponing GC. A
+  controlled-collector regression rejects the former early-resumption protocol.
+- Native-driven callbacks restore the caller's execution/handler state on throw;
+  `MutexLocks.zl` checks one continuation and lock reuse after an exception.
+- Generic invocation frames and escaping closures carry lexical type bindings.
+  Method-built and literal collections retain their identity; declared parent
+  type arguments are substituted instead of copied by position. Argument and
+  return checks share the ordinary VM boundaries rather than skipping generic
+  signatures. `GenericRuntimeChecks.zl` also covers async callbacks and native
+  `share` factory metadata, including legitimate widening/base-class assignments.
+
+The remaining stabilization work still precedes library expansion: flow-sensitive
+union narrowing, dynamic reassignment/typed native-storage writes, native return
+inference (including `String.split`), and the remaining exception/resource audit.
+The large type-checker split and native lowering remain deferred.
+
 ## Fixed in this branch
 
 ### 1. Every generic in the language was unusable at runtime
@@ -418,7 +441,7 @@ Also worth noting: `stdlib/zl/lang/Atomic.zl` and `Mutex.zl` are empty class
 bodies. Their entire API is native statics, so there is no instance surface at
 all.
 
-### O4 - Locked critical sections deadlock under contention
+### O4 - Locked critical sections deadlock under contention **(fixed)**
 
 2 x 50 locked increments completes and prints `total=100`. 2 x 100 hangs
 forever with no output, 4/4 runs. Both threads are joined by `main`, so it
@@ -429,7 +452,7 @@ threshold (2 x 100 hangs, exit 124) while `Shared.withLock` at 2 x 50 is stable
 5/5, so the fault is in the locked-closure path they share, not in either
 wrapper.
 
-### O5 - An exception escaping `Mutex.withLock` corrupts the continuation
+### O5 - An exception escaping `Mutex.withLock` corrupts the continuation **(fixed)**
 
 ```zl
 try {
@@ -442,7 +465,7 @@ prints the catch, then runs the rest of `main` **twice**, then dies with
 the `try` entirely. The lock's value is in the closure, so keep bodies
 non-throwing until this is fixed.
 
-### O6 - A generic collection loses its instantiated identity
+### O6 - A generic collection loses its instantiated identity **(fixed)**
 
 A list built inside a generic method - the result of `transform`, `filter`, or
 `reversed` - is erased to `List`, so it cannot be passed to a `List<int>`
@@ -597,7 +620,7 @@ versions are `any`, `all`, and `filter`.
 (`Expected '(' after func name -- got "<"`). Only generic *classes* exist, so
 `Generics.zl` writes the helper per element type.
 
-### O17 - The repository's `tests/` directory is missing
+### O17 - The legacy regression corpus is missing
 
 `CMakeLists.txt` declares 15+ test executables whose sources are not in the
 tree, so `cmake -S . -B build` fails at the generate step:
@@ -742,8 +765,8 @@ own.
 
 F6 and F8 were not reachable at all before fix 1: `Shared<int>` could not be
 constructed, so no thread or lock example could even start. Both were re-verified
-after the fix. F6 and F7 have since been fixed (fixes 3 and 5); F8 and F9 remain
-open.
+after the fix. F6 and F7 have since been fixed (fixes 3 and 5), and F8 was closed
+by the later safepoint work described above. F9 remains open.
 
 ## Three features that existed but were documented nowhere
 

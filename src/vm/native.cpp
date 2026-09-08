@@ -1240,7 +1240,7 @@ Value threadStart(const std::vector<Value>& args) {
     state->startWith([closureCopy, root]() mutable {
         try {
             VM workerVm;
-            workerVm.invokeThreadClosure(closureCopy);
+            (void)workerVm.invokeTaskClosure(closureCopy);
         } catch (...) {
             // An exception escaping a Thread is process-fatal by definition.
             std::terminate();
@@ -1411,21 +1411,8 @@ Value typeBase(const std::vector<Value>& args) {
 
 // --- Reflection wrappers -------------------------------------------------
 
-std::string sharedRuntimeClassName(const Value& value) {
-    if (std::holds_alternative<std::int64_t>(value)) return "Shared<int>";
-    if (std::holds_alternative<double>(value)) return "Shared<double>";
-    if (std::holds_alternative<bool>(value)) return "Shared<bool>";
-    if (std::holds_alternative<std::string>(value)) return "Shared<string>";
-    if (auto obj = std::get_if<ObjectRef>(&value); obj && *obj)
-        return "Shared<" + (*obj)->className + ">";
-    if (std::holds_alternative<ListRef>(value)) return "Shared<list>";
-    if (std::holds_alternative<MapRef>(value)) return "Shared<map>";
-    if (std::holds_alternative<ClosureRef>(value)) return "Shared<func>";
-    return "Shared<object>";
-}
-
 Value sharedShare(const std::vector<Value>& args) {
-    if (args.size() != 1) throw std::runtime_error("Shared.share: expected one value");
+    if (args.size() != 1) throw std::runtime_error("share: expected one value");
     auto box = makeGCObject();
     // Runtime dispatch uses the canonical Shared class; the compiler retains
     // Shared<T> at the static type level for get()/setValue() typing.
@@ -1543,7 +1530,8 @@ Value reflectionFunction(const std::vector<Value>& args) {
     auto params = makeGCList();
     for (const auto& type : (*closure)->parameterTypeNames) params->items.emplace_back(type);
     ref->fields["parameters"] = ListRef(std::move(params));
-    ref->fields["returnType"] = (*closure)->returnTypeName;
+    ref->fields["returnType"] = (*closure)->isAsync
+        ? "Task<" + (*closure)->returnTypeName + ">" : (*closure)->returnTypeName;
     ref->fields["async"] = (*closure)->isAsync;
     ref->fields["native"] = (*closure)->isNative;
     return ObjectRef(std::move(ref));

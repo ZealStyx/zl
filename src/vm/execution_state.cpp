@@ -80,10 +80,7 @@ void ExecutionState::appendGCRoots(std::vector<Value>& roots) const {
     roots.reserve(roots.size() + stack_.size() + globals_.size());
     roots.insert(roots.end(), stack_.begin(), stack_.end());
     for (const auto& [name, value] : globals_) roots.push_back(value);
-    for (const auto& frame : callStack_) {
-        if (frame.activeClosure) roots.emplace_back(frame.activeClosure);
-        for (const auto& [name, value] : frame.locals) roots.push_back(value);
-    }
+    for (const auto& frame : callStack_) frame.appendGCRoots(roots);
 }
 
 void ExecutionState::enterFrame(CallFrame frame) {

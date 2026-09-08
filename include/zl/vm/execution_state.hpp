@@ -17,7 +17,15 @@ public:
         std::unordered_map<std::string, Value> locals;
         ClosureRef activeClosure;
         std::string functionName;
+        std::string ownerClassName;
+        RuntimeTypeBindings typeBindings;
+        std::string returnTypeName;
         std::vector<std::string> ownedLocalNames;
+
+        void appendGCRoots(std::vector<Value>& roots) const {
+            if (activeClosure) roots.emplace_back(activeClosure);
+            for (const auto& entry : locals) roots.push_back(entry.second);
+        }
 
         void dropOwnedLocals() {
             for (const auto& name : ownedLocalNames) locals.erase(name);
@@ -56,6 +64,10 @@ public:
     CallFrame leaveFrame();
     bool inFunction() const noexcept { return !callStack_.empty(); }
     std::size_t callDepth() const noexcept { return callStack_.size(); }
+    const RuntimeTypeBindings& typeBindings() const {
+        static const RuntimeTypeBindings empty;
+        return callStack_.empty() ? empty : callStack_.back().typeBindings;
+    }
     std::size_t valueStackSize() const noexcept { return stack_.size(); }
     std::vector<std::string> callStackNames() const;
     CallFrame& currentFrame();

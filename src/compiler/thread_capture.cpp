@@ -40,7 +40,10 @@ void collectRefs(const AstNode* node, std::unordered_set<std::string>& refs, boo
             if (!bound.count(n->name)) refs.insert(n->name);
             break;
         }
-        case NodeKind::ThisExpr: usesThis = true; break;
+        case NodeKind::ThisExpr:
+            usesThis = true;
+            refs.insert("this");
+            break;
         case NodeKind::UnaryExpr: { auto* n = static_cast<const UnaryExpr*>(node); collectRefs(n->operand.get(), refs, usesThis, bound); break; }
         case NodeKind::AwaitExpr: { auto* n = static_cast<const AwaitExpr*>(node); collectRefs(n->operand.get(), refs, usesThis, bound); break; }
         case NodeKind::BinaryExpr: { auto* n = static_cast<const BinaryExpr*>(node); collectRefs(n->left.get(), refs, usesThis, bound); collectRefs(n->right.get(), refs, usesThis, bound); break; }

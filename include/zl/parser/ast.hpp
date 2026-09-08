@@ -482,6 +482,9 @@ struct CallExpr : AstNode {
     // `Type.of(MyClass)` is a class/type literal rather than a variable lookup.
     mutable bool isClassTypeLiteral{false};
     mutable std::string classTypeLiteralName;
+    // Declared identity of a fresh native-factory result (not a cast). Kept
+    // separate from value inference so existing objects are never relabelled.
+    mutable std::string nativeFactoryTypeName;
     CallExpr() : AstNode(NodeKind::CallExpr) {}
 };
 
@@ -645,6 +648,7 @@ struct LambdaExpr : AstNode {
     // Type information inferred during semantic checking and copied into the
     // runtime closure for callable reflection.
     mutable std::vector<std::string> inferredParameterTypeNames;
+    // The body result; isAsync wraps it in Task<T> at the call boundary.
     mutable std::string inferredReturnTypeName;
     LambdaExpr() : AstNode(NodeKind::LambdaExpr) {}
 };

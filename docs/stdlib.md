@@ -5,6 +5,7 @@ VM, OS access, parsing engines, and storage primitives remain small native primi
 See [native.md](native.md) for the boundary rule.
 
 - [`zl.lang` (auto-imported)](#zllang-auto-imported)
+- [Generic collections](#generic-collections)
 - [Math](#math)
 - [`zl.test`](#zltest)
 - [`zl.logging`](#zllogging)
@@ -26,6 +27,32 @@ Everything else requires an explicit `import` — see [packages.md](packages.md)
 Beyond `zl.lang`, the bundled packages include reference queue and stack utilities
 (`zl.util.Queue`, `zl.util.Stack`), text and time helpers, task/channel/thread facades,
 serialization, filesystem access, and a small portable DNS network facade.
+
+## Generic collections
+
+`List<T>`, `Map<K,V>`, and `Set<T>` are ZL classes over native storage primitives.
+Their methods are compiled once; each invocation carries the receiver's concrete
+type bindings. Typed literals and collections built by methods such as `transform`,
+`filter`, `reversed`, `keys`, and `values` retain those bindings, including nested
+instantiations and empty results.
+
+```zl
+List<int> numbers = [1, 2, 3]
+List<int> doubled = numbers.transform(func(x) => x * 2)
+Map<string,int> ages = {"ada": 36}
+List<string> names = ages.keys()
+```
+
+The returned collections can be passed to typed parameters normally; there is no
+need to keep them in untyped locals. Runtime argument, return, and explicit-local
+checks also apply when values arrive through callbacks or reflection. Closures
+retain their lexical type bindings after the creating method returns, including
+across async suspension. A scalar `int` may still widen to `double`; different
+mutable collection instantiations are not interchangeable.
+
+The lowercase native `list`/`map` storage values are distinct from these generic
+class instances. See `examples/intermediate/GenericRuntimeChecks.zl` for typed
+factories and rejected dynamic writes/returns.
 
 ## Math
 

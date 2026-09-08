@@ -110,15 +110,6 @@ private:
     // compileSuperCallExpr/compileSuperMethodCallExpr don't need to re-look
     // it up on every use.
     std::string currentParentClassName_;
-    std::string currentReturnTypeName_;
-    // Type parameters of the class owning the function currently being
-    // compiled. When the return type mentions one, the VM return assertion is
-    // skipped here (it is substituted and enforced at the call boundary with
-    // the receiver's concrete instantiation).
-    std::vector<std::string> currentOwnerTypeParams_;
-    // Whether the current function's declared return type mentions an
-    // unresolved owner type parameter, i.e. it is a generic return.
-    bool currentReturnIsGeneric_ = false;
     std::unordered_map<DispatchSignature, std::size_t, DispatchSignatureHash> methodSlots_;
 
     // className -> its `extends` parent (or absent, if none), used during

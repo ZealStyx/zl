@@ -2840,7 +2840,7 @@ DecodedType decodeRenderedType(std::string name) {
     name.erase(std::find_if(name.rbegin(), name.rend(), notSpace).base(), name.end());
     const auto [base, args] = splitGenericName(name);
     const ZlType type = zlTypeFromBaseName(base);
-    return {type, type == ZlType::OBJECT ? name : std::string{}};
+    return {type, (type == ZlType::OBJECT || !args.empty()) ? name : std::string{}};
 }
 } // namespace
 
@@ -3544,6 +3544,7 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
             instantiateGenericClass("Shared",
                 {ResolvedTypeArg{value.type, value.className}},
                 node->line);
+        node->nativeFactoryTypeName = sharedClass;
         return InferredType(ZlType::OBJECT, sharedClass);
     }
 
@@ -3738,34 +3739,6 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
 
             const auto args = inferArguments(node->arguments);
 
-            // Shared.share<T>(value) is type-preserving. The generic class
-            // machinery already knows how to materialize Shared<int>,
-            // Shared<Person>, etc.; use it instead of returning bare object.
-            if (qualifiedName == "Shared.share" && args.types.size() == 1) {
-                const std::string className =
-                    instantiateGenericClass("Shared",
-                        {ResolvedTypeArg{args.types[0], args.classNames[0]}},
-                        node->line);
-                return InferredType(ZlType::OBJECT, className);
-            }
-
-            // Collection.length is intentionally polymorphic at runtime, but
-            // it is not a universal operation. Keep the native signature
-            // table simple while enforcing the actual accepted types here.
-            if (qualifiedName == "Collection.length" && args.types.size() == 1) {
-                const ZlType t = args.types[0];
-                const bool accepted = t == ZlType::LIST || t == ZlType::ARRAY ||
-                                      t == ZlType::MAP || t == ZlType::SET ||
-                                      t == ZlType::STRING || t == ZlType::UNKNOWN;
-                if (!accepted) {
-                    typeError("argument 1 to 'Collection.length': expected list, array, set, map, or string, got " +
-                              zlTypeName(t), node->line);
-                }
-            }
-
-            // Check each argument against the catalog-declared accepted set.
-            // Fixed paramTypes remain the common case; polymorphic natives opt
-            // into acceptedParamTypes without leaking special cases into this dispatcher.
             for (std::size_t i = 0; i < args.types.size(); ++i) {
                 const ZlType argType = args.types[i];
                 const std::string& argClass = args.classNames[i];
@@ -5075,22 +5048,21 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
     ZlType previousReturnType = currentReturnType_;
     std::string previousReturnClassName = currentReturnClassName_;
     std::string previousFunctionName = currentFunctionName_;
-    // For an async lambda assigned to `func(...): Task<T>`, the lambda body
-    // produces T; only the callable value is wrapped in Task<T>. Synchronous
-    // lambdas returning an explicit Task<T> still check against the full task
-    // type.
+    const bool previousFunctionIsAsync = currentFunctionIsAsync_;
+    currentFunctionIsAsync_ = node->isAsync;
     currentReturnType_ = currentLambdaExpectation_.active
-        ? ((node->isAsync && currentLambdaExpectation_.returnType == ZlType::TASK &&
-            currentLambdaExpectation_.taskValueType != ZlType::UNKNOWN)
-              ? currentLambdaExpectation_.taskValueType
-              : currentLambdaExpectation_.returnType)
-        : ZlType::UNKNOWN;
+        ? currentLambdaExpectation_.returnType : ZlType::UNKNOWN;
     currentReturnClassName_ = currentLambdaExpectation_.active
-        ? ((node->isAsync && currentLambdaExpectation_.returnType == ZlType::TASK &&
-            currentLambdaExpectation_.taskValueType != ZlType::UNKNOWN)
-              ? currentLambdaExpectation_.taskValueClassName
-              : currentLambdaExpectation_.returnClassName)
-        : std::string();
+        ? currentLambdaExpectation_.returnClassName : std::string();
+    // A callable annotation describes Task<T>, but an async body returns T.
+    // Decode the complete expected signature rather than depending on the
+    // optional task-value side metadata (which returned callbacks lacked).
+    if (node->isAsync && currentReturnType_ == ZlType::TASK) {
+        const auto [taskName, valueName] = splitGenericName(currentReturnClassName_);
+        const auto value = decodeRenderedType(valueName);
+        currentReturnType_ = value.type;
+        currentReturnClassName_ = value.className;
+    }
     currentFunctionName_ = "<lambda>";
     lastFunctionReturnType_ = ZlType::UNKNOWN;
     lastFunctionReturnClassName_.clear();
@@ -5105,19 +5077,8 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
             inferredReturnResult.className = lastFunctionReturnClassName_;
         } else if (currentLambdaExpectation_.active &&
                    currentLambdaExpectation_.returnType != ZlType::UNKNOWN) {
-            // A block lambda with no explicit `return` is a void-producing
-            // lambda when its expected signature says so. Async expected
-            // signatures expose Task<T>, while the body itself produces T.
-            inferredReturnResult.type =
-                (node->isAsync && currentLambdaExpectation_.returnType == ZlType::TASK &&
-                 currentLambdaExpectation_.taskValueType != ZlType::UNKNOWN)
-                    ? currentLambdaExpectation_.taskValueType
-                    : currentLambdaExpectation_.returnType;
-            inferredReturnResult.className =
-                (node->isAsync && currentLambdaExpectation_.returnType == ZlType::TASK &&
-                 currentLambdaExpectation_.taskValueType != ZlType::UNKNOWN)
-                    ? currentLambdaExpectation_.taskValueClassName
-                    : currentLambdaExpectation_.returnClassName;
+            inferredReturnResult.type = currentReturnType_;
+            inferredReturnResult.className = currentReturnClassName_;
         }
     }
     const ZlType inferredReturn = inferredReturnResult.type;
@@ -5148,9 +5109,9 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
     lastFunctionReturnClassName_ = inferredReturnClassName;
     const std::string inferredReturnName =
         inferredReturnClassName.empty() ? zlTypeName(inferredReturn) : inferredReturnClassName;
-    node->inferredReturnTypeName = node->isAsync
-        ? (inferredReturn == ZlType::VOID_TYPE ? "Task<void>" : "Task<" + inferredReturnName + ">")
-        : inferredReturnName;
+    // Bytecode/closure metadata stores the body's result, just like a named
+    // async function. Only the callable signature below adds Task<T>.
+    node->inferredReturnTypeName = inferredReturnName;
 
     InferredType result(ZlType::FUNCTION);
     result.functionParamTypes = lastFunctionParamTypes_;
@@ -5171,6 +5132,7 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
     currentReturnType_ = previousReturnType;
     currentReturnClassName_ = previousReturnClassName;
     currentFunctionName_ = previousFunctionName;
+    currentFunctionIsAsync_ = previousFunctionIsAsync;
     symbols_.popScope();
     movedVariables_ = previousMovedVariables;
     borrowSources_ = previousBorrowSources;

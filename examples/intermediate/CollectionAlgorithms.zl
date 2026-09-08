@@ -14,19 +14,20 @@
 //   contains / indexOf / count  membership. Note count(item) counts
 //                               OCCURRENCES of a value - it is not a predicate.
 //
-// KNOWN LIMITATION. A list produced by transform()/filter()/reversed() is built
-// inside a generic method, where the element type is erased, so the result
-// loses its instantiated identity: it is a `List`, not a `List<int>`. Passing
-// one to a parameter annotated `List<int>` is rejected at runtime with
-//
-//     type assertion failed: expected List<int>, got List
-//
-// Until that is fixed, keep such a list in a `var` local and read it with its
-// own methods - which is what this example does - rather than handing it to a
-// function that declares a parameterized list parameter.
+// Method-built collections retain their instantiation: a transform/filter/
+// reversed result can be passed to a List<int> parameter just like the input.
 // ============================================================================
 
 class CollectionAlgorithms {
+    static func render(List<int> items): string {
+        var text = ""
+        for i in 0..items.length() {
+            if (i > 0) { text = text + "," }
+            text = text + items.get(i)
+        }
+        return "[" + text + "]"
+    }
+
     func main(): void {
         var nums = new List<int>()
         nums.push(4)
@@ -34,18 +35,12 @@ class CollectionAlgorithms {
         nums.push(3)
         nums.push(4)
 
-        // Printing is inlined rather than factored into a helper, because a
-        // helper would need a List<int> parameter - see the note above.
-        var text = ""
-        for i in 0..nums.length() {
-            if (i > 0) { text = text + "," }
-            text = text + nums.get(i)
-        }
-        log("original [" + text + "]")
+        log("original " + CollectionAlgorithms.render(nums))
 
         var doubled = nums.transform(func(int x) => x * 2)
         log("doubled length " + doubled.length())
         log("doubled first " + doubled.get(0))
+        log("doubled " + CollectionAlgorithms.render(doubled))
 
         var big = nums.filter(func(int x) => x > 2)
         log("over 2 length " + big.length())
@@ -73,6 +68,7 @@ class CollectionAlgorithms {
 // original [4,1,3,4]
 // doubled length 4
 // doubled first 8
+// doubled [8,2,6,8]
 // over 2 length 3
 // sum 12
 // count of 4 is 2

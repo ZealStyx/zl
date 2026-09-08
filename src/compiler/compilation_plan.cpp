@@ -102,6 +102,10 @@ CompilationPlan buildCompilationPlan(const Program& program) {
         auto& info = localReflection[cls->name];
         if (info.id == 0) info.id = nextRuntimeTypeId++;
         info.baseClassName = cls->extendsName;
+        TypeAnnotation baseType;
+        baseType.name = cls->extendsName;
+        baseType.typeArgs = cls->extendsTypeArgs;
+        info.baseTypeName = describeTypeAnnotation(baseType);
         info.typeParameters = cls->typeParams;
         info.interfaces = cls->implementsNames;
         for (const auto& member : cls->members) {
@@ -175,6 +179,7 @@ CompilationPlan buildCompilationPlan(const Program& program) {
 
         const auto& direct = localReflection[className];
         merged.baseClassName = direct.baseClassName;
+        merged.baseTypeName = direct.baseTypeName;
         merged.interfaces = collectInterfaceClosure(direct.interfaces);
         merged.typeParameters = direct.typeParameters;
         merged.isDataType = direct.isDataType;

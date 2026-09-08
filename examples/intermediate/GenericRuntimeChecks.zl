@@ -15,7 +15,39 @@
 //     the wrong one is rejected at runtime, the correct one is accepted.
 // ============================================================================
 
+// Factories exercise the generic environment independently of an element's
+// value: even an empty collection returned after the factory exits stays typed.
+class GenericBuilder<T> {
+    public func singleton(T item): List<T> {
+        List<T> result = [item]
+        return result
+    }
+    public func emptyFactory(): func { return func() => new List<T>() }
+    public func identity(): func { return func(T item) => item }
+    public func fromDynamic(func producer): T { return producer() }
+    public func viaBare(func producer): T { return fromDynamic(producer) }
+    public func checkedLocal(func producer): T {
+        T item = producer()
+        return item
+    }
+    public func delayedFactory(T item): func(): Task<List<T>> {
+        return async func() {
+            await Time.sleepAsync(0.001)
+            return this.singleton(item)
+        }
+    }
+}
+
+// The parent's T is the child's U, not the child's first argument.
+class ProjectedBuilder<T,U> extends GenericBuilder<U> {}
+
 class GenericRuntimeChecks {
+    static func sum(List<int> items): int {
+        var result = 0
+        for i in 0..items.length() { result = result + items.get(i) }
+        return result
+    }
+
     // Reflectively invoke push on a generic list through an object-typed
     // boundary. The static checker cannot know the element type here; the VM
     // enforces it from the receiver's concrete instantiation.
@@ -43,10 +75,10 @@ class GenericRuntimeChecks {
         var ages = new Map<string, int>()
         ages.put("ada", 36)
         ages.put("grace", 45)
-        var keys = ages.keys()
+        List<string> keys = ages.keys()
         log("keys " + keys.length())
         log("key0 " + keys.get(0))
-        var values = ages.values()
+        List<int> values = ages.values()
         log("value0 " + values.get(0))
 
         // --- runtime enforcement on the dynamic boundary ---
@@ -58,6 +90,65 @@ class GenericRuntimeChecks {
         log("bad string rejected: " + app.reflectivePush(nums, "nope"))
         log("strings length " + strings.length())
         log("nums length " + nums.length())
+
+        // Results must cross a typed parameter, not just remain in var locals.
+        var doubled = nums.transform(func(x) => x * 2)
+        log("transformed sum " + GenericRuntimeChecks.sum(doubled))
+        log("filtered sum " + GenericRuntimeChecks.sum(nums.filter(func(x) => x > 20)))
+        log("reversed sum " + GenericRuntimeChecks.sum(nums.reversed()))
+        log("keys reject int: " + app.reflectivePush(keys, 7))
+        log("transformed reject string: " + app.reflectivePush(doubled, "wrong"))
+
+        var builder = new GenericBuilder<int>()
+        var textBuilder = new GenericBuilder<string>()
+        var makeInts = builder.emptyFactory()
+        var makeTexts = textBuilder.emptyFactory()
+        List<int> emptyInts = makeInts()
+        List<string> emptyTexts = makeTexts()
+        log("empty factories " + (emptyInts.length() + emptyTexts.length()))
+        List<int> singleton = builder.singleton(5)
+        log("generic literal " + singleton.first())
+        var inherited = new ProjectedBuilder<string,int>()
+        List<int> projected = inherited.singleton(8)
+        log("inherited argument " + projected.first())
+        GenericBuilder<int> baseBuilder = inherited
+        var sharedBuilder = share(baseBuilder)
+        sharedBuilder.setValue(builder)
+        sharedBuilder.withLock(func() {
+            log("shared base " + sharedBuilder.get().singleton(6).first())
+            return sharedBuilder.get()
+        })
+        double widened = 3
+        var sharedNumber = share(widened)
+        sharedNumber.setValue(4.5)
+        log("shared widened " + sharedNumber.get())
+
+        var identity = builder.identity()
+        log("reflected closure " + Type.of(identity).callable().invoke([9]))
+        var delayed = builder.delayedFactory(12)
+        List<int> afterAwait = delayed().block()
+        log("async generic " + afterAwait.first())
+        var decimals = new GenericBuilder<double>()
+        log("widened return " + decimals.fromDynamic(func() => 3))
+
+        // VM type faults use the untyped catch form; native reflection errors
+        // are Exception objects. Each rejected boundary must resume once.
+        try {
+            builder.viaBare(func() => "wrong")
+            log("BAD: accepted wrong generic return")
+        } catch e { log("wrong generic return rejected") }
+        try {
+            builder.checkedLocal(func() => "wrong")
+            log("BAD: accepted wrong generic local")
+        } catch e { log("wrong generic local rejected") }
+        try {
+            identity("wrong")
+            log("BAD: accepted wrong closure argument")
+        } catch e { log("wrong closure argument rejected") }
+        try {
+            Type.of(builder).method("fromDynamic").invoke(builder, [func() => "wrong"])
+            log("BAD: accepted wrong reflective return")
+        } catch Exception e { log("wrong reflective return rejected") }
     }
 }
 
@@ -74,4 +165,21 @@ class GenericRuntimeChecks {
 // bad string rejected: false
 // strings length 1
 // nums length 2
+// transformed sum 218
+// filtered sum 99
+// reversed sum 109
+// keys reject int: false
+// transformed reject string: false
+// empty factories 0
+// generic literal 5
+// inherited argument 8
+// shared base 6
+// shared widened 4.5
+// reflected closure 9
+// async generic 12
+// widened return 3
+// wrong generic return rejected
+// wrong generic local rejected
+// wrong closure argument rejected
+// wrong reflective return rejected
 // --- End expected output ---

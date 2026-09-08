@@ -4,11 +4,13 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include "zl/common/ownership.hpp"
 
 namespace zl {
 
 using RuntimeTypeId = std::uint32_t;
+using RuntimeTypeBindings = std::unordered_map<std::string, std::string>;
 
 // Durable runtime metadata for a user-defined type. The object graph owns a
 // shared instance rather than copying reflection strings into each object.

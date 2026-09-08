@@ -201,12 +201,6 @@ Chunk Compiler::compile(const Program& program) {
         const FunctionDecl* fn = allFunctions[i];
         chunk_.functions[i].entryAddress = chunk_.code.size();
         currentClassName_ = fn->ownerClassName;
-        currentReturnTypeName_ = fn->returnType.name.empty() ? "void" : runtimeTypeName(fn->returnType);
-        auto ownerParamsIt = classTypeParams.find(fn->ownerClassName);
-        currentOwnerTypeParams_ = (ownerParamsIt == classTypeParams.end())
-            ? std::vector<std::string>{} : ownerParamsIt->second;
-        currentReturnIsGeneric_ = !fn->returnType.name.empty() &&
-            typeAnnotationMentionsTypeParam(fn->returnType, currentOwnerTypeParams_);
         auto parentIt = classParents_.find(currentClassName_);
         currentParentClassName_ = (parentIt != classParents_.end()) ? parentIt->second : std::string();
         activeOwnedLocalNames_.clear();
@@ -331,9 +325,8 @@ void Compiler::compileBlock(const BlockStmt* node) {
 }
 
 void Compiler::compileVarDecl(const VarDecl* node) {
-    // hasExplicitType (typed declarations like `int x = 5`) and the type
-    // annotation itself aren't enforced yet - only parsed and carried in the
-    // AST. At runtime this behaves exactly like `var x = 5`.
+    // Explicitly typed locals are dynamic boundaries too. The VM resolves
+    // generic annotations using the current invocation's lexical type bindings.
     if (node->initializer) {
         compileExpression(node->initializer.get());
         if (node->hasExplicitType) {
@@ -373,20 +366,6 @@ void Compiler::compileReturnStmt(const ReturnStmt* node) {
     } else {
         std::size_t nilIdx = chunk_.addConstant(Value{});
         emit(OpCode::PushConst, nilIdx, node->line);
-    }
-    // Typed returns form a dynamic-to-static boundary: a function declared to
-    // return int/double/object must not silently leak an unknown/dynamic value
-    // of another runtime type. The VM assertion preserves the value on stack.
-    // Bare/unknown returns remain unrestricted.
-    // The source AST carries the exact annotation, so this also supports
-    // unions and parameterized object names through the VM's reflection matcher.
-    // Skip the in-body assertion for a generic return (e.g. List.get(): T): the
-    // VM substitutes the receiver's concrete instantiation and enforces it at
-    // the call boundary, so asserting the bare parameter token here would fail
-    // against the correctly-typed value.
-    if (!currentReturnIsGeneric_ &&
-        !currentReturnTypeName_.empty() && currentReturnTypeName_ != "void" && currentReturnTypeName_ != "unknown") {
-        emit(OpCode::AssertType, chunk_.addName(currentReturnTypeName_), node->line);
     }
     // Return performs lexical cleanup before leaving the function. Finalizers
     // are emitted inner-to-outer. compileActiveFinallyCleanup temporarily
@@ -1261,26 +1240,9 @@ void Compiler::compileLambdaExpr(const LambdaExpr* node) {
     }
     const std::string lambdaReturnTypeName =
         node->inferredReturnTypeName.empty() ? "unknown" : node->inferredReturnTypeName;
-    const std::string lambdaCallableReturnType = node->isAsync
-        ? (lambdaReturnTypeName == "void" ? "Task<void>" : "Task<" + lambdaReturnTypeName + ">")
-        : lambdaReturnTypeName;
     FunctionInfo lambdaInfo{std::move(lambdaName), paramNames, std::move(lambdaParameterTypeNames),
-                            lambdaCallableReturnType, entryAddress, false, node->isAsync, false, "", {}, node->captureNames};
+                            lambdaReturnTypeName, entryAddress, false, node->isAsync, false, currentClassName_, {}, node->captureNames};
     chunk_.functions.push_back(std::move(lambdaInfo));
-
-    // A lambda body is its own function: its `return` must be checked against
-    // the lambda's own return type, never the enclosing named function's.
-    // Without this, a block-body lambda returning an int inside a `: func`
-    // factory emits AssertType("func") and fails the moment it is invoked.
-    const std::string savedReturnTypeName = currentReturnTypeName_;
-    const auto savedOwnerTypeParams = currentOwnerTypeParams_;
-    const bool savedReturnIsGeneric = currentReturnIsGeneric_;
-    currentReturnTypeName_ = lambdaReturnTypeName;
-    // A lambda is a standalone function with no generic owner class, so its
-    // own return type is never a type parameter; reset the generic-return flag
-    // so a lambda's return assertions are emitted (and restored below).
-    currentOwnerTypeParams_.clear();
-    currentReturnIsGeneric_ = false;
 
     const auto savedOwnedLocals = activeOwnedLocalNames_;
     activeOwnedLocalNames_.clear();
@@ -1305,9 +1267,6 @@ void Compiler::compileLambdaExpr(const LambdaExpr* node) {
 
     chunk_.functions[funcIndex].ownedLocalNames = activeOwnedLocalNames_;
     activeOwnedLocalNames_ = savedOwnedLocals;
-    currentReturnTypeName_ = savedReturnTypeName;
-    currentOwnerTypeParams_ = savedOwnerTypeParams;
-    currentReturnIsGeneric_ = savedReturnIsGeneric;
     patchJump(skipJump);
     // Capture-by-value happens HERE, at MakeClosure - every time this
     // LambdaExpr is evaluated (e.g. each time through a loop), a fresh
@@ -1336,7 +1295,8 @@ void Compiler::compileCall(const CallExpr* node) {
         auto idx = findNativeFunction("share");
         if (!idx) throw std::runtime_error("Compiler: missing native func share");
         for (const auto& arg : node->arguments) compileExpression(arg.get());
-        emit(OpCode::CallNative, *idx, node->line);
+        emit(OpCode::CallNative, *idx, node->line,
+             node->nativeFactoryTypeName.empty() ? 0 : chunk_.addName(node->nativeFactoryTypeName) + 1);
         return;
     }
     if (!node->namespaceName.empty()) {
@@ -1363,7 +1323,8 @@ void Compiler::compileCall(const CallExpr* node) {
                 " argument(s), got " + std::to_string(node->arguments.size()));
         }
         for (const auto& arg : node->arguments) compileExpression(arg.get());
-        emit(OpCode::CallNative, *idx, node->line);
+        emit(OpCode::CallNative, *idx, node->line,
+             node->nativeFactoryTypeName.empty() ? 0 : chunk_.addName(node->nativeFactoryTypeName) + 1);
         return;
     }
 
@@ -1443,7 +1404,7 @@ void Compiler::compileCollectionLiteral(const CollectionLiteral* node) {
         // assignment assertion).
         Instruction litNewObject{OpCode::NewObject, classIdx, node->line};
         if (!node->targetCollectionClassName.empty()) {
-            litNewObject.operand3 = chunk_.addName(node->targetCollectionClassName);
+            litNewObject.operand3 = chunk_.addName(node->targetCollectionClassName) + 1;
         }
         chunk_.code.push_back(litNewObject);
         emit(OpCode::Dup, 0, node->line);
@@ -1510,34 +1471,12 @@ void Compiler::compileCollectionLiteral(const CollectionLiteral* node) {
 }
 
 void Compiler::compileNewExpr(const NewExpr* node) {
-    // A constructor call doesn't know its target constructor index at AST build time
-    // because func resolution happens in pass 1 of the compiler.
-    // We emit a NewObject instruction with the class name. At runtime, NewObject
-    // will allocate the object, look up the constructor by name/arity, call it, and
-    // leave the new object reference on the stack.
-    // Wait, the VM needs to call the constructor. That means NewObject needs to pass
-    // arguments! If it's just `NewObject` alone, how does it know how many args?
-    // It's easier if NewObject just allocates the object, and then we emit a normal Call!
-    // But constructors are tied to the class. Let's let NewObject allocate it,
-    // and we also need to call the constructor. Since the plan says NewObject opcode,
-    // we push arguments, then NewObject (which takes arg count? No, plan doesn't specify).
-    // Let's implement NewObject to just allocate, and then we push it and call the method?
-    // Actually, ZL methods live in the Chunk's func table. A constructor is just a func.
-    // We can emit:
-    // 1. NewObject (pushes new object ref)
-    // 2. Dup (keep a copy to return)
-    // 3. Compile args
-    // 4. InvokeMethod (calls constructor, consuming one object ref and args)
-    // 5. Pop (discard constructor return value, which is void)
-    // Wait, InvokeMethod takes a name index. The constructor's name is the class name!
-    
-    // So the sequence:
-    // emit NewObject (operand = className idx) -> leaves ObjectRef on stack
+    // Allocate and tag the object, then invoke its constructor through the
+    // ordinary typed dispatch path. Keep a duplicate as the expression value.
     std::size_t classIdx = chunk_.addName(node->className);
     Instruction newObject{OpCode::NewObject, classIdx, node->line};
-    newObject.operand3 = Chunk::INVALID_FUNCTION_INDEX;
     if (!node->resolvedClassName.empty() && node->resolvedClassName != node->className) {
-        newObject.operand3 = chunk_.addName(node->resolvedClassName);
+        newObject.operand3 = chunk_.addName(node->resolvedClassName) + 1;
     }
     chunk_.code.push_back(newObject);
 

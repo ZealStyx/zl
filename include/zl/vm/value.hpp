@@ -189,6 +189,7 @@ struct ClosureBox {
     std::size_t functionIndex{0};
     std::shared_ptr<const Chunk> chunk;
     std::unordered_map<std::string, Value> captured;
+    RuntimeTypeBindings typeBindings;
 };
 
 [[nodiscard]] Value makeEmptyList();

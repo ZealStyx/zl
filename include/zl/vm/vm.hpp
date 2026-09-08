@@ -28,7 +28,6 @@ public:
     Value invokeReflectiveMethod(const Value& methodValue, const Value& receiver, const Value& argsList);
     Value invokeReflectiveConstructor(const Value& constructorValue, const Value& argsList);
     Value invokeReflectiveFunction(const Value& functionValue, const Value& argsList);
-    void invokeThreadClosure(const ClosureRef& closure);
     Value invokeTaskClosure(const ClosureRef& closure);
 
     // Only the wait itself belongs in this scope: callbacks and managed-data
@@ -52,9 +51,14 @@ private:
                               const std::vector<std::string>& programArgs, Value* returnValue);
     [[nodiscard]] Value invokeFunction(const Chunk& chunk, std::size_t functionIndex,
                                        const std::vector<Value>& args,
-                                       const std::optional<Value>& receiver = std::nullopt);
-    void beginAsyncInvocation(std::shared_ptr<const Chunk> chunk, std::size_t functionIndex,
-                              std::vector<Value> args, std::optional<Value> receiver, TaskRef task);
+                                       const std::optional<Value>& receiver = std::nullopt,
+                                       const ClosureRef& closure = {});
+    ExecutionState::CallFrame makeCallFrame(const Chunk& chunk, const FunctionInfo& fn,
+                                           const std::vector<Value>& args,
+                                           const std::optional<Value>& receiver = std::nullopt,
+                                           const ClosureRef& closure = {}) const;
+    TaskRef scheduleAsyncInvocation(std::shared_ptr<const Chunk> chunk, std::size_t functionIndex,
+                                    ExecutionState::CallFrame frame);
     void resumeAsyncInvocation();
     void pushNativeRoots(const std::vector<Value>& roots);
     void popNativeRoots();
@@ -87,8 +91,7 @@ private:
     struct AsyncInvocation {
         std::shared_ptr<const Chunk> chunk;
         std::size_t functionIndex{0};
-        std::vector<Value> args;
-        std::optional<Value> receiver;
+        ExecutionState::CallFrame frame;
         TaskRef task;
         std::size_t resumeIp{0};
         bool started{false};

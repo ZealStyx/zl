@@ -2,8 +2,8 @@
 // ZL Examples - Intermediate - Generics
 //
 // `class Box<T>` declares a generic class; `T` is the type parameter. Each
-// instantiation (`Box<int>`, `Box<string>`) is compiled separately, so a wrong
-// element type is caught by ordinary overload resolution rather than at runtime.
+// instantiation (`Box<int>`, `Box<string>`) is checked statically. Methods are
+// compiled once and use each receiver's concrete type bindings at runtime too.
 //
 // The standard library's List<T>, Map<K,V> and Set<T> are real generic classes
 // built on exactly this machinery - not native tags.
