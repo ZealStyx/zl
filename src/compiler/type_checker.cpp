@@ -451,6 +451,15 @@ void TypeChecker::checkAccess(const std::string& className, const std::string& m
 
     if (currentClassName_ == className) return; // accessing our own class's member
 
+    // Inside a generic template body, `this` carries the self-parameterized
+    // name (`Shared<T>`) while the enclosing class is still the template
+    // (`Shared`). That is the same declaring class, not a foreign one.
+    const auto templateName = [](const std::string& name) {
+        const auto open = name.find('<');
+        return open == std::string::npos ? name : name.substr(0, open);
+    };
+    if (!currentClassTypeParams_.empty() && templateName(currentClassName_) == templateName(className)) return;
+
     // PRIVATE and DEFAULT (no modifier written - the roadmap's stated
     // default) are only accessible from inside the declaring class. PROTECTED
     // additionally allows any subclass of the declaring class.
@@ -4999,6 +5008,19 @@ TypeChecker::InferredType TypeChecker::inferThisExpr(const ThisExpr* node) {
     }
     if (currentClassName_.empty()) {
         typeError("'this' used outside of a class member", node->line);
+    }
+    // Inside a generic template body, `this` denotes the self-parameterized
+    // form (`Map<K,V>`), which is what a self-referential parameter such as
+    // `putAll(Map<K,V> other)` resolves to. Reporting the bare template name
+    // would make `other.putAll(this)` fail to match its own signature.
+    if (!currentClassTypeParams_.empty() && currentClassName_.find('<') == std::string::npos) {
+        std::string self = currentClassName_ + "<";
+        for (std::size_t i = 0; i < currentClassTypeParams_.size(); ++i) {
+            if (i) self += ",";
+            self += currentClassTypeParams_[i];
+        }
+        self += ">";
+        if (semanticModel_.findClass(self)) return InferredType(ZlType::OBJECT, self);
     }
     return InferredType(ZlType::OBJECT, currentClassName_);
 }

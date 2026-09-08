@@ -1,4 +1,5 @@
 #include "zl/compiler/semantic_model.hpp"
+#include "zl/common/type_name.hpp"
 #include <algorithm>
 
 namespace zl {
@@ -42,7 +43,24 @@ std::string paramTypesKey(const std::vector<ZlType>& paramTypes) {
 
 const ClassShapeInfo* SemanticModel::findClass(const std::string& name) const {
     auto it = classes_.find(name);
-    return it == classes_.end() ? nullptr : &it->second;
+    if (it != classes_.end()) return &it->second;
+    // A generic body may name its own uninstantiated form, e.g. `Map<K,V>`
+    // inside `class Map<K,V>`. No instantiation exists for that key (the
+    // arguments are the class's own type parameters), so it denotes the
+    // template itself. Resolving it here keeps method/field lookup working for
+    // self-referential signatures such as `putAll(Map<K,V> other)`.
+    const auto open = name.find('<');
+    if (open == std::string::npos || name.back() != '>') return nullptr;
+    const auto templateIt = classes_.find(name.substr(0, open));
+    if (templateIt == classes_.end() || templateIt->second.typeParams.empty()) return nullptr;
+    const auto spec = parseTypeName(name);
+    const auto& params = templateIt->second.typeParams;
+    if (spec.args.size() != params.size()) return nullptr;
+    for (std::size_t i = 0; i < params.size(); ++i) {
+        if (!spec.args[i].args.empty() || !spec.args[i].unionMembers.empty()) return nullptr;
+        if (spec.args[i].name != params[i]) return nullptr;
+    }
+    return &templateIt->second;
 }
 
 const InterfaceShapeInfo* SemanticModel::findInterface(const std::string& name) const {
