@@ -11,9 +11,8 @@
 //
 // The lock is exception-safe: a body that throws releases the mutex and the
 // exception propagates to the caller's try/catch exactly once. It is also
-// contention-safe - the GC no longer stops-the-world while a thread holds the
-// mutex, so many threads can hammer the same lock (the two-thread / high-count
-// case below) without deadlocking.
+// compatible with GC: threads waiting to acquire the lock publish their roots,
+// so the thread holding the lock can reach a safepoint inside its closure.
 // ============================================================================
 
 import zl.lang.Mutex
@@ -38,15 +37,19 @@ class MutexLocks {
         log("doubled under lock " + doubled)
         log("final " + Mutex.withLock(m, func() => state.get()))
 
-        // A Mutex can now be captured by a thread directly - no Shared<Mutex>
-        // wrapper needed. Two threads bump the counter 50 times each; because
-        // every read-modify-write happens under the lock, none is lost and the
-        // total is exact. Four threads doing 100 increments each would have
-        // deadlocked under GC pressure before the safepoint/lock-order fix;
-        // now it completes every time with guarded total 400.
+        // Exceptions propagate once, release the lock, and preserve the caller.
+        try {
+            Mutex.withLock(m, func() { throw new Exception("lock body failed") })
+        } catch Exception e {
+            log("caught " + e.message)
+        }
+        log("lock reusable " + Mutex.withLock(m, func() => 7))
+
+        // Four workers exercise lock contention while allocating closures.
+        // Both lock acquisition and join must cooperate with the collector.
         var guarded = new Shared<int>(0)
         var bump = func() {
-            for i in 0..100 {
+            for i in 0..500 {
                 Mutex.withLock(m, func() { guarded.setValue(guarded.get() + 1) })
             }
         }
@@ -68,5 +71,7 @@ class MutexLocks {
 // after second 15
 // doubled under lock 30
 // final 15
-// guarded total 400
+// caught lock body failed
+// lock reusable 7
+// guarded total 2000
 // --- End expected output ---

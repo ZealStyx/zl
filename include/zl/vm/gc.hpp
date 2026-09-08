@@ -5,7 +5,7 @@
 #include <mutex>
 #include <vector>
 #include <memory>
-#include <unordered_set>
+#include <unordered_map>
 
 #include "value.hpp"
 
@@ -51,6 +51,7 @@ public:
 
     // Protect an externally-managed runtime object (such as a raw Thread
     // closure) from reclamation while code outside ExecutionState is using it.
+    // Protections are counted: several workers may retain the same closure.
     void protect(const void* identity);
     void unprotect(const void* identity);
 
@@ -72,9 +73,23 @@ private:
     mutable std::mutex mutex_;
     mutable std::mutex collectMutex_;
     std::vector<Entry> entries_;
-    std::unordered_set<const void*> protectedRoots_;
+    std::unordered_map<const void*, std::size_t> protectedRoots_;
     std::size_t allocationsSinceCollection_{0};
     std::size_t allocationThreshold_{128};
+};
+
+// Retain a root across a queued/running native callback, including enqueue or
+// thread-start failure. Share this token when the callback must be copyable.
+class ProtectedGCRoot {
+public:
+    explicit ProtectedGCRoot(const void* identity) : identity_(identity) {
+        TracingGC::instance().protect(identity_);
+    }
+    ~ProtectedGCRoot() { TracingGC::instance().unprotect(identity_); }
+    ProtectedGCRoot(const ProtectedGCRoot&) = delete;
+    ProtectedGCRoot& operator=(const ProtectedGCRoot&) = delete;
+private:
+    const void* identity_;
 };
 
 // Explicit root collection for a VM execution state. The VM calls this at

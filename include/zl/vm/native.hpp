@@ -42,7 +42,8 @@ struct NativeFunction {
 };
 
 class VM;
-void setCurrentNativeVm(VM* vm);
+// Returns the previous binding so re-entrant native calls can restore it.
+VM* setCurrentNativeVm(VM* vm);
 
 class NativeFunctionRegistrar {
 public:

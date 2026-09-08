@@ -42,7 +42,11 @@ namespace zl {
 
 thread_local VM* g_currentNativeVm = nullptr;
 
-void setCurrentNativeVm(VM* vm) { g_currentNativeVm = vm; }
+VM* setCurrentNativeVm(VM* vm) {
+    VM* previous = g_currentNativeVm;
+    g_currentNativeVm = vm;
+    return previous;
+}
 
 namespace {
 
@@ -825,7 +829,11 @@ Value mutexWithLock(const std::vector<Value>& args) {
     if (!closure || !*closure || !(*closure)->chunk || !(*closure)->paramNames.empty())
         throw std::runtime_error("Mutex.withLock: expected a zero-argument func");
     if (!g_currentNativeVm) throw std::runtime_error("Mutex.withLock: no active VM");
-    std::unique_lock<std::mutex> lock(*mutexState);
+    std::unique_lock<std::mutex> lock(*mutexState, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+    }
     return g_currentNativeVm->invokeTaskClosure(*closure);
 }
 
@@ -838,7 +846,11 @@ Value rwLockWithRead(const std::vector<Value>& args) {
     if (!closure || !*closure || !(*closure)->chunk || !(*closure)->paramNames.empty())
         throw std::runtime_error("RwLock.withRead: expected a zero-argument func");
     if (!g_currentNativeVm) throw std::runtime_error("RwLock.withRead: no active VM");
-    std::shared_lock<std::shared_mutex> lock(*rwLockState);
+    std::shared_lock<std::shared_mutex> lock(*rwLockState, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+    }
     return g_currentNativeVm->invokeTaskClosure(*closure);
 }
 
@@ -851,7 +863,11 @@ Value rwLockWithWrite(const std::vector<Value>& args) {
     if (!closure || !*closure || !(*closure)->chunk || !(*closure)->paramNames.empty())
         throw std::runtime_error("RwLock.withWrite: expected a zero-argument func");
     if (!g_currentNativeVm) throw std::runtime_error("RwLock.withWrite: no active VM");
-    std::unique_lock<std::shared_mutex> lock(*rwLockState);
+    std::unique_lock<std::shared_mutex> lock(*rwLockState, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+    }
     return g_currentNativeVm->invokeTaskClosure(*closure);
 }
 
@@ -946,6 +962,7 @@ Value semaphoreAcquire(const std::vector<Value>& args) {
     if (!obj || !*obj || (*obj)->className != "Semaphore")
         throw std::runtime_error("Semaphore.acquire: expected a Semaphore");
     auto state = ensureObjectState(*(*obj), &ObjectBox::semaphoreState, [] { return std::make_shared<ObjectBox::SemaphoreState>(); });
+    VM::BlockingNativeCall blocked(g_currentNativeVm);
     std::unique_lock<std::mutex> lock(state->mutex);
     state->cv.wait(lock, [&] { return state->permits > 0; });
     --state->permits;
@@ -979,6 +996,7 @@ Value conditionWait(const std::vector<Value>& args) {
     if (!obj || !*obj || (*obj)->className != "Condition")
         throw std::runtime_error("Condition.wait: expected a Condition");
     auto state = ensureObjectState(*(*obj), &ObjectBox::conditionState, [] { return std::make_shared<ObjectBox::ConditionState>(); });
+    VM::BlockingNativeCall blocked(g_currentNativeVm);
     std::unique_lock<std::mutex> lock(state->mutex);
     state->cv.wait(lock);
     return Value{};
@@ -1019,8 +1037,12 @@ Value channelSend(const std::vector<Value>& args) {
     if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
         throw std::runtime_error("Channel.send: expected a Channel");
     auto state = (*obj)->channelState;
-    std::unique_lock<std::mutex> lock(state->mutex);
-    state->cvNotFull.wait(lock, [&] { return state->items.size() < state->capacity; });
+    std::unique_lock<std::mutex> lock(state->mutex, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+        state->cvNotFull.wait(lock, [&] { return state->items.size() < state->capacity; });
+    }
     state->items.push_back(args[1]);
     lock.unlock();
     state->cvNotEmpty.notify_one();
@@ -1032,8 +1054,12 @@ Value channelReceive(const std::vector<Value>& args) {
     if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
         throw std::runtime_error("Channel.receive: expected a Channel");
     auto state = (*obj)->channelState;
-    std::unique_lock<std::mutex> lock(state->mutex);
-    state->cvNotEmpty.wait(lock, [&] { return !state->items.empty(); });
+    std::unique_lock<std::mutex> lock(state->mutex, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+        state->cvNotEmpty.wait(lock, [&] { return !state->items.empty(); });
+    }
     Value value = std::move(state->items.front());
     state->items.pop_front();
     lock.unlock();
@@ -1183,7 +1209,8 @@ Value taskSpawn(const std::vector<Value>& args) {
 
     auto task = std::make_shared<RuntimeTaskState>(c.returnTypeName.empty() ? "void" : c.returnTypeName);
     const auto closureCopy = *closure;
-    RuntimeTaskExecutor::instance().enqueue([task, closureCopy]() mutable {
+    auto root = std::make_shared<ProtectedGCRoot>(closureCopy.get());
+    RuntimeTaskExecutor::instance().enqueue([task, closureCopy, root]() mutable {
         try {
             task->start();
             VM workerVm;
@@ -1209,19 +1236,15 @@ Value threadStart(const std::vector<Value>& args) {
 
     auto state = std::make_shared<RuntimeThreadState>();
     const auto closureCopy = *closure;
-    const void* closureIdentity = closureCopy.get();
-    TracingGC::instance().protect(closureIdentity);
-    state->startWith([closureCopy, closureIdentity]() mutable {
+    auto root = std::make_shared<ProtectedGCRoot>(closureCopy.get());
+    state->startWith([closureCopy, root]() mutable {
         try {
             VM workerVm;
             workerVm.invokeThreadClosure(closureCopy);
         } catch (...) {
-            TracingGC::instance().unprotect(closureIdentity);
-            // An exception escaping a Thread is an uncaught exception and is
-            // process-fatal by language definition.
+            // An exception escaping a Thread is process-fatal by definition.
             std::terminate();
         }
-        TracingGC::instance().unprotect(closureIdentity);
     });
     return Value{std::move(state)};
 }
@@ -1229,19 +1252,8 @@ Value threadStart(const std::vector<Value>& args) {
 Value threadJoin(const std::vector<Value>& args) {
     auto thread = std::get_if<ThreadRef>(&args[0]);
     if (!thread || !(*thread)) throw std::runtime_error("Thread.join: expected a Thread value");
-    // join() blocks this thread running no bytecode while the joined worker
-    // threads may trigger a GC rendezvous. Mark us at a safepoint for that
-    // window, otherwise workers parked at the safepoint wait on us while we
-    // wait on them - the locked-counter deadlock at high thread contention.
-    VM* vm = g_currentNativeVm;
-    if (vm) vm->beginBlockingNativeCall();
-    try {
-        (*thread)->join();
-    } catch (...) {
-        if (vm) vm->endBlockingNativeCall();
-        throw;
-    }
-    if (vm) vm->endBlockingNativeCall();
+    VM::BlockingNativeCall blocked(g_currentNativeVm);
+    (*thread)->join();
     return Value{};
 }
 
@@ -1254,6 +1266,7 @@ Value threadIsAlive(const std::vector<Value>& args) {
 Value timeSleep(const std::vector<Value>& args) {
     double seconds = toDouble(args[0]);
     if (seconds > 0.0) {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
         std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
     }
     return Value{};
@@ -1427,7 +1440,11 @@ Value sharedGet(const std::vector<Value>& args) {
     if (!obj || !*obj || (*obj)->className != "Shared")
         throw std::runtime_error("Shared.__get: expected a Shared value");
     auto mutex = ensureObjectState(*(*obj), &ObjectBox::sharedValueMutex, [] { return std::make_shared<std::recursive_mutex>(); });
-    std::lock_guard<std::recursive_mutex> lock(*mutex);
+    std::unique_lock<std::recursive_mutex> lock(*mutex, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+    }
     auto it = (*obj)->fields.find("__value");
     if (it == (*obj)->fields.end()) throw std::runtime_error("Shared.__get: invalid Shared value");
     return it->second;
@@ -1443,7 +1460,11 @@ Value sharedWithLock(const std::vector<Value>& args) {
         throw std::runtime_error("Shared.__withLock: expected a zero-argument func");
     if (!g_currentNativeVm) throw std::runtime_error("Shared.__withLock: no active VM");
     auto mutex = ensureObjectState(*(*obj), &ObjectBox::sharedValueMutex, [] { return std::make_shared<std::recursive_mutex>(); });
-    std::unique_lock<std::recursive_mutex> lock(*mutex);
+    std::unique_lock<std::recursive_mutex> lock(*mutex, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+    }
     return g_currentNativeVm->invokeTaskClosure(*closure);
 }
 
@@ -1453,7 +1474,11 @@ Value sharedSet(const std::vector<Value>& args) {
     if (!obj || !*obj || (*obj)->className != "Shared")
         throw std::runtime_error("Shared.__set: expected a Shared value");
     auto mutex = ensureObjectState(*(*obj), &ObjectBox::sharedValueMutex, [] { return std::make_shared<std::recursive_mutex>(); });
-    std::lock_guard<std::recursive_mutex> lock(*mutex);
+    std::unique_lock<std::recursive_mutex> lock(*mutex, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+    }
     (*obj)->fields["__value"] = args[1];
     return Value{};
 }

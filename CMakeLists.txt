@@ -72,6 +72,12 @@ add_executable(zl-runtime-type-tests tests/runtime_type_tests.cpp
     src/vm/value.cpp
     src/vm/gc.cpp
     src/vm/runtime_task.cpp)
+# Controlled collector seam: exercises GC parking/reactivation and collector
+# election without depending on allocation volume or thread scheduling luck.
+find_package(Threads REQUIRED)
+add_executable(zl-gc-safepoint-tests tests/gc_safepoint_tests.cpp src/vm/gc_safepoint.cpp)
+target_link_libraries(zl-gc-safepoint-tests PRIVATE Threads::Threads)
+
 add_executable(zl-gc-tests tests/gc_tests.cpp
     src/vm/value.cpp
     src/vm/gc.cpp

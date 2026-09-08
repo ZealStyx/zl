@@ -152,14 +152,14 @@ void TracingGC::track(const Value& value) {
 }
 
 TracingGC::Stats TracingGC::collect(const std::vector<Value>& roots) {
-    // Only one collection may sweep at a time. Allocation can continue while
-    // tracing; newly allocated entries simply become eligible for the next GC.
+    // The coordinator must stop all mutators before entering this method.
+    // Serializing collectors alone does not make tracing concurrent-safe.
     std::lock_guard<std::mutex> collectLock(collectMutex_);
 
     std::unordered_set<const void*> protectedIds;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        protectedIds = protectedRoots_;
+        for (const auto& entry : protectedRoots_) protectedIds.insert(entry.first);
     }
 
     std::unordered_set<const void*> marked;
@@ -247,13 +247,14 @@ TracingGC::Stats TracingGC::collect(const std::vector<Value>& roots) {
 void TracingGC::protect(const void* identity) {
     if (!identity) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    protectedRoots_.insert(identity);
+    ++protectedRoots_[identity];
 }
 
 void TracingGC::unprotect(const void* identity) {
     if (!identity) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    protectedRoots_.erase(identity);
+    auto it = protectedRoots_.find(identity);
+    if (it != protectedRoots_.end() && --it->second == 0) protectedRoots_.erase(it);
 }
 
 bool TracingGC::shouldCollect() const {

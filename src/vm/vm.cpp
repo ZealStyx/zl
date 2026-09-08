@@ -580,15 +580,31 @@ void VM::appendNativeRoots(std::vector<Value>& roots) const {
     }
 }
 
-void VM::beginBlockingNativeCall() {
-    if (gcParticipantId_ == 0) return;
-    // Publish this VM's full root snapshot before parking, so a rendezvous that
-    // runs while we are blocked in native code still sees the values our native
-    // frame references (e.g. the ThreadRefs and Shared held across Thread.join).
+std::vector<Value> VM::gcRoots() const {
     std::vector<Value> roots;
     state_.appendGCRoots(roots);
     appendNativeRoots(roots);
-    GCSafepointCoordinator::instance().beginBlockingNative(gcParticipantId_, std::move(roots));
+    if (entryTask_) roots.emplace_back(entryTask_);
+    if (asyncInvocation_) {
+        roots.insert(roots.end(), asyncInvocation_->args.begin(), asyncInvocation_->args.end());
+        if (asyncInvocation_->receiver) roots.push_back(*asyncInvocation_->receiver);
+        if (asyncInvocation_->task) roots.emplace_back(asyncInvocation_->task);
+        if (asyncInvocation_->awaitedTask) roots.emplace_back(asyncInvocation_->awaitedTask);
+    }
+    if (pendingResumeException_) {
+        try {
+            std::rethrow_exception(pendingResumeException_);
+        } catch (const ZlThrownException& e) {
+            if (e.value()) roots.emplace_back(e.value());
+        } catch (...) {
+            // Native/runtime exceptions do not retain managed values.
+        }
+    }
+    return roots;
+}
+
+void VM::beginBlockingNativeCall() {
+    GCSafepointCoordinator::instance().beginBlockingNative(gcParticipantId_, gcRoots());
 }
 
 void VM::endBlockingNativeCall() const {
@@ -853,6 +869,12 @@ void VM::pumpSchedulerUntilTerminal(const TaskRef& task) {
     // task externally (a native async op finishing on a worker thread enqueues
     // our continuation), keep pumping rather than sleeping indefinitely while
     // owning the scheduler that must resume it.
+    pushNativeRoots({task});
+    struct TaskRootGuard {
+        VM* vm;
+        ~TaskRootGuard() { vm->popNativeRoots(); }
+    } taskRootGuard{this};
+    BlockingNativeCall blocked(this);
     while (!task->isTerminal()) {
         if (scheduler_->runOne()) continue;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -872,28 +894,13 @@ int VM::run(const Chunk& chunk, const std::vector<std::string>& programArgs) {
         // main actually runs.
         pumpSchedulerUntilTerminal(entryTask_);
     }
-    scheduler_->runUntilIdle();
-    std::vector<Value> roots;
-    state_.appendGCRoots(roots);
-    if (asyncInvocation_) {
-        roots.insert(roots.end(), asyncInvocation_->args.begin(), asyncInvocation_->args.end());
-        if (asyncInvocation_->receiver) roots.push_back(*asyncInvocation_->receiver);
-        if (asyncInvocation_->task) {
-            Value taskValue = asyncInvocation_->task;
-            roots.push_back(std::move(taskValue));
-        }
+    {
+        BlockingNativeCall blocked(this);
+        scheduler_->runUntilIdle();
     }
-    appendNativeRoots(roots);
-    if (pendingResumeException_) {
-        try {
-            std::rethrow_exception(pendingResumeException_);
-        } catch (const ZlThrownException& e) {
-            if (e.value()) roots.emplace_back(e.value());
-        } catch (...) {
-            // Native/runtime exceptions do not own a GC-managed ZL value.
-        }
-    }
-    (void)TracingGC::instance().collect(roots);
+    // The process-wide heap must never be collected from just this VM's roots
+    // while other VMs/threads are still running.
+    GCSafepointCoordinator::instance().poll(gcParticipantId_, gcRoots());
     return 0;
 }
 
@@ -915,41 +922,11 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
     const std::size_t initialCallDepth = state_.callDepth();
     std::size_t ip = startIp;
 
-    // Outermost execute() on this thread performs the GC rendezvous; nested
-    // executes (a closure driven from a native that may hold an application
-    // lock, e.g. Mutex.withLock) only publish roots non-blockingly.
-    const bool outermostExecution = (executeDepth_++ == 0);
-    struct ExecuteDepthGuard {
-        int* depth;
-        ~ExecuteDepthGuard() { --*depth; }
-    } executeDepthGuard{&executeDepth_};
-
     std::size_t instructionsSinceSafePoint = 0;
     while (true) {
       try {
         if (++instructionsSinceSafePoint >= 128 || TracingGC::instance().shouldCollect()) {
-            std::vector<Value> roots;
-            state_.appendGCRoots(roots);
-            if (asyncInvocation_) {
-                roots.insert(roots.end(), asyncInvocation_->args.begin(), asyncInvocation_->args.end());
-                if (asyncInvocation_->receiver) roots.push_back(*asyncInvocation_->receiver);
-                if (asyncInvocation_->task) roots.emplace_back(asyncInvocation_->task);
-            }
-            appendNativeRoots(roots);
-            if (pendingResumeException_) {
-                try {
-                    std::rethrow_exception(pendingResumeException_);
-                } catch (const ZlThrownException& e) {
-                    if (e.value()) roots.emplace_back(e.value());
-                } catch (...) {}
-            }
-            if (outermostExecution) {
-                GCSafepointCoordinator::instance().poll(gcParticipantId_, std::move(roots));
-            } else {
-                // Nested run (possibly holding an app lock): refresh roots but
-                // never block on the rendezvous.
-                GCSafepointCoordinator::instance().publishRoots(gcParticipantId_, std::move(roots));
-            }
+            GCSafepointCoordinator::instance().poll(gcParticipantId_, gcRoots());
             instructionsSinceSafePoint = 0;
         }
         if (ip >= chunk.code.size()) throw std::runtime_error("VM: instruction pointer out of bounds");
@@ -1092,7 +1069,6 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 const auto& natives = nativeFunctionTable();
                 if (instr.operand >= natives.size()) throw std::runtime_error("VM: native func index out of bounds");
                 const NativeFunction& native = natives[instr.operand];
-                setCurrentNativeVm(this);
                 const std::size_t arity = native.arity();
                 std::vector<Value> args(arity);
                 for (std::size_t i = 0; i < arity; ++i) {
@@ -1101,8 +1077,12 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 pushNativeRoots(args);
                 struct NativeRootGuard {
                     VM* vm;
-                    ~NativeRootGuard() { vm->popNativeRoots(); }
-                } nativeRootGuard{this};
+                    VM* previous;
+                    ~NativeRootGuard() {
+                        setCurrentNativeVm(previous);
+                        vm->popNativeRoots();
+                    }
+                } nativeRootGuard{this, setCurrentNativeVm(this)};
                 try {
                     state_.push(native.fn(args));
                 } catch (const ZlThrownException&) {
@@ -1233,6 +1213,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     throw std::runtime_error("VM: async func cannot await its own Task");
                 }
                 asyncInvocation_->resumeIp = ip + 1;
+                asyncInvocation_->awaitedTask = awaitedTask;
                 auto vmSelf = shared_from_this();
                 asyncInvocation_->task->onCancellation([vmSelf]() {
                     vmSelf->scheduler_->enqueue(std::make_shared<AsyncFrame>([vmSelf]() {
@@ -1241,30 +1222,10 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 });
                 awaitedTask->then([vmSelf, awaitedTask]() {
                     vmSelf->scheduler_->enqueue(std::make_shared<AsyncFrame>([vmSelf, awaitedTask]() {
-                        // Cancellation of the outer task can race with completion
-                        // of the awaited task. If cancellation already finished
-                        // the async invocation, this continuation is stale and
-                        // must not mutate the dead VM state or resume a terminal task.
-                        if (!vmSelf->asyncInvocation_) return;
-                        try {
-                            if (!vmSelf->asyncInvocation_) return;
-                            if (awaitedTask->status() == TaskStatus::Succeeded) {
-                                vmSelf->state_.push(awaitedTask->observe());
-                            } else {
-                                try {
-                                    (void)awaitedTask->observe();
-                                } catch (...) {
-                                    vmSelf->pendingResumeException_ = std::current_exception();
-                                }
-                            }
-                            if (vmSelf->asyncInvocation_) vmSelf->resumeAsyncInvocation();
-                        } catch (...) {
-                            if (vmSelf->asyncInvocation_) {
-                                auto task = vmSelf->asyncInvocation_->task;
-                                vmSelf->asyncInvocation_.reset();
-                                task->fail(std::current_exception());
-                            }
-                        }
+                        // Resume owns reactivation and restores the awaited value
+                        // only after the collector has released this parked VM.
+                        if (vmSelf->asyncInvocation_ && vmSelf->asyncInvocation_->awaitedTask == awaitedTask)
+                            vmSelf->resumeAsyncInvocation();
                     }));
                 });
                 return ExecuteStatus::Suspended;
@@ -1874,11 +1835,26 @@ void VM::beginAsyncInvocation(std::shared_ptr<const Chunk> chunk, std::size_t fu
                                std::vector<Value> args, std::optional<Value> receiver, TaskRef task) {
     if (asyncInvocation_) throw std::logic_error("VM: async invocation already active");
     asyncInvocation_ = AsyncInvocation{std::move(chunk), functionIndex, std::move(args), std::move(receiver), std::move(task), 0, false};
+    // A queued/suspended VM owns roots but is not a running mutator.
+    beginBlockingNativeCall();
 }
 
 void VM::resumeAsyncInvocation() {
     if (!asyncInvocation_) return;
+    endBlockingNativeCall();
+    struct SuspendGuard {
+        VM* vm;
+        ~SuspendGuard() { vm->beginBlockingNativeCall(); }
+    } suspendGuard{this};
     try {
+        if (asyncInvocation_->awaitedTask && asyncInvocation_->awaitedTask->isTerminal()) {
+            try {
+                state_.push(asyncInvocation_->awaitedTask->observe());
+            } catch (...) {
+                pendingResumeException_ = std::current_exception();
+            }
+            asyncInvocation_->awaitedTask.reset();
+        }
         if (!asyncInvocation_->started) {
             const TaskStatus taskStatus = asyncInvocation_->task->status();
             if (taskStatus == TaskStatus::Cancelled) {
@@ -1945,6 +1921,7 @@ void VM::invokeThreadClosure(const ClosureRef& closure) {
     frame.returnIp = closure->chunk->code.size();
     frame.functionName = "<thread>";
     frame.locals = closure->captured;
+    frame.activeClosure = closure;
     const std::size_t callerFrames = state_.callDepth();
     const std::size_t callerStackSize = state_.valueStackSize();
     state_.enterFrame(std::move(frame));
@@ -1967,6 +1944,7 @@ Value VM::invokeTaskClosure(const ClosureRef& closure) {
     frame.returnIp = closure->chunk->code.size();
     frame.functionName = "<task>";
     frame.locals = closure->captured;
+    frame.activeClosure = closure;
     const std::size_t callerFrames = state_.callDepth();
     const std::size_t callerStackSize = state_.valueStackSize();
     state_.enterFrame(std::move(frame));

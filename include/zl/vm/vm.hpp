@@ -31,12 +31,19 @@ public:
     void invokeThreadClosure(const ClosureRef& closure);
     Value invokeTaskClosure(const ClosureRef& closure);
 
-    // Mark this VM thread as blocked inside a native call running no bytecode
-    // (Thread.join, a condition wait). While blocked it counts as at a GC
-    // safepoint so a rendezvous triggered by a worker does not deadlock
-    // waiting on this participant; unblock when the native call returns.
-    void beginBlockingNativeCall();
-    void endBlockingNativeCall() const;
+    // Only the wait itself belongs in this scope: callbacks and managed-data
+    // access must happen after reactivation, even if the native acquired a lock.
+    class BlockingNativeCall {
+    public:
+        explicit BlockingNativeCall(VM* vm) : vm_(vm) {
+            if (vm_) vm_->beginBlockingNativeCall();
+        }
+        ~BlockingNativeCall() { if (vm_) vm_->endBlockingNativeCall(); }
+        BlockingNativeCall(const BlockingNativeCall&) = delete;
+        BlockingNativeCall& operator=(const BlockingNativeCall&) = delete;
+    private:
+        VM* vm_;
+    };
 
 
 private:
@@ -52,6 +59,9 @@ private:
     void pushNativeRoots(const std::vector<Value>& roots);
     void popNativeRoots();
     void appendNativeRoots(std::vector<Value>& roots) const;
+    std::vector<Value> gcRoots() const;
+    void beginBlockingNativeCall();
+    void endBlockingNativeCall() const;
 
     Value binaryArith(OpCode op, const Value& a, const Value& b) const;
     Value binaryBitwise(OpCode op, const Value& a, const Value& b) const;
@@ -82,6 +92,7 @@ private:
         TaskRef task;
         std::size_t resumeIp{0};
         bool started{false};
+        TaskRef awaitedTask;
     };
     std::optional<AsyncInvocation> asyncInvocation_;
     // When `main` itself is an async func, the top-level call yields a Task that
@@ -92,12 +103,7 @@ private:
     std::vector<std::vector<Value>> nativeRootFrames_;
     const Chunk* activeChunk_{nullptr};
     std::uint64_t gcParticipantId_{0};
-    // Per-thread nesting depth of execute(). A nested run driven from a native
-    // (Mutex.withLock, reflection invoke) may hold an application lock; it must
-    // not block on a GC safepoint (other participants are parked on that lock),
-    // so nested runs publish roots non-blockingly while the outermost run
-    // performs the rendezvous.
-    int executeDepth_{0};
+
 };
 
 } // namespace zl
