@@ -646,6 +646,12 @@ NodePtr ExpressionParser::parseLambdaExpr() {
     }
     parser_.expect(TokenType::RPAREN, "Expected ')' after lambda parameters");
 
+    // Optional return-type annotation, mirroring named func declarations.
+    if (parser_.match({TokenType::COLON})) {
+        node->hasDeclaredReturnType = true;
+        node->declaredReturnType = parser_.parseTypeAnnotation();
+    }
+
     if (parser_.match({TokenType::FAT_ARROW})) {
         if (parser_.check(TokenType::LBRACE)) {
             node->hasExprBody = false;
@@ -658,7 +664,7 @@ NodePtr ExpressionParser::parseLambdaExpr() {
         node->hasExprBody = false;
         node->blockBody = parser_.parseBlock();
     } else {
-        parser_.error("Expected '=>' or '{' after a lambda's parameter list");
+        parser_.error("Expected '=>', '{', or ': ReturnType' after a lambda's parameter list");
     }
     return node;
 }

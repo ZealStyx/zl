@@ -5194,6 +5194,15 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
         ? currentLambdaExpectation_.returnType : ZlType::UNKNOWN;
     currentReturnClassName_ = currentLambdaExpectation_.active
         ? currentLambdaExpectation_.returnClassName : std::string();
+    // An explicit `func(...): T` annotation is the authority for this lambda's
+    // result, overriding whatever the call site happened to expect.
+    ZlType declaredReturnType = ZlType::UNKNOWN;
+    std::string declaredReturnClassName;
+    if (node->hasDeclaredReturnType) {
+        declaredReturnType = resolveType(node->declaredReturnType, &declaredReturnClassName);
+        currentReturnType_ = declaredReturnType;
+        currentReturnClassName_ = declaredReturnClassName;
+    }
     // A callable annotation describes Task<T>, but an async body returns T.
     // Decode the complete expected signature rather than depending on the
     // optional task-value side metadata (which returned callbacks lacked).
@@ -5220,6 +5229,25 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
             inferredReturnResult.type = currentReturnType_;
             inferredReturnResult.className = currentReturnClassName_;
         }
+    }
+    if (node->hasDeclaredReturnType) {
+        const bool bodyIsVoidLike = inferredReturnResult.type == ZlType::NIL ||
+                                    inferredReturnResult.type == ZlType::VOID_TYPE;
+        const bool declaredVoid = declaredReturnType == ZlType::VOID_TYPE;
+        if (!(declaredVoid && bodyIsVoidLike) &&
+            !isAssignable(inferredReturnResult.type, declaredReturnType,
+                          inferredReturnResult.className, declaredReturnClassName)) {
+            const std::string got = inferredReturnResult.className.empty()
+                ? zlTypeName(inferredReturnResult.type) : inferredReturnResult.className;
+            const std::string want = declaredReturnClassName.empty()
+                ? zlTypeName(declaredReturnType) : declaredReturnClassName;
+            typeError("lambda declares return type '" + want + "' but its body returns '" + got + "'",
+                      node->line);
+        }
+        // The declaration, not the inferred body type, is this lambda's
+        // contract - so a widening annotation stays visible to callers.
+        inferredReturnResult.type = declaredReturnType;
+        inferredReturnResult.className = declaredReturnClassName;
     }
     const ZlType inferredReturn = inferredReturnResult.type;
     const std::string inferredReturnClassName = inferredReturnResult.className;

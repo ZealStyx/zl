@@ -2,6 +2,25 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-08 — Lambda return-type annotations
+
+Lambdas may now declare a return type: `func(int x): int => x * 2`. Previously
+the parser rejected the annotation outright ("Expected '=>' or '{' after a
+lambda's parameter list"), so a lambda's contract could only be inferred, and
+typed parameters combined with an explicit result were unwritable.
+
+The annotation is enforced rather than decorative: the body's inferred result
+must be assignable to the declared type, and a mismatch is a compile error
+naming both types. When present the declaration overrides the call site's
+expectation, so a lambda's stated contract remains visible to callers. Block
+bodies, expression bodies, `void` lambdas and untyped parameters are all
+supported; omitting the annotation preserves the previous inference behaviour.
+
+**Validation:** fresh build; 49/49 examples pass; `tests/type_boundaries.py`
+passes; positive cases (typed/untyped params, block and expression bodies,
+`void`) and negative cases (`bool` body returning `int`, `int` body returning
+`bool`, `string` body returning `int`) all behave correctly.
+
 ## 2026-09-08 — Library layer reconciliation
 
 Follow-up to the stdlib expansion, focused on making the three library layers
