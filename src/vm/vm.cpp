@@ -580,6 +580,22 @@ void VM::appendNativeRoots(std::vector<Value>& roots) const {
     }
 }
 
+void VM::beginBlockingNativeCall() {
+    if (gcParticipantId_ == 0) return;
+    // Publish this VM's full root snapshot before parking, so a rendezvous that
+    // runs while we are blocked in native code still sees the values our native
+    // frame references (e.g. the ThreadRefs and Shared held across Thread.join).
+    std::vector<Value> roots;
+    state_.appendGCRoots(roots);
+    appendNativeRoots(roots);
+    GCSafepointCoordinator::instance().beginBlockingNative(gcParticipantId_, std::move(roots));
+}
+
+void VM::endBlockingNativeCall() const {
+    if (gcParticipantId_ != 0)
+        GCSafepointCoordinator::instance().endBlockingNative(gcParticipantId_);
+}
+
 Value VM::binaryArith(OpCode op, const Value& a, const Value& b) const {
     // `+` doubles as string concatenation if EITHER side is a string -
     // convenient for building log() messages like "Hello, " + name.
@@ -885,8 +901,28 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 const std::vector<std::string>& programArgs, Value* returnValue) {
     const Chunk* previousChunk = activeChunk_;
     activeChunk_ = &chunk;
+    // execute() is re-entrant (a native can drive a nested execute() for a
+    // closure: Mutex.withLock, reflection invoke, thread/task entries). Every
+    // exit - normal completion OR an uncaught exception leaving the nested
+    // run - must hand the caller's chunk back, otherwise the outer loop resumes
+    // the caller's ip against the nested chunk and re-runs code (the
+    // exception-in-withLock "continuation runs twice" bug).
+    struct ActiveChunkGuard {
+        VM* vm;
+        const Chunk* previous;
+        ~ActiveChunkGuard() { vm->activeChunk_ = previous; }
+    } activeChunkGuard{this, previousChunk};
     const std::size_t initialCallDepth = state_.callDepth();
     std::size_t ip = startIp;
+
+    // Outermost execute() on this thread performs the GC rendezvous; nested
+    // executes (a closure driven from a native that may hold an application
+    // lock, e.g. Mutex.withLock) only publish roots non-blockingly.
+    const bool outermostExecution = (executeDepth_++ == 0);
+    struct ExecuteDepthGuard {
+        int* depth;
+        ~ExecuteDepthGuard() { --*depth; }
+    } executeDepthGuard{&executeDepth_};
 
     std::size_t instructionsSinceSafePoint = 0;
     while (true) {
@@ -907,7 +943,13 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     if (e.value()) roots.emplace_back(e.value());
                 } catch (...) {}
             }
-            GCSafepointCoordinator::instance().poll(gcParticipantId_, std::move(roots));
+            if (outermostExecution) {
+                GCSafepointCoordinator::instance().poll(gcParticipantId_, std::move(roots));
+            } else {
+                // Nested run (possibly holding an app lock): refresh roots but
+                // never block on the rendezvous.
+                GCSafepointCoordinator::instance().publishRoots(gcParticipantId_, std::move(roots));
+            }
             instructionsSinceSafePoint = 0;
         }
         if (ip >= chunk.code.size()) throw std::runtime_error("VM: instruction pointer out of bounds");
@@ -1783,9 +1825,17 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 return ExecuteStatus::Completed;
         }
       } catch (const ZlThrownException& e) {
+          // execute() is re-entrant: a nested run (a closure driven from a
+          // native, started at initialCallDepth) must only consume handlers
+          // pushed within THAT nested run. Handlers owned by the caller frame
+          // (callStackSize < initialCallDepth) belong to the outer run; letting
+          // the nested run catch on them resumes the caller's catchIp against
+          // the closure's chunk and re-runs the caller (the exception-in-
+          // withLock double-continuation bug). If no in-scope handler matches,
+          // rethrow so the outer run handles it in its own chunk.
           bool matched = false;
           ExecutionState::Handler h{};
-          while (state_.hasHandler()) {
+          while (state_.hasHandler() && state_.topHandlerCallDepth() >= initialCallDepth) {
               h = state_.popHandler();
               if (h.catchClassName.empty() ||
                   e.value()->className == h.catchClassName ||
@@ -1807,7 +1857,9 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
           }
           ip = h.catchIp;
       } catch (const std::runtime_error& e) {
-          if (!state_.hasHandler()) throw;
+          // Same nested-run scoping as the ZlThrownException handler above:
+          // only a catch-all handler owned by this (nested) run applies.
+          if (!state_.hasHandler() || state_.topHandlerCallDepth() < initialCallDepth) throw;
           ExecutionState::Handler h = state_.popHandler();
           if (!h.catchClassName.empty()) throw;
           state_.unwindTo(h);
@@ -1893,10 +1945,17 @@ void VM::invokeThreadClosure(const ClosureRef& closure) {
     frame.returnIp = closure->chunk->code.size();
     frame.functionName = "<thread>";
     frame.locals = closure->captured;
+    const std::size_t callerFrames = state_.callDepth();
+    const std::size_t callerStackSize = state_.valueStackSize();
     state_.enterFrame(std::move(frame));
     Value result;
-    const ExecuteStatus status = execute(*closure->chunk, fn.entryAddress, true, {}, &result);
-    if (status != ExecuteStatus::Completed) throw std::runtime_error("VM: thread closure suspended unexpectedly");
+    try {
+        const ExecuteStatus status = execute(*closure->chunk, fn.entryAddress, true, {}, &result);
+        if (status != ExecuteStatus::Completed) throw std::runtime_error("VM: thread closure suspended unexpectedly");
+    } catch (...) {
+        state_.restoreToDepth(callerStackSize, callerFrames);
+        throw;
+    }
 }
 
 Value VM::invokeTaskClosure(const ClosureRef& closure) {
@@ -1908,10 +1967,21 @@ Value VM::invokeTaskClosure(const ClosureRef& closure) {
     frame.returnIp = closure->chunk->code.size();
     frame.functionName = "<task>";
     frame.locals = closure->captured;
+    const std::size_t callerFrames = state_.callDepth();
+    const std::size_t callerStackSize = state_.valueStackSize();
     state_.enterFrame(std::move(frame));
     Value result;
-    const ExecuteStatus status = execute(*closure->chunk, fn.entryAddress, true, {}, &result);
-    if (status != ExecuteStatus::Completed) throw std::runtime_error("VM: task closure suspended unexpectedly");
+    try {
+        const ExecuteStatus status = execute(*closure->chunk, fn.entryAddress, true, {}, &result);
+        if (status != ExecuteStatus::Completed) throw std::runtime_error("VM: task closure suspended unexpectedly");
+    } catch (...) {
+        // The closure exited without reaching its Return (an uncaught throw),
+        // so its frame - and any handlers it pushed - were never torn down.
+        // Restore the caller's frame/handler/stack state before propagating,
+        // otherwise the outer execute resumes against a stale, deeper stack.
+        state_.restoreToDepth(callerStackSize, callerFrames);
+        throw;
+    }
     return result;
 }
 
@@ -2062,10 +2132,17 @@ Value VM::invokeFunction(const Chunk& chunk, std::size_t functionIndex,
     frame.returnIp = chunk.code.size();
     if (receiver) frame.locals["this"] = *receiver;
     for (std::size_t i = 0; i < args.size(); ++i) frame.locals[fn.paramNames[i]] = args[i];
+    const std::size_t callerFrames = state_.callDepth();
+    const std::size_t callerStackSize = state_.valueStackSize();
     state_.enterFrame(std::move(frame));
     Value result;
-    const ExecuteStatus status = execute(chunk, fn.entryAddress, true, {}, &result);
-    if (status != ExecuteStatus::Completed) throw std::runtime_error("VM: function execution suspended unexpectedly");
+    try {
+        const ExecuteStatus status = execute(chunk, fn.entryAddress, true, {}, &result);
+        if (status != ExecuteStatus::Completed) throw std::runtime_error("VM: function execution suspended unexpectedly");
+    } catch (...) {
+        state_.restoreToDepth(callerStackSize, callerFrames);
+        throw;
+    }
     return result;
 }
 

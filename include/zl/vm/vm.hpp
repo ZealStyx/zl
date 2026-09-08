@@ -31,6 +31,13 @@ public:
     void invokeThreadClosure(const ClosureRef& closure);
     Value invokeTaskClosure(const ClosureRef& closure);
 
+    // Mark this VM thread as blocked inside a native call running no bytecode
+    // (Thread.join, a condition wait). While blocked it counts as at a GC
+    // safepoint so a rendezvous triggered by a worker does not deadlock
+    // waiting on this participant; unblock when the native call returns.
+    void beginBlockingNativeCall();
+    void endBlockingNativeCall() const;
+
 
 private:
     enum class ExecuteStatus { Completed, Suspended };
@@ -85,6 +92,12 @@ private:
     std::vector<std::vector<Value>> nativeRootFrames_;
     const Chunk* activeChunk_{nullptr};
     std::uint64_t gcParticipantId_{0};
+    // Per-thread nesting depth of execute(). A nested run driven from a native
+    // (Mutex.withLock, reflection invoke) may hold an application lock; it must
+    // not block on a GC safepoint (other participants are parked on that lock),
+    // so nested runs publish roots non-blockingly while the outermost run
+    // performs the rendezvous.
+    int executeDepth_{0};
 };
 
 } // namespace zl

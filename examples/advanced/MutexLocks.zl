@@ -9,17 +9,11 @@
 //   var m = new Mutex()
 //   var r = Mutex.withLock(m, func() => ... )
 //
-// THREE CAVEATS, each found by running code like this:
-//
-//   * Do NOT let the body throw. An exception escaping a withLock body is not
-//     delivered cleanly to the caller's try/catch: the continuation resumes
-//     twice and the run ends in a spurious "'return' used outside of a func".
-//     Validate before entering the critical section instead.
-//   * Contention has a ceiling. Two threads doing 50 locked increments each
-//     complete every time (5/5 runs, `total=100`); at 2 x 100 the same program
-//     hangs forever with no output. This holds for `Shared<T>.withLock` too, so
-//     it is the lock path rather than either wrapper. Keep critical sections
-//     small, or use Atomic for counters (see Atomics.zl).
+// The lock is exception-safe: a body that throws releases the mutex and the
+// exception propagates to the caller's try/catch exactly once. It is also
+// contention-safe - the GC no longer stops-the-world while a thread holds the
+// mutex, so many threads can hammer the same lock (the two-thread / high-count
+// case below) without deadlocking.
 // ============================================================================
 
 import zl.lang.Mutex
@@ -47,18 +41,23 @@ class MutexLocks {
         // A Mutex can now be captured by a thread directly - no Shared<Mutex>
         // wrapper needed. Two threads bump the counter 50 times each; because
         // every read-modify-write happens under the lock, none is lost and the
-        // total is exactly 100. (50 is deliberate: see the contention caveat
-        // above.)
+        // total is exact. Four threads doing 100 increments each would have
+        // deadlocked under GC pressure before the safepoint/lock-order fix;
+        // now it completes every time with guarded total 400.
         var guarded = new Shared<int>(0)
         var bump = func() {
-            for i in 0..50 {
+            for i in 0..100 {
                 Mutex.withLock(m, func() { guarded.setValue(guarded.get() + 1) })
             }
         }
         var t1 = Thread.start(bump)
         var t2 = Thread.start(bump)
+        var t3 = Thread.start(bump)
+        var t4 = Thread.start(bump)
         Thread.join(t1)
         Thread.join(t2)
+        Thread.join(t3)
+        Thread.join(t4)
         log("guarded total " + guarded.get())
     }
 }
@@ -69,5 +68,5 @@ class MutexLocks {
 // after second 15
 // doubled under lock 30
 // final 15
-// guarded total 100
+// guarded total 400
 // --- End expected output ---

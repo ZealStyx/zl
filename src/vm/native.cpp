@@ -1229,7 +1229,19 @@ Value threadStart(const std::vector<Value>& args) {
 Value threadJoin(const std::vector<Value>& args) {
     auto thread = std::get_if<ThreadRef>(&args[0]);
     if (!thread || !(*thread)) throw std::runtime_error("Thread.join: expected a Thread value");
-    (*thread)->join();
+    // join() blocks this thread running no bytecode while the joined worker
+    // threads may trigger a GC rendezvous. Mark us at a safepoint for that
+    // window, otherwise workers parked at the safepoint wait on us while we
+    // wait on them - the locked-counter deadlock at high thread contention.
+    VM* vm = g_currentNativeVm;
+    if (vm) vm->beginBlockingNativeCall();
+    try {
+        (*thread)->join();
+    } catch (...) {
+        if (vm) vm->endBlockingNativeCall();
+        throw;
+    }
+    if (vm) vm->endBlockingNativeCall();
     return Value{};
 }
 
