@@ -13,7 +13,7 @@
     "native_runtime_bindings": 246,
     "native_catalog_runtime_ids_match": true,
     "builtin_class_count": 32,
-    "stdlib_zl_file_count": 25
+    "stdlib_zl_file_count": 26
   },
   "native_domain_counts": {
     "Reflection": 33,
@@ -527,23 +527,81 @@
       ]
     },
     {
+      "path": "stdlib/zl/time/Calendar.zl",
+      "classes": [
+        "Calendar"
+      ],
+      "imports": [],
+      "methods": [
+        "civilToDays",
+        "fromDayNumber",
+        "dayNumber",
+        "addDays",
+        "addWeeks",
+        "addMonths",
+        "addYears",
+        "diffDays",
+        "startOfDay",
+        "endOfDay",
+        "isSameDay",
+        "daysInMonth",
+        "isWeekend",
+        "weekdayName",
+        "monthName",
+        "isoDate",
+        "isoTime",
+        "isoDateTime",
+        "isoUtc"
+      ]
+    },
+    {
       "path": "stdlib/zl/time/Date.zl",
       "classes": [
         "Date"
       ],
-      "imports": [],
+      "imports": [
+        "zl.time.Calendar",
+        "zl.time.Duration"
+      ],
       "methods": [
         "Date",
+        "of",
+        "today",
         "year",
         "month",
         "day",
+        "dayOfWeek",
+        "dayOfYear",
+        "weekdayName",
+        "monthName",
+        "timestamp",
+        "dayNumber",
         "format",
+        "iso",
+        "toString",
         "addDays",
         "subtractDays",
+        "addWeeks",
+        "subtractWeeks",
+        "addMonths",
+        "subtractMonths",
+        "addYears",
+        "subtractYears",
+        "startOfMonth",
+        "endOfMonth",
+        "startOfYear",
+        "endOfYear",
+        "daysUntil",
+        "difference",
+        "isWeekend",
+        "isWeekday",
+        "isLeapYear",
+        "isSameMonth",
         "compare",
         "isBefore",
         "isAfter",
-        "equals"
+        "equals",
+        "isBetween"
       ]
     },
     {
@@ -551,27 +609,62 @@
       "classes": [
         "DateTime"
       ],
-      "imports": [],
+      "imports": [
+        "zl.time.Calendar",
+        "zl.time.Date",
+        "zl.time.TimeOfDay",
+        "zl.time.Duration"
+      ],
       "methods": [
         "DateTime",
+        "of",
+        "now",
         "year",
         "month",
         "day",
         "hour",
         "minute",
         "second",
+        "dayOfWeek",
+        "dayOfYear",
+        "weekdayName",
+        "monthName",
+        "timestamp",
+        "date",
+        "timeOfDay",
         "format",
+        "iso",
+        "isoUtc",
+        "toString",
         "addSeconds",
         "addMinutes",
         "addHours",
+        "subtractSeconds",
+        "subtractMinutes",
+        "subtractHours",
+        "addDuration",
         "addDays",
         "subtractDays",
-        "timestamp",
+        "addWeeks",
+        "subtractWeeks",
+        "addMonths",
+        "subtractMonths",
+        "addYears",
+        "subtractYears",
+        "startOfDay",
+        "endOfDay",
         "difference",
+        "secondsUntil",
+        "minutesUntil",
+        "hoursUntil",
+        "daysUntil",
+        "isWeekend",
+        "isSameDay",
         "compare",
         "isBefore",
         "isAfter",
-        "equals"
+        "equals",
+        "isBetween"
       ]
     },
     {
@@ -602,6 +695,7 @@
         "Time"
       ],
       "imports": [
+        "zl.time.Calendar",
         "zl.time.DateTime",
         "zl.time.Date",
         "zl.time.TimeOfDay",
@@ -629,6 +723,7 @@
         "addWeeks",
         "addMonths",
         "addYears",
+        "dayNumber",
         "diffSeconds",
         "diffMinutes",
         "diffHours",
@@ -657,18 +752,38 @@
       "classes": [
         "TimeOfDay"
       ],
-      "imports": [],
+      "imports": [
+        "zl.time.Duration"
+      ],
       "methods": [
         "TimeOfDay",
+        "of",
+        "now",
         "hour",
         "minute",
         "second",
-        "format",
         "totalSeconds",
+        "totalMinutes",
+        "format",
+        "iso",
+        "short",
+        "toString",
+        "addSeconds",
+        "addMinutes",
+        "addHours",
+        "subtractSeconds",
+        "subtractMinutes",
+        "subtractHours",
+        "secondsUntil",
+        "difference",
+        "isMorning",
+        "isAfternoon",
+        "isEvening",
         "compare",
         "isBefore",
         "isAfter",
-        "equals"
+        "equals",
+        "isBetween"
       ]
     },
     {

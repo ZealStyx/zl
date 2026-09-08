@@ -1,27 +1,114 @@
-// zl.time.DateTime - local-time view over epoch seconds.
+import zl.time.Calendar
+import zl.time.Date
+import zl.time.TimeOfDay
+import zl.time.Duration
+
+// zl.time.DateTime - local date-and-time view over epoch seconds.
+//
+// Two families of arithmetic, deliberately named apart:
+//   - addSeconds/addMinutes/addHours are ELAPSED time. Across a
+//     daylight-saving change the wall-clock reading shifts by an hour.
+//   - addDays/addWeeks/addMonths/addYears are CALENDAR time. They preserve
+//     the local time of day, so noon stays noon across that same change.
 class DateTime {
     public int epoch
+
     func DateTime(int epoch): void { this.epoch = epoch }
+
+    // --- Construction ------------------------------------------------------
+
+    public static func of(int year, int month, int day, int hour, int minute, int second): DateTime {
+        return new DateTime(Time.fromParts(year, month, day, hour, minute, second))
+    }
+
+    public static func now(): DateTime { return new DateTime(Time.now()) }
+
+    // --- Components --------------------------------------------------------
+
     public func year(): int { return Time.year(this.epoch) }
     public func month(): int { return Time.month(this.epoch) }
     public func day(): int { return Time.day(this.epoch) }
     public func hour(): int { return Time.hour(this.epoch) }
     public func minute(): int { return Time.minute(this.epoch) }
     public func second(): int { return Time.second(this.epoch) }
+    public func dayOfWeek(): int { return Time.dayOfWeek(this.epoch) }
+    public func dayOfYear(): int { return Time.dayOfYear(this.epoch) }
+    public func weekdayName(): string { return Calendar.weekdayName(this.epoch) }
+    public func monthName(): string { return Calendar.monthName(this.epoch) }
+    public func timestamp(): int { return this.epoch }
+
+    // --- Views -------------------------------------------------------------
+
+    public func date(): Date { return new Date(this.epoch) }
+    public func timeOfDay(): TimeOfDay { return new TimeOfDay(this.epoch) }
+
+    // --- Rendering ---------------------------------------------------------
+
     public func format(string pattern): string { return Time.format(this.epoch, pattern) }
+    public func iso(): string { return Calendar.isoDateTime(this.epoch) }
+    public func isoUtc(): string { return Calendar.isoUtc(this.epoch) }
+    public func toString(): string { return this.iso() }
+
+    // --- Elapsed-time arithmetic -------------------------------------------
+
     public func addSeconds(int seconds): DateTime { return new DateTime(this.epoch + seconds) }
     public func addMinutes(int minutes): DateTime { return this.addSeconds(minutes * 60) }
-    public func addHours(int hours): DateTime { return this.addMinutes(hours * 60) }
-    public func addDays(int days): DateTime { return this.addHours(days * 24) }
+    public func addHours(int hours): DateTime { return this.addSeconds(hours * 3600) }
+    public func subtractSeconds(int seconds): DateTime { return this.addSeconds(-seconds) }
+    public func subtractMinutes(int minutes): DateTime { return this.addMinutes(-minutes) }
+    public func subtractHours(int hours): DateTime { return this.addHours(-hours) }
+    public func addDuration(Duration duration): DateTime {
+        return this.addSeconds(duration.milliseconds() / 1000)
+    }
+
+    // --- Calendar arithmetic -------------------------------------------------
+
+    public func addDays(int days): DateTime { return new DateTime(Calendar.addDays(this.epoch, days)) }
     public func subtractDays(int days): DateTime { return this.addDays(-days) }
-    public func timestamp(): int { return this.epoch }
-    public func difference(DateTime other): Duration { return new Duration((this.epoch - other.epoch) * 1000) }
+    public func addWeeks(int weeks): DateTime { return new DateTime(Calendar.addWeeks(this.epoch, weeks)) }
+    public func subtractWeeks(int weeks): DateTime { return this.addWeeks(-weeks) }
+    public func addMonths(int months): DateTime { return new DateTime(Calendar.addMonths(this.epoch, months)) }
+    public func subtractMonths(int months): DateTime { return this.addMonths(-months) }
+    public func addYears(int years): DateTime { return new DateTime(Calendar.addYears(this.epoch, years)) }
+    public func subtractYears(int years): DateTime { return this.addYears(-years) }
+
+    // --- Boundaries -------------------------------------------------------------
+
+    public func startOfDay(): DateTime { return new DateTime(Calendar.startOfDay(this.epoch)) }
+    public func endOfDay(): DateTime { return new DateTime(Calendar.endOfDay(this.epoch)) }
+
+    // --- Differences --------------------------------------------------------------
+
+    // Elapsed time from this instant to `other`; negative when `other` is earlier.
+    public func difference(DateTime other): Duration {
+        return new Duration((other.epoch - this.epoch) * 1000)
+    }
+
+    public func secondsUntil(DateTime other): int { return other.epoch - this.epoch }
+    public func minutesUntil(DateTime other): int { return (other.epoch - this.epoch) / 60 }
+    public func hoursUntil(DateTime other): int { return (other.epoch - this.epoch) / 3600 }
+
+    // Whole CALENDAR days, matching addDays.
+    public func daysUntil(DateTime other): int { return Calendar.diffDays(this.epoch, other.epoch) }
+
+    // --- Predicates ------------------------------------------------------------------
+
+    public func isWeekend(): bool { return Calendar.isWeekend(this.epoch) }
+    public func isSameDay(DateTime other): bool { return Calendar.isSameDay(this.epoch, other.epoch) }
+
+    // --- Comparison --------------------------------------------------------------------
+    // Compares exact instants, unlike Date, which compares calendar days.
+
     public func compare(DateTime other): int {
         if (this.epoch < other.epoch) { return -1 }
         if (this.epoch > other.epoch) { return 1 }
         return 0
     }
+
     public func isBefore(DateTime other): bool { return this.compare(other) < 0 }
     public func isAfter(DateTime other): bool { return this.compare(other) > 0 }
     public func equals(DateTime other): bool { return this.compare(other) == 0 }
+    public func isBetween(DateTime start, DateTime end): bool {
+        return this.compare(start) >= 0 && this.compare(end) <= 0
+    }
 }

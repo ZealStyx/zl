@@ -2,6 +2,51 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-08 — Correct calendar arithmetic; Date/DateTime/TimeOfDay rebuilt
+
+Probing the time facades across a daylight-saving boundary exposed two real
+correctness bugs, not just missing features.
+
+**Adding a day shifted the clock.** `addDays` added a fixed 86400 seconds, so
+noon on 2024-03-09 plus one day came back as **1 PM** on 2024-03-10 in any zone
+observing a spring-forward transition. `addWeeks` inherited the same defect.
+
+**`endOfDay` could return the wrong date entirely.** It was `startOfDay +
+86399`, but a DST day is 23 or 25 hours long, so on 2024-03-10 in New York it
+produced `2024-03-11 00:59:59` — the following day.
+
+Both are fixed by doing calendar arithmetic on civil day numbers (Howard
+Hinnant's `days_from_civil`) and rebuilding the timestamp through
+`Time.fromParts`, rather than by manipulating elapsed seconds. `endOfDay` is
+now derived from the next day's midnight, which is correct for every day
+length. `diffDays` counts calendar days to stay consistent with `addDays`.
+
+**New `zl.time.Calendar`.** The pure civil-calendar math lives in a leaf module
+that depends only on the native clock primitives, so `Time` and the value
+classes can share it without an import cycle (`Time` already imported `Date`).
+`Time` now delegates to it instead of carrying its own copy.
+
+**The two arithmetic families are now named apart.** `addSeconds`/`addMinutes`/
+`addHours` are elapsed time and intentionally shift the wall clock across a
+transition; `addDays`/`addWeeks`/`addMonths`/`addYears` are calendar time and
+preserve the local time of day. `DateTime` exposes both, documented, so
+`dt.addDays(1)` and `dt.addHours(24)` correctly differ across a DST boundary.
+
+**Value classes rebuilt.** `Date` gained construction from parts, week/month/
+year arithmetic, period boundaries (`startOfMonth`, `endOfYear`, …),
+`daysUntil`, weekday/month names, and day-based comparison so two timestamps on
+the same date compare equal. `DateTime` gained both arithmetic families,
+`date()`/`timeOfDay()` views, difference helpers and instant-based comparison.
+`TimeOfDay` gained validated `of(h, m, s)` construction, within-day wrapping
+arithmetic, part-of-day predicates and difference helpers.
+
+**Validation:** fresh build; 49/49 examples pass; `tests/type_boundaries.py`
+passes. A 40,000-day civil round trip is exact; leap-year rules (1900, 2000,
+2024), year boundaries, negative offsets and pre-epoch dates all verified; and
+a sweep over every day of four transition months found zero drift in
+America/New_York, Europe/London, Australia/Sydney, Asia/Manila and
+Pacific/Chatham.
+
 ## 2026-09-08 — Concurrency primitives made usable
 
 Adversarial probing of the synchronization primitives found two that could not
