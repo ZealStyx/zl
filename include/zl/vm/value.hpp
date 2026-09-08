@@ -64,13 +64,16 @@ using MapRef = GcRef<MapBox>;
 using ObjectRef = GcRef<ObjectBox>;
 using ClosureRef = GcRef<ClosureBox>;
 
+class ProtectedGCRoot;
 class ZlThrownException : public std::exception {
 public:
-    explicit ZlThrownException(ObjectRef value) : value_(std::move(value)) {}
+    explicit ZlThrownException(ObjectRef value);
+    ~ZlThrownException() override;
     const char* what() const noexcept override { return "ZL exception"; }
     [[nodiscard]] const ObjectRef& value() const noexcept { return value_; }
 private:
     ObjectRef value_;
+    std::shared_ptr<ProtectedGCRoot> root_;
 };
 
 // std::variant<A, B, C, ...> is a type-safe union: a Value IS EXACTLY ONE of
@@ -87,12 +90,14 @@ using Value = std::variant<std::monostate, std::int64_t, double, std::string,
 
 // Value is complete now, so these can finally hold real containers of it.
 struct ListBox {
+    NativeContainerTypeRef storageType;
     std::vector<Value> items;
     // Queue operations use this logical front offset so dequeue is O(1)
     // amortized instead of erasing from the front of a vector.
     std::size_t frontIndex{0};
 };
 struct MapBox {
+    NativeContainerTypeRef storageType;
     // A simple association list (linear scan on lookup) rather than a hash
     // map - this avoids needing a std::hash<Value> specialization, and is
     // more than fast enough for the sizes a language this young will see.
@@ -189,6 +194,7 @@ struct ClosureBox {
     std::size_t functionIndex{0};
     std::shared_ptr<const Chunk> chunk;
     std::unordered_map<std::string, Value> captured;
+    RuntimeTypeBindings typeBindings;
 };
 
 [[nodiscard]] Value makeEmptyList();

@@ -1,9 +1,9 @@
 #include "zl/vm/vm.hpp"
 #include "zl/vm/gc.hpp"
 #include "zl/vm/gc_safepoint.hpp"
+#include "zl/vm/runtime_type_checks.hpp"
 
 #include <cmath>
-#include <cctype>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -16,6 +16,7 @@
 #include "zl/vm/native.hpp"
 #include "zl/vm/runtime_task.hpp"
 #include <algorithm>
+#include <unordered_set>
 
 namespace zl {
 namespace {
@@ -105,353 +106,6 @@ VM::~VM() {
 }
 
 
-namespace {
-struct ReflectionTypeSpec {
-    std::string name;
-    std::vector<ReflectionTypeSpec> args;
-    std::vector<ReflectionTypeSpec> unionMembers;
-    std::optional<std::size_t> fixedSize;
-};
-
-class ReflectionTypeParser {
-public:
-    explicit ReflectionTypeParser(const std::string& text) : text_(text) {}
-
-    ReflectionTypeSpec parse() {
-        auto result = parseUnion();
-        skipWhitespace();
-        return pos_ == text_.size() ? result : ReflectionTypeSpec{"unknown", {}, {}};
-    }
-
-private:
-    ReflectionTypeSpec parseUnion() {
-        std::vector<ReflectionTypeSpec> members;
-        members.push_back(parsePrimary());
-        skipWhitespace();
-        while (consume('|')) {
-            members.push_back(parsePrimary());
-            skipWhitespace();
-        }
-        if (members.size() == 1) return members.front();
-        ReflectionTypeSpec result;
-        result.name = "union";
-        result.unionMembers = std::move(members);
-        return result;
-    }
-
-    ReflectionTypeSpec parsePrimary() {
-        skipWhitespace();
-        const std::size_t start = pos_;
-        while (pos_ < text_.size() && (std::isalnum(static_cast<unsigned char>(text_[pos_])) || text_[pos_] == '_' || text_[pos_] == '.')) ++pos_;
-        if (start == pos_) return ReflectionTypeSpec{"unknown", {}, {}};
-        ReflectionTypeSpec result;
-        result.name = text_.substr(start, pos_ - start);
-        skipWhitespace();
-        if (result.name == "array" && consume('[')) {
-            const std::size_t sizeStart = pos_;
-            while (pos_ < text_.size() && std::isdigit(static_cast<unsigned char>(text_[pos_]))) ++pos_;
-            if (sizeStart == pos_ || !consume(']')) return ReflectionTypeSpec{"unknown", {}, {}};
-            try {
-                result.fixedSize = std::stoull(text_.substr(sizeStart, pos_ - sizeStart - 1));
-            } catch (...) {
-                return ReflectionTypeSpec{"unknown", {}, {}};
-            }
-            skipWhitespace();
-        }
-        if (consume('<')) {
-            skipWhitespace();
-            if (!consume('>')) {
-                while (true) {
-                    result.args.push_back(parseUnion());
-                    skipWhitespace();
-                    if (consume('>')) break;
-                    if (!consume(',')) return ReflectionTypeSpec{"unknown", {}, {}};
-                }
-            }
-        } else if (result.name == "func" && consume('(')) {
-            while (true) {
-                skipWhitespace();
-                if (consume(')')) break;
-                result.args.push_back(parseUnion());
-                skipWhitespace();
-                if (consume(')')) break;
-                if (!consume(',')) return ReflectionTypeSpec{"unknown", {}, {}};
-            }
-            skipWhitespace();
-            if (!consume(':')) return ReflectionTypeSpec{"unknown", {}, {}};
-            result.args.push_back(parseUnion());
-        }
-        return result;
-    }
-
-    bool consume(char c) {
-        skipWhitespace();
-        if (pos_ >= text_.size() || text_[pos_] != c) return false;
-        ++pos_;
-        return true;
-    }
-
-    void skipWhitespace() {
-        while (pos_ < text_.size() && std::isspace(static_cast<unsigned char>(text_[pos_]))) ++pos_;
-    }
-
-    const std::string& text_;
-    std::size_t pos_{0};
-};
-
-bool reflectiveMatchesSpec(const Value& value, const ReflectionTypeSpec& spec, const Chunk* chunk);
-bool reflectionTypeSpecsEqual(const ReflectionTypeSpec& a, const ReflectionTypeSpec& b);
-
-std::string reflectionTypeSpecName(const ReflectionTypeSpec& spec) {
-    if (!spec.unionMembers.empty()) {
-        std::string out;
-        for (std::size_t i = 0; i < spec.unionMembers.size(); ++i) {
-            if (i) out += " | ";
-            out += reflectionTypeSpecName(spec.unionMembers[i]);
-        }
-        return out;
-    }
-    std::string out = spec.name;
-    if (spec.fixedSize && spec.name == "array") {
-        out = "array[" + std::to_string(*spec.fixedSize) + "]";
-    }
-    if (!spec.args.empty()) {
-        // Function types are handled by reflectiveMatchesSpec directly.
-        if (spec.name == "func") {
-            out += "(";
-            for (std::size_t i = 0; i + 1 < spec.args.size(); ++i) {
-                if (i) out += ",";
-                out += reflectionTypeSpecName(spec.args[i]);
-            }
-            out += "):" + reflectionTypeSpecName(spec.args.back());
-            return out;
-        }
-        out += "<";
-        for (std::size_t i = 0; i < spec.args.size(); ++i) {
-            if (i) out += ",";
-            out += reflectionTypeSpecName(spec.args[i]);
-        }
-        out += ">";
-    }
-    return out;
-}
-
-bool reflectiveObjectMatches(const ObjectRef& object, const std::string& expectedName, const Chunk* chunk) {
-    if (!object) return false;
-    const auto genericPos = expectedName.find('<');
-    const bool expectedIsParameterized = genericPos != std::string::npos;
-    const auto baseName = expectedIsParameterized ? expectedName.substr(0, genericPos) : expectedName;
-
-    // A parameterized reflection type must preserve the concrete instantiated
-    // identity when runtime metadata knows it. Do not accept an erased
-    // GenericBox object merely because its dispatch class is also GenericBox.
-    if (expectedIsParameterized) {
-        if (object->genericTypeName == expectedName) return true;
-        if (object->runtimeType && object->runtimeType->name == expectedName) return true;
-    } else if (object->className == baseName) {
-        return true;
-    }
-    if (!chunk || !object->runtimeType) return false;
-
-    // Preserve compiler assignability for both transitive class inheritance
-    // and interface implementation. Compilation metadata stores the complete
-    // interface closure, including interfaces extended by other interfaces.
-    if (std::find(object->runtimeType->interfaces.begin(),
-                  object->runtimeType->interfaces.end(), baseName) != object->runtimeType->interfaces.end()) {
-        return true;
-    }
-
-    auto current = object->runtimeType;
-    std::size_t guard = 0;
-    while (current && !current->baseClassName.empty() && guard++ < 1024) {
-        if (current->baseClassName == baseName) {
-            if (!expectedIsParameterized) return true;
-            // The parent dispatch name is intentionally erased, so continue to
-            // its runtime metadata to keep Base<int> distinguishable from
-            // Base<string>. But a real subclass instantiation still has to widen
-            // to its parameterized parent - that is the whole point of
-            // `class Some<T> extends Option<T>`. Accept it when the object's own
-            // instantiation carries the same type arguments as the expected
-            // type, which keeps Some<int> -> Option<int> legal while still
-            // rejecting Some<string> -> Option<int>.
-            auto typeArgsOf = [](const std::string& name) -> std::string {
-                const auto open = name.find('<');
-                const auto close = name.rfind('>');
-                if (open == std::string::npos || close == std::string::npos || close <= open) return {};
-                return name.substr(open + 1, close - open - 1);
-            };
-            if (expectedIsParameterized) {
-                const std::string expectedArgs = typeArgsOf(expectedName);
-                const std::string actualArgs = typeArgsOf(object->genericTypeName);
-                if (!expectedArgs.empty() && actualArgs == expectedArgs) return true;
-            }
-        }
-        auto it = chunk->classReflection.find(current->baseClassName);
-        if (it != chunk->classReflection.end() && it->second.runtimeType) {
-            if (expectedIsParameterized && it->second.runtimeType->name == expectedName) return true;
-        }
-        if (it == chunk->classReflection.end()) break;
-        if (std::find(it->second.interfaces.begin(), it->second.interfaces.end(), baseName) != it->second.interfaces.end()) {
-            return true;
-        }
-        current = it->second.runtimeType;
-    }
-    return false;
-}
-
-bool reflectiveMatchesSpec(const Value& value, const ReflectionTypeSpec& spec, const Chunk* chunk) {
-    if (!spec.unionMembers.empty()) {
-        for (const auto& member : spec.unionMembers) if (reflectiveMatchesSpec(value, member, chunk)) return true;
-        return false;
-    }
-    const auto& name = spec.name;
-    if (name == "unknown") return true;
-    if (name == "nil") return std::holds_alternative<std::monostate>(value);
-    if (name == "object") return std::holds_alternative<ObjectRef>(value) || std::holds_alternative<std::monostate>(value);
-    if (name == "int") return std::holds_alternative<std::int64_t>(value);
-    if (name == "double" || name == "float") return std::holds_alternative<double>(value) || std::holds_alternative<std::int64_t>(value);
-    if (name == "string") return std::holds_alternative<std::string>(value);
-    if (name == "bool") return std::holds_alternative<bool>(value);
-    if (name == "void") return std::holds_alternative<std::monostate>(value);
-    if (name == "func") {
-        const auto closure = std::get_if<ClosureRef>(&value);
-        if (!closure || !*closure) return false;
-        if (spec.args.empty()) return true;
-        const std::size_t expectedParamCount = spec.args.size() - 1;
-        if ((*closure)->parameterTypeNames.size() != expectedParamCount) return false;
-        for (std::size_t i = 0; i < expectedParamCount; ++i) {
-            const auto actual = ReflectionTypeParser((*closure)->parameterTypeNames[i]).parse();
-            if (!reflectionTypeSpecsEqual(actual, spec.args[i])) return false;
-        }
-        const auto actualReturn = ReflectionTypeParser((*closure)->returnTypeName.empty() ? "void" : (*closure)->returnTypeName).parse();
-        return reflectionTypeSpecsEqual(actualReturn, spec.args.back());
-    }
-    if (name == "Task") {
-        const auto task = std::get_if<TaskRef>(&value);
-        if (!task || !(*task)) return false;
-        if (spec.args.empty()) return true;
-        if (spec.args.size() != 1) return false;
-        const std::string actualName = (*task)->valueTypeName();
-        // Some native tasks (notably generic Channel.receiveAsync) cannot know
-        // their concrete T at runtime. Preserve the historical permissive
-        // outer-Task check when no concrete value type metadata is available.
-        if (actualName.empty()) return true;
-        const auto actual = ReflectionTypeParser(actualName).parse();
-        return reflectionTypeSpecsEqual(actual, spec.args.front());
-    }
-    if (name == "list" || name == "array" || name == "set") {
-        const auto list = std::get_if<ListRef>(&value);
-        if (!list || !*list) return false;
-        const std::size_t begin = std::min((*list)->frontIndex, (*list)->items.size());
-        const std::size_t size = (*list)->items.size() - begin;
-        if (name == "array" && spec.fixedSize && size != *spec.fixedSize) return false;
-        if (spec.args.empty()) return true;
-        for (std::size_t i = begin; i < (*list)->items.size(); ++i) {
-            if (!reflectiveMatchesSpec((*list)->items[i], spec.args.front(), chunk)) return false;
-        }
-        return true;
-    }
-    if (name == "map") {
-        const auto map = std::get_if<MapRef>(&value);
-        if (!map || !*map) return false;
-        if (spec.args.empty()) return true;
-        if (spec.args.size() != 2) return false;
-        for (const auto& entry : (*map)->entries) {
-            if (!reflectiveMatchesSpec(entry.first, spec.args[0], chunk) || !reflectiveMatchesSpec(entry.second, spec.args[1], chunk)) return false;
-        }
-        return true;
-    }
-    if (name == "Shared") {
-        const auto object = std::get_if<ObjectRef>(&value);
-        if (!object || !reflectiveObjectMatches(*object, "Shared", chunk)) return false;
-        if (spec.args.empty()) return true;
-        const auto it = (*object)->fields.find("__value");
-        return it != (*object)->fields.end() && reflectiveMatchesSpec(it->second, spec.args.front(), chunk);
-    }
-    const std::string expectedObjectName = reflectionTypeSpecName(spec);
-    return reflectiveObjectMatches(std::get_if<ObjectRef>(&value) ? *std::get_if<ObjectRef>(&value) : ObjectRef{}, expectedObjectName, chunk);
-}
-
-bool reflectionTypeSpecsEqual(const ReflectionTypeSpec& a, const ReflectionTypeSpec& b) {
-    if (!a.unionMembers.empty() || !b.unionMembers.empty()) {
-        if (a.unionMembers.size() != b.unionMembers.size()) return false;
-        for (std::size_t i = 0; i < a.unionMembers.size(); ++i) {
-            if (!reflectionTypeSpecsEqual(a.unionMembers[i], b.unionMembers[i])) return false;
-        }
-        return true;
-    }
-    if (a.name != b.name || a.fixedSize != b.fixedSize || a.args.size() != b.args.size()) return false;
-    for (std::size_t i = 0; i < a.args.size(); ++i) {
-        if (!reflectionTypeSpecsEqual(a.args[i], b.args[i])) return false;
-    }
-    return true;
-}
-
-bool reflectiveTypeMatchesName(const Value& value, const std::string& typeName, const Chunk* chunk = nullptr) {
-    return reflectiveMatchesSpec(value, ReflectionTypeParser(typeName).parse(), chunk);
-}
-
-std::string runtimeValueTypeName(const Value& value) {
-    if (std::holds_alternative<std::monostate>(value)) return "void";
-    if (std::holds_alternative<std::int64_t>(value)) return "int";
-    if (std::holds_alternative<double>(value)) return "double";
-    if (std::holds_alternative<std::string>(value)) return "string";
-    if (std::holds_alternative<bool>(value)) return "bool";
-    if (std::holds_alternative<ListRef>(value)) return "list";
-    if (std::holds_alternative<MapRef>(value)) return "map";
-    if (auto obj = std::get_if<ObjectRef>(&value); obj && *obj) return (*obj)->className;
-    if (std::holds_alternative<ClosureRef>(value)) return "func";
-    if (std::holds_alternative<TaskRef>(value)) return "Task";
-    if (std::holds_alternative<ThreadRef>(value)) return "Thread";
-    if (std::holds_alternative<NativeHandleRef>(value)) return "NativeHandle";
-    return "unknown";
-}
-
-bool runtimeAssignableToType(const Value& value, const std::string& typeName, const Chunk* chunk) {
-    const ReflectionTypeSpec spec = ReflectionTypeParser(typeName).parse();
-    // An enum member is stored as its name string, so a runtime type name of
-    // "string" is correct for a parameter or return annotated with the enum.
-    // Without this, every call that passes an enum value fails the assertion
-    // even though the compile-time check already proved it is a valid member.
-    if (chunk && spec.unionMembers.empty() && spec.args.empty() &&
-        std::holds_alternative<std::string>(value)) {
-        auto enumIt = chunk->classReflection.find(spec.name);
-        if (enumIt != chunk->classReflection.end() && enumIt->second.isEnumType) {
-            const auto& members = enumIt->second.enumMembers;
-            if (members.empty()) return true;
-            const auto& member = std::get<std::string>(value);
-            return std::find(members.begin(), members.end(), member) != members.end();
-        }
-    }
-    if (!spec.unionMembers.empty()) return reflectiveMatchesSpec(value, spec, chunk);
-    if (spec.name == "double" && std::holds_alternative<std::int64_t>(value)) return true;
-    if (std::holds_alternative<std::monostate>(value)) {
-        const std::string base = spec.name;
-        return base == "string" || base == "list" || base == "map" || base == "set" ||
-               base == "array" || base == "func" || base == "object" || base == "Task" ||
-               base.find('<') != std::string::npos;
-    }
-    return reflectiveMatchesSpec(value, spec, chunk);
-}
-
-bool reflectiveTypeMatches(const Value& value, const DispatchType& expected) {
-    switch (expected.kind) {
-        case DispatchTypeKind::INT: return reflectiveTypeMatchesName(value, "int");
-        case DispatchTypeKind::DOUBLE: return reflectiveTypeMatchesName(value, "double");
-        case DispatchTypeKind::STRING: return reflectiveTypeMatchesName(value, "string");
-        case DispatchTypeKind::BOOL: return reflectiveTypeMatchesName(value, "bool");
-        case DispatchTypeKind::VOID_TYPE: return reflectiveTypeMatchesName(value, "void");
-        case DispatchTypeKind::LIST: return reflectiveTypeMatchesName(value, "list");
-        case DispatchTypeKind::ARRAY: return reflectiveTypeMatchesName(value, "array");
-        case DispatchTypeKind::SET: return reflectiveTypeMatchesName(value, "set");
-        case DispatchTypeKind::MAP: return reflectiveTypeMatchesName(value, "map");
-        case DispatchTypeKind::FUNCTION: return reflectiveTypeMatchesName(value, "func");
-        case DispatchTypeKind::GENERIC_OBJECT: return reflectiveTypeMatchesName(value, "object");
-        case DispatchTypeKind::OBJECT: return reflectiveTypeMatchesName(value, expected.className);
-    }
-    return false;
-}
-}
 
 namespace {
 bool isNumeric(const Value& v) { return isNumericValue(v); } // local alias, keeps call sites below unchanged
@@ -480,6 +134,87 @@ void VM::appendNativeRoots(std::vector<Value>& roots) const {
     for (const auto& frame : nativeRootFrames_) {
         roots.insert(roots.end(), frame.begin(), frame.end());
     }
+}
+
+ExecutionState::CallFrame VM::makeCallFrame(const Chunk& chunk, const FunctionInfo& fn,
+                                              const std::vector<Value>& args,
+                                              const std::optional<Value>& receiver,
+                                              const ClosureRef& closure) const {
+    if (args.size() != fn.paramNames.size()) {
+        throw std::runtime_error("VM: function '" + fn.name + "' argument count mismatch");
+    }
+    ExecutionState::CallFrame frame;
+    frame.functionName = fn.name;
+    frame.ownerClassName = fn.ownerClassName;
+    frame.ownedLocalNames = fn.ownedLocalNames;
+    if (closure) {
+        frame.locals = closure->captured;
+        frame.activeClosure = closure;
+        frame.typeBindings = closure->typeBindings;
+    } else if (receiver) {
+        frame.locals["this"] = *receiver;
+        if (const auto* object = std::get_if<ObjectRef>(&*receiver); object && *object) {
+            frame.typeBindings = receiverTypeBindings(**object, chunk, fn.ownerClassName);
+        }
+    } else if (state_.inFunction() && state_.currentFrame().ownerClassName == fn.ownerClassName) {
+        frame.typeBindings = state_.typeBindings();
+    }
+    frame.returnTypeName = substituteTypeParams(fn.returnTypeName, frame.typeBindings);
+    RuntimeTypeCheck types(&chunk);
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        const std::string expected = i < fn.parameterTypeNames.size()
+            ? substituteTypeParams(fn.parameterTypeNames[i], frame.typeBindings) : "unknown";
+        if (!expected.empty() && !types.check(args[i], expected)) {
+            throw std::runtime_error("type assertion failed for argument " + std::to_string(i + 1) +
+                                     ": expected " + expected + ", got " + runtimeValueTypeName(args[i]));
+        }
+        frame.locals[fn.paramNames[i]] = args[i];
+    }
+    types.commit();
+    return frame;
+}
+
+VM::ProgramScope::ProgramScope(VM& vm, const Chunk& chunk) : vm_(vm), previous_(vm.activeChunk_) {
+    vm_.activePrograms_.push_back(&chunk);
+    vm_.activeChunk_ = &chunk;
+    previousJoins_ = DeferredThreadJoins::bind(&vm_.threadJoins_);
+}
+
+VM::ProgramScope::~ProgramScope() {
+    DeferredThreadJoins::bind(previousJoins_);
+    vm_.activeChunk_ = previous_;
+    vm_.activePrograms_.pop_back();
+}
+
+GCRoots VM::gcRoots() const {
+    GCRoots roots;
+    state_.appendGCRoots(roots.values);
+    appendNativeRoots(roots.values);
+    roots.programs = activePrograms_;
+    if (entryTask_) roots.values.emplace_back(entryTask_);
+    if (asyncInvocation_) {
+        asyncInvocation_->frame.appendGCRoots(roots.values);
+        if (asyncInvocation_->chunk) roots.programs.push_back(asyncInvocation_->chunk.get());
+        if (asyncInvocation_->task) roots.values.emplace_back(asyncInvocation_->task);
+        if (asyncInvocation_->awaitedTask) roots.values.emplace_back(asyncInvocation_->awaitedTask);
+    }
+    appendExceptionRoots(pendingResumeException_, roots.values);
+    return roots;
+}
+
+void VM::drainThreadJoins() {
+    if (threadJoins_.empty()) return;
+    BlockingNativeCall blocked(this);
+    threadJoins_.drain();
+}
+
+void VM::beginBlockingNativeCall() {
+    GCSafepointCoordinator::instance().beginBlockingNative(gcParticipantId_, gcRoots());
+}
+
+void VM::endBlockingNativeCall() const {
+    if (gcParticipantId_ != 0)
+        GCSafepointCoordinator::instance().endBlockingNative(gcParticipantId_);
 }
 
 Value VM::binaryArith(OpCode op, const Value& a, const Value& b) const {
@@ -732,7 +467,27 @@ bool VM::rangeContinue(const Value& current, const Value& end, const Value& step
     throw std::runtime_error("for-loop step cannot be 0 (the loop would never end)");
 }
 
+void VM::pumpSchedulerUntilTerminal(const TaskRef& task) {
+    // The scheduler is cooperative: pump ready async frames while the task is
+    // pending so synchronous code cannot deadlock by blocking the very
+    // scheduler that owns the task. If another executor later completes the
+    // task externally (a native async op finishing on a worker thread enqueues
+    // our continuation), keep pumping rather than sleeping indefinitely while
+    // owning the scheduler that must resume it.
+    pushNativeRoots({task});
+    struct TaskRootGuard {
+        VM* vm;
+        ~TaskRootGuard() { vm->popNativeRoots(); }
+    } taskRootGuard{this};
+    BlockingNativeCall blocked(this);
+    while (!task->isTerminal()) {
+        if (scheduler_->runOne()) continue;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
 int VM::run(const Chunk& chunk, const std::vector<std::string>& programArgs) {
+    ProgramScope program(*this, chunk);
     const ExecuteStatus result = execute(chunk, 0, false, programArgs, nullptr);
     if (result == ExecuteStatus::Suspended) {
         throw std::runtime_error("VM: top-level execution unexpectedly suspended");
@@ -741,65 +496,38 @@ int VM::run(const Chunk& chunk, const std::vector<std::string>& programArgs) {
         // `main` is an async func and suspended on an await. Draining only the
         // frames that are ready right now is not enough: a native async
         // operation completes on a worker thread and enqueues our continuation
-        // later. Pump the scheduler until the entry task settles, the same way
-        // TaskBlock does, so the rest of main actually runs.
-        while (!entryTask_->isTerminal()) {
-            if (scheduler_->runOne()) continue;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        // later. Pump the scheduler until the entry task settles so the rest of
+        // main actually runs.
+        pumpSchedulerUntilTerminal(entryTask_);
     }
-    scheduler_->runUntilIdle();
-    std::vector<Value> roots;
-    state_.appendGCRoots(roots);
-    if (asyncInvocation_) {
-        roots.insert(roots.end(), asyncInvocation_->args.begin(), asyncInvocation_->args.end());
-        if (asyncInvocation_->receiver) roots.push_back(*asyncInvocation_->receiver);
-        if (asyncInvocation_->task) {
-            Value taskValue = asyncInvocation_->task;
-            roots.push_back(std::move(taskValue));
-        }
+    {
+        BlockingNativeCall blocked(this);
+        scheduler_->runUntilIdle();
     }
-    appendNativeRoots(roots);
-    if (pendingResumeException_) {
-        try {
-            std::rethrow_exception(pendingResumeException_);
-        } catch (const ZlThrownException& e) {
-            if (e.value()) roots.emplace_back(e.value());
-        } catch (...) {
-            // Native/runtime exceptions do not own a GC-managed ZL value.
-        }
-    }
-    (void)TracingGC::instance().collect(roots);
+    // The process-wide heap must never be collected from just this VM's roots
+    // while other VMs/threads are still running.
+    GCSafepointCoordinator::instance().poll(gcParticipantId_, gcRoots());
+    drainThreadJoins();
+    // An async entry task is an entry-point result, not an ignored background
+    // task. Propagate failure/cancellation with a freshly pinned exception.
+    if (entryTask_) (void)entryTask_->observe();
     return 0;
 }
 
 VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stopAtReturn,
                 const std::vector<std::string>& programArgs, Value* returnValue) {
-    const Chunk* previousChunk = activeChunk_;
-    activeChunk_ = &chunk;
+    // Re-entrant native callbacks must retain both the callee's program and
+    // their caller's program; neither is an independent global GC pin.
+    ProgramScope program(*this, chunk);
     const std::size_t initialCallDepth = state_.callDepth();
     std::size_t ip = startIp;
 
     std::size_t instructionsSinceSafePoint = 0;
     while (true) {
       try {
+        drainThreadJoins();
         if (++instructionsSinceSafePoint >= 128 || TracingGC::instance().shouldCollect()) {
-            std::vector<Value> roots;
-            state_.appendGCRoots(roots);
-            if (asyncInvocation_) {
-                roots.insert(roots.end(), asyncInvocation_->args.begin(), asyncInvocation_->args.end());
-                if (asyncInvocation_->receiver) roots.push_back(*asyncInvocation_->receiver);
-                if (asyncInvocation_->task) roots.emplace_back(asyncInvocation_->task);
-            }
-            appendNativeRoots(roots);
-            if (pendingResumeException_) {
-                try {
-                    std::rethrow_exception(pendingResumeException_);
-                } catch (const ZlThrownException& e) {
-                    if (e.value()) roots.emplace_back(e.value());
-                } catch (...) {}
-            }
-            GCSafepointCoordinator::instance().poll(gcParticipantId_, std::move(roots));
+            GCSafepointCoordinator::instance().poll(gcParticipantId_, gcRoots());
             instructionsSinceSafePoint = 0;
         }
         if (ip >= chunk.code.size()) throw std::runtime_error("VM: instruction pointer out of bounds");
@@ -942,7 +670,6 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 const auto& natives = nativeFunctionTable();
                 if (instr.operand >= natives.size()) throw std::runtime_error("VM: native func index out of bounds");
                 const NativeFunction& native = natives[instr.operand];
-                setCurrentNativeVm(this);
                 const std::size_t arity = native.arity();
                 std::vector<Value> args(arity);
                 for (std::size_t i = 0; i < arity; ++i) {
@@ -951,10 +678,28 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 pushNativeRoots(args);
                 struct NativeRootGuard {
                     VM* vm;
-                    ~NativeRootGuard() { vm->popNativeRoots(); }
-                } nativeRootGuard{this};
+                    VM* previous;
+                    ~NativeRootGuard() {
+                        setCurrentNativeVm(previous);
+                        vm->popNativeRoots();
+                    }
+                } nativeRootGuard{this, setCurrentNativeVm(this)};
                 try {
-                    state_.push(native.fn(args));
+                    Value result = native.fn(args);
+                    if (instr.operand2 != 0) {
+                        if (instr.operand2 > chunk.names.size())
+                            throw std::runtime_error("VM: native factory type index out of bounds");
+                        initializeObjectType(result,
+                            substituteTypeParams(chunk.names[instr.operand2 - 1], state_.typeBindings()), chunk);
+                    }
+                    const auto signature = findNativeSignature(native.qualifiedName);
+                    if (signature && !(*signature)->returnClassName.empty()) {
+                        const auto bindings = nativeTypeBindings(**signature, args.empty() ? "unknown" : runtimeValueTypeName(args.front()));
+                        RuntimeTypeCheck types(&chunk);
+                        types.require(result, substituteTypeParams((*signature)->returnClassName, bindings));
+                        types.commit();
+                    }
+                    state_.push(result);
                 } catch (const ZlThrownException&) {
                     throw;
                 } catch (const SystemExitException&) {
@@ -976,20 +721,11 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 if (!taskRef || !(*taskRef)) {
                     throw std::runtime_error("VM: Task.block() expects a Task value");
                 }
-                // The current scheduler is cooperative. Pump ready async frames
-                // while a task is pending so synchronous code cannot deadlock by
-                // blocking the very scheduler that owns the task. If another
-                // executor later completes the task externally, observe()
-                // safely waits on the task condition variable.
-                while (!(*taskRef)->isTerminal()) {
-                    if (scheduler_->runOne()) continue;
-                    // An external/native async operation may complete on another
-                    // thread and enqueue our continuation. Keep pumping rather
-                    // than entering observe() immediately, otherwise the current
-                    // synchronous caller could sleep forever while owning the VM
-                    // scheduler that must resume the blocked task.
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
+                // Pump the cooperative scheduler until the task settles; once
+                // terminal, observe() collects its result (and safely waits on
+                // the task condition variable if an external executor is still
+                // finalising it).
+                pumpSchedulerUntilTerminal(*taskRef);
                 state_.push((*taskRef)->observe());
                 ++ip;
                 break;
@@ -1011,20 +747,9 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 Value expectedValue = state_.pop();
                 Value value = state_.pop();
                 auto name = std::get_if<std::string>(&expectedValue);
-                bool matches = false;
-                if (name) {
-                    if (*name == "int") matches = std::holds_alternative<std::int64_t>(value);
-                    else if (*name == "double") matches = std::holds_alternative<double>(value) || std::holds_alternative<std::int64_t>(value);
-                    else if (*name == "string") matches = std::holds_alternative<std::string>(value);
-                    else if (*name == "bool") matches = std::holds_alternative<bool>(value);
-                    else if (*name == "func") matches = std::holds_alternative<ClosureRef>(value);
-                    else if (*name == "list" || *name == "array" || *name == "set") matches = std::holds_alternative<ListRef>(value);
-                    else if (*name == "map") matches = std::holds_alternative<MapRef>(value);
-                    else if (*name == "void") matches = std::holds_alternative<std::monostate>(value);
-                    else if (auto obj = std::get_if<ObjectRef>(&value); obj && *obj) {
-                        matches = reflectiveObjectMatches(*obj, *name, activeChunk_);
-                    }
-                }
+                RuntimeTypeCheck types(&chunk);
+                const bool matches = name && types.check(value, substituteTypeParams(*name, state_.typeBindings()), RuntimeTypeCheck::Mode::Pattern);
+                if (matches) types.commit();
                 state_.push(matches);
                 ++ip;
                 break;
@@ -1035,10 +760,12 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 if (instr.operand >= chunk.names.size()) {
                     throw std::runtime_error("VM: AssertType name index out of bounds");
                 }
-                const std::string& expected = chunk.names[instr.operand];
-                if (!runtimeAssignableToType(value, expected, &chunk)) {
+                const std::string expected = substituteTypeParams(chunk.names[instr.operand], state_.typeBindings());
+                RuntimeTypeCheck types(&chunk);
+                if (!types.check(value, expected)) {
                     throw std::runtime_error("type assertion failed: expected " + expected + ", got " + runtimeValueTypeName(value));
                 }
+                types.commit();
                 state_.push(value);
                 ++ip;
                 break;
@@ -1092,6 +819,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     throw std::runtime_error("VM: async func cannot await its own Task");
                 }
                 asyncInvocation_->resumeIp = ip + 1;
+                asyncInvocation_->awaitedTask = awaitedTask;
                 auto vmSelf = shared_from_this();
                 asyncInvocation_->task->onCancellation([vmSelf]() {
                     vmSelf->scheduler_->enqueue(std::make_shared<AsyncFrame>([vmSelf]() {
@@ -1100,30 +828,10 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 });
                 awaitedTask->then([vmSelf, awaitedTask]() {
                     vmSelf->scheduler_->enqueue(std::make_shared<AsyncFrame>([vmSelf, awaitedTask]() {
-                        // Cancellation of the outer task can race with completion
-                        // of the awaited task. If cancellation already finished
-                        // the async invocation, this continuation is stale and
-                        // must not mutate the dead VM state or resume a terminal task.
-                        if (!vmSelf->asyncInvocation_) return;
-                        try {
-                            if (!vmSelf->asyncInvocation_) return;
-                            if (awaitedTask->status() == TaskStatus::Succeeded) {
-                                vmSelf->state_.push(awaitedTask->observe());
-                            } else {
-                                try {
-                                    (void)awaitedTask->observe();
-                                } catch (...) {
-                                    vmSelf->pendingResumeException_ = std::current_exception();
-                                }
-                            }
-                            if (vmSelf->asyncInvocation_) vmSelf->resumeAsyncInvocation();
-                        } catch (...) {
-                            if (vmSelf->asyncInvocation_) {
-                                auto task = vmSelf->asyncInvocation_->task;
-                                vmSelf->asyncInvocation_.reset();
-                                task->fail(std::current_exception());
-                            }
-                        }
+                        // Resume owns reactivation and restores the awaited value
+                        // only after the collector has released this parked VM.
+                        if (vmSelf->asyncInvocation_ && vmSelf->asyncInvocation_->awaitedTask == awaitedTask)
+                            vmSelf->resumeAsyncInvocation();
                     }));
                 });
                 return ExecuteStatus::Suspended;
@@ -1133,62 +841,21 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 if (instr.operand >= chunk.functions.size())
                     throw std::runtime_error("VM: func index out of bounds");
                 const FunctionInfo& fn = chunk.functions[instr.operand];
-                std::size_t paramCount = fn.paramNames.size();
-
-                std::vector<Value> args(paramCount);
-                for (std::size_t i = 0; i < paramCount; ++i) {
-                    args[paramCount - 1 - i] = state_.pop();
+                std::vector<Value> args(fn.paramNames.size());
+                for (std::size_t i = args.size(); i > 0; --i) args[i - 1] = state_.pop();
+                std::optional<Value> receiver;
+                if (!fn.isStatic) {
+                    if (const Value* self = state_.findLocal("this")) receiver = *self;
                 }
-                for (std::size_t i = 0; i < paramCount && i < fn.parameterTypeNames.size(); ++i) {
-                    const auto& expected = fn.parameterTypeNames[i];
-                    if (!expected.empty() && expected != "unknown" && !runtimeAssignableToType(args[i], expected, &chunk)) {
-                        throw std::runtime_error("type assertion failed for argument " + std::to_string(i + 1) + ": expected " + expected + ", got " + runtimeValueTypeName(args[i]));
-                    }
-                }
+                auto frame = makeCallFrame(chunk, fn, args, receiver);
                 if (fn.isAsync) {
-                    auto task = std::make_shared<RuntimeTaskState>(fn.returnTypeName.empty() ? "void" : fn.returnTypeName);
-                    auto chunkRef = std::make_shared<Chunk>(chunk);
-                    std::optional<Value> receiver;
-                    if (state_.inFunction()) {
-                        auto& callerLocals = state_.currentFrame().locals;
-                        auto thisIt = callerLocals.find("this");
-                        if (thisIt != callerLocals.end()) receiver = thisIt->second;
-                    }
-                    auto child = std::make_shared<VM>(scheduler_);
-                    child->beginAsyncInvocation(chunkRef, instr.operand, std::move(args), receiver, task);
-                    scheduler_->enqueue(std::make_shared<AsyncFrame>([child]() mutable { child->resumeAsyncInvocation(); }));
+                    auto task = scheduleAsyncInvocation(std::make_shared<Chunk>(chunk), instr.operand, std::move(frame));
                     if (!state_.inFunction() && !entryTask_) entryTask_ = task;
-                    state_.push(Value{std::move(task)});
-                    ip++;
+                    state_.push(task);
+                    ++ip;
                     break;
                 }
-
-                ExecutionState::CallFrame frame;
                 frame.returnIp = ip + 1;
-                frame.functionName = fn.name;
-                frame.ownedLocalNames = fn.ownedLocalNames;
-                // `foo(x)` (a bare same-class call, as opposed to
-                // `this.foo(x)`) is, by construction, always made from
-                // inside some method/constructor of some class - so the
-                // calling frame's own `this` (if it has one) needs to
-                // propagate into the callee's frame, exactly like
-                // InvokeMethod/InvokeSuper already do, or `this.field`
-                // reads/writes and further bare self-calls inside the
-                // callee crash with "undefined variable 'this'". The one
-                // caller that legitimately has no `this` to propagate is
-                // the program's own top-level entry call into main() -
-                // state_.callStack_ is empty there, so this is a no-op for it,
-                // which is correct: main() runs with no receiver object.
-                if (state_.inFunction()) {
-                    auto& callerLocals = state_.currentFrame().locals;
-                    auto thisIt = callerLocals.find("this");
-                    if (thisIt != callerLocals.end()) {
-                        frame.locals["this"] = thisIt->second;
-                    }
-                }
-                for (std::size_t i = 0; i < paramCount; ++i) {
-                    frame.locals[fn.paramNames[i]] = args[i];
-                }
                 state_.enterFrame(std::move(frame));
                 ip = fn.entryAddress;
                 break;
@@ -1201,8 +868,10 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 auto box = makeGCClosure();
                 box->functionName = fn.name;
                 box->paramNames = fn.paramNames;
-                box->parameterTypeNames = fn.parameterTypeNames;
-                box->returnTypeName = fn.returnTypeName;
+                if (fn.capturesEvaluationScope) box->typeBindings = state_.typeBindings();
+                for (const auto& type : fn.parameterTypeNames)
+                    box->parameterTypeNames.push_back(substituteTypeParams(type, box->typeBindings));
+                box->returnTypeName = substituteTypeParams(fn.returnTypeName, box->typeBindings);
                 box->isAsync = fn.isAsync;
                 box->isNative = fn.isNative;
                 box->entryAddress = fn.entryAddress;
@@ -1230,57 +899,27 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
             }
 
             case OpCode::CallValue: {
-                std::size_t argCount = instr.operand2;
+                const std::size_t argCount = instr.operand2;
                 Value callee = state_.pop();
                 auto* closureRef = std::get_if<ClosureRef>(&callee);
-                if (!closureRef || !(*closureRef)) {
-                    throw std::runtime_error("VM: attempted to call a non-func value");
+                if (!closureRef || !*closureRef || !(*closureRef)->chunk ||
+                    (*closureRef)->functionIndex >= (*closureRef)->chunk->functions.size()) {
+                    throw std::runtime_error("VM: attempted to call an invalid func value");
                 }
                 const ClosureBox& closure = **closureRef;
-                if (closure.paramNames.size() != argCount) {
-                    throw std::runtime_error(
-                        "VM: closure expects " + std::to_string(closure.paramNames.size()) +
-                        " argument(s), got " + std::to_string(argCount));
-                }
-
+                const auto& fn = closure.chunk->functions[closure.functionIndex];
                 std::vector<Value> args(argCount);
-                for (std::size_t i = 0; i < argCount; ++i) {
-                    args[argCount - 1 - i] = state_.pop();
-                }
-                for (std::size_t i = 0; i < argCount && i < closure.parameterTypeNames.size(); ++i) {
-                    const auto& expected = closure.parameterTypeNames[i];
-                    if (!expected.empty() && expected != "unknown" && !runtimeAssignableToType(args[i], expected, closure.chunk.get())) {
-                        throw std::runtime_error("type assertion failed for argument " + std::to_string(i + 1) + ": expected " + expected + ", got " + runtimeValueTypeName(args[i]));
-                    }
-                }
-
-                if (closure.isAsync) {
-                    auto task = std::make_shared<RuntimeTaskState>(closure.returnTypeName.empty() ? "void" : closure.returnTypeName);
-                    auto child = std::make_shared<VM>(scheduler_);
-                    auto chunkRef = std::make_shared<Chunk>(*closure.chunk);
-                    child->beginAsyncInvocation(chunkRef, closure.functionIndex, std::move(args), std::nullopt, task);
-                    scheduler_->enqueue(std::make_shared<AsyncFrame>([child]() mutable { child->resumeAsyncInvocation(); }));
-                    state_.push(Value{std::move(task)});
-                    ip++;
+                for (std::size_t i = argCount; i > 0; --i) args[i - 1] = state_.pop();
+                auto frame = makeCallFrame(*closure.chunk, fn, args, std::nullopt, *closureRef);
+                if (fn.isAsync) {
+                    auto task = scheduleAsyncInvocation(closure.chunk, closure.functionIndex, std::move(frame));
+                    state_.push(task);
+                    ++ip;
                     break;
                 }
-
-                ExecutionState::CallFrame frame;
                 frame.returnIp = ip + 1;
-                frame.functionName = "<lambda>";
-                if (closure.functionIndex < closure.chunk->functions.size())
-                    frame.ownedLocalNames = closure.chunk->functions[closure.functionIndex].ownedLocalNames;
-                // The closure's OWN captured-scope snapshot, not the
-                // CALLER's locals - this is what makes capture-by-value
-                // actually stick (the lambda body sees the scope it was
-                // CREATED in, not the scope it's CALLED from).
-                frame.locals = closure.captured;
-                for (std::size_t i = 0; i < argCount; ++i) {
-                    frame.locals[closure.paramNames[i]] = args[i];
-                }
-                frame.activeClosure = *closureRef; // see Return's write-back
                 state_.enterFrame(std::move(frame));
-                ip = closure.entryAddress;
+                ip = fn.entryAddress;
                 break;
             }
 
@@ -1289,16 +928,11 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     throw std::runtime_error("VM: invalid class-name index");
                 const std::string& className = chunk.names[instr.operand];
                 Value obj = makeEmptyObject(className);
-                if (std::holds_alternative<ObjectRef>(obj)) {
-                    auto objectRef = std::get<ObjectRef>(obj);
-                    auto metaIt = chunk.classReflection.find(className);
-                    if (metaIt != chunk.classReflection.end()) {
-                        objectRef->runtimeType = metaIt->second.runtimeType;
-                    }
-                    if (instr.operand3 != Chunk::INVALID_FUNCTION_INDEX && instr.operand3 < chunk.names.size()) {
-                        objectRef->genericTypeName = chunk.names[instr.operand3];
-                    }
-                }
+                if (instr.operand3 > chunk.names.size())
+                    throw std::runtime_error("VM: object type index out of bounds");
+                const std::string typeName = instr.operand3 != 0
+                    ? substituteTypeParams(chunk.names[instr.operand3 - 1], state_.typeBindings()) : className;
+                initializeObjectType(obj, typeName, chunk);
                 state_.push(std::move(obj));
                 ip++;
                 break;
@@ -1343,13 +977,16 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                         break;
                     }
                     if (state->status == StaticFieldState::Status::Failed) {
-                        std::rethrow_exception(state->failure);
+                        state->failure.rethrow();
                     }
                     if (state->status == StaticFieldState::Status::Initializing) {
                         if (state->ownerThread == std::this_thread::get_id()) {
                             throw std::runtime_error("StaticInitializationError: re-entrant initialization of '" + key + "'");
                         }
-                        state->cv.wait(lock, [&] { return state->status != StaticFieldState::Status::Initializing; });
+                        {
+                            BlockingNativeCall blocked(this);
+                            state->cv.wait(lock, [&] { return state->status != StaticFieldState::Status::Initializing; });
+                        }
                         continue;
                     }
                     state->status = StaticFieldState::Status::Initializing;
@@ -1367,7 +1004,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     } catch (...) {
                         auto failure = std::current_exception();
                         lock.lock();
-                        state->failure = failure;
+                        state->failure = StoredException(failure);
                         state->status = StaticFieldState::Status::Failed;
                         state->ownerThread = {};
                         lock.unlock();
@@ -1384,7 +1021,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 if (instr.operand >= chunk.names.size() || instr.operand2 >= chunk.names.size())
                     throw std::runtime_error("VM: invalid static field metadata index");
                 const std::string key = chunk.names[instr.operand] + "." + chunk.names[instr.operand2];
-                auto value = state_.pop();
+                auto value = state_.top(); // retain the pending write in roots across native waits
                 auto metaIt = chunk.staticFields.find(key);
                 if (metaIt == chunk.staticFields.end()) throw std::runtime_error("VM: unknown static field '" + key + "'");
                 std::shared_ptr<StaticFieldState> state;
@@ -1395,20 +1032,30 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     state = slot;
                 }
                 std::unique_lock<std::mutex> lock(state->mutex);
-                if (state->status == StaticFieldState::Status::Initializing && state->ownerThread != std::this_thread::get_id())
+                if (state->status == StaticFieldState::Status::Initializing && state->ownerThread != std::this_thread::get_id()) {
+                    BlockingNativeCall blocked(this);
                     state->cv.wait(lock, [&] { return state->status != StaticFieldState::Status::Initializing; });
-                state->value = value;
+                }
+                Value replacement = value;
+                {
+                    RuntimeTypeCheck types(&chunk);
+                    types.require(value, runtimeFieldType(chunk, chunk.names[instr.operand], chunk.names[instr.operand2]));
+                    std::swap(state->value, replacement);
+                    types.commit();
+                }
                 state->status = StaticFieldState::Status::Initialized;
-                state->failure = nullptr;
+                state->failure = {};
                 state->ownerThread = {};
                 lock.unlock();
                 state->cv.notify_all();
+                state_.pop();
                 state_.push(std::move(value));
                 ip++;
                 break;
             }
 
             case OpCode::GetIndex: {
+                RuntimeTypeCheck access(&chunk);
                 Value indexValue = state_.pop();
                 Value object = state_.pop();
                 ListRef list;
@@ -1433,6 +1080,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
             }
 
             case OpCode::GetField: {
+                RuntimeTypeCheck access(&chunk);
                 if (instr.operand >= chunk.names.size())
                     throw std::runtime_error("VM: field-name index out of bounds");
                 const std::string& fieldName = chunk.names[instr.operand];
@@ -1465,7 +1113,13 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     throw std::runtime_error("VM: cannot write field '" + fieldName + "' of non-object (or nil)");
                 }
                 
-                (*objRef)->fields[fieldName] = value;
+                Value replacement = value; // displaced resources die after the leaf type lock
+                {
+                    RuntimeTypeCheck types(&chunk);
+                    types.require(value, runtimeFieldType(chunk, (*objRef)->className, fieldName, objRef->get()));
+                    std::swap((*objRef)->fields[fieldName], replacement);
+                    types.commit();
+                }
                 state_.push(value); // assignment leaves the value on the stack
                 ip++;
                 break;
@@ -1504,32 +1158,14 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                         "VM: method '" + fn.name + "' expects " + std::to_string(fn.paramNames.size()) +
                         " argument(s), got " + std::to_string(argCount));
                 }
-                for (std::size_t i = 0; i < argCount && i < fn.parameterTypeNames.size(); ++i) {
-                    const auto& expected = fn.parameterTypeNames[i];
-                    if (!expected.empty() && expected != "unknown" && !runtimeAssignableToType(args[i], expected, &chunk)) {
-                        throw std::runtime_error("type assertion failed for argument " + std::to_string(i + 1) + ": expected " + expected + ", got " + runtimeValueTypeName(args[i]));
-                    }
-                }
-
+                auto frame = makeCallFrame(chunk, fn, args, object);
                 if (fn.isAsync) {
-                    auto task = std::make_shared<RuntimeTaskState>(fn.returnTypeName.empty() ? "void" : fn.returnTypeName);
-                    auto chunkRef = std::make_shared<Chunk>(chunk);
-                    auto child = std::make_shared<VM>(scheduler_);
-                    child->beginAsyncInvocation(chunkRef, functionIndex, std::move(args), object, task);
-                    scheduler_->enqueue(std::make_shared<AsyncFrame>([child]() mutable { child->resumeAsyncInvocation(); }));
-                    state_.push(Value{std::move(task)});
-                    ip++;
+                    auto task = scheduleAsyncInvocation(std::make_shared<Chunk>(chunk), functionIndex, std::move(frame));
+                    state_.push(task);
+                    ++ip;
                     break;
                 }
-
-                ExecutionState::CallFrame frame;
                 frame.returnIp = ip + 1;
-                frame.functionName = fn.name;
-                frame.ownedLocalNames = fn.ownedLocalNames;
-                frame.locals["this"] = object;
-                for (std::size_t i = 0; i < argCount; ++i) {
-                    frame.locals[fn.paramNames[i]] = args[i];
-                }
                 state_.enterFrame(std::move(frame));
                 ip = fn.entryAddress;
                 break;
@@ -1557,29 +1193,14 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                         " argument(s), got " + std::to_string(argCount));
                 }
 
+                auto frame = makeCallFrame(chunk, fn, args, object);
                 if (fn.isAsync) {
-                    auto task = std::make_shared<RuntimeTaskState>(fn.returnTypeName.empty() ? "void" : fn.returnTypeName);
-                    auto chunkRef = std::make_shared<Chunk>(chunk);
-                    auto child = std::make_shared<VM>(scheduler_);
-                    child->beginAsyncInvocation(chunkRef, instr.operand, std::move(args), object, task);
-                    scheduler_->enqueue(std::make_shared<AsyncFrame>([child]() mutable { child->resumeAsyncInvocation(); }));
-                    state_.push(Value{std::move(task)});
-                    ip++;
+                    auto task = scheduleAsyncInvocation(std::make_shared<Chunk>(chunk), instr.operand, std::move(frame));
+                    state_.push(task);
+                    ++ip;
                     break;
                 }
-
-                ExecutionState::CallFrame frame;
                 frame.returnIp = ip + 1;
-                frame.functionName = fn.name;
-                frame.ownedLocalNames = fn.ownedLocalNames;
-                // 'this' still refers to the SAME receiver as the calling
-                // method/constructor - super.method() runs the parent's
-                // implementation against the full (child) object, exactly
-                // like Java.
-                frame.locals["this"] = object;
-                for (std::size_t i = 0; i < argCount; ++i) {
-                    frame.locals[fn.paramNames[i]] = args[i];
-                }
                 state_.enterFrame(std::move(frame));
                 ip = fn.entryAddress;
                 break;
@@ -1589,6 +1210,15 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 Value resultValue = state_.pop();
                 if (!state_.inFunction()) {
                     throw std::runtime_error("'return' used outside of a func");
+                }
+                const auto& expected = state_.currentFrame().returnTypeName;
+                {
+                    RuntimeTypeCheck types(&chunk);
+                    if (!expected.empty() && !types.check(resultValue, expected)) {
+                        throw std::runtime_error("type assertion failed for return: expected " + expected +
+                                                 ", got " + runtimeValueTypeName(resultValue));
+                    }
+                    types.commit();
                 }
                 ExecutionState::CallFrame finishedFrame = state_.leaveFrame();
                 if (stopAtReturn && state_.callDepth() < initialCallDepth) {
@@ -1661,14 +1291,22 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 return ExecuteStatus::Completed;
         }
       } catch (const ZlThrownException& e) {
+          // execute() is re-entrant: a nested run (a closure driven from a
+          // native, started at initialCallDepth) must only consume handlers
+          // pushed within THAT nested run. Handlers owned by the caller frame
+          // (callStackSize < initialCallDepth) belong to the outer run; letting
+          // the nested run catch on them resumes the caller's catchIp against
+          // the closure's chunk and re-runs the caller (the exception-in-
+          // withLock double-continuation bug). If no in-scope handler matches,
+          // rethrow so the outer run handles it in its own chunk.
           bool matched = false;
           ExecutionState::Handler h{};
-          while (state_.hasHandler()) {
+          while (state_.hasHandler() && state_.topHandlerCallDepth() >= initialCallDepth) {
               h = state_.popHandler();
               if (h.catchClassName.empty() ||
                   e.value()->className == h.catchClassName ||
-                  chunk.classReflection.count(e.value()->className) &&
-                      isSubclass(chunk, e.value()->className, h.catchClassName)) {
+                  (chunk.classReflection.count(e.value()->className) &&
+                      isSubclass(chunk, e.value()->className, h.catchClassName))) {
                   matched = true;
                   break;
               }
@@ -1685,7 +1323,9 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
           }
           ip = h.catchIp;
       } catch (const std::runtime_error& e) {
-          if (!state_.hasHandler()) throw;
+          // Same nested-run scoping as the ZlThrownException handler above:
+          // only a catch-all handler owned by this (nested) run applies.
+          if (!state_.hasHandler() || state_.topHandlerCallDepth() < initialCallDepth) throw;
           ExecutionState::Handler h = state_.popHandler();
           if (!h.catchClassName.empty()) throw;
           state_.unwindTo(h);
@@ -1696,15 +1336,34 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
     }
 }
 
-void VM::beginAsyncInvocation(std::shared_ptr<const Chunk> chunk, std::size_t functionIndex,
-                               std::vector<Value> args, std::optional<Value> receiver, TaskRef task) {
-    if (asyncInvocation_) throw std::logic_error("VM: async invocation already active");
-    asyncInvocation_ = AsyncInvocation{std::move(chunk), functionIndex, std::move(args), std::move(receiver), std::move(task), 0, false};
+TaskRef VM::scheduleAsyncInvocation(std::shared_ptr<const Chunk> chunk, std::size_t functionIndex,
+                                    ExecutionState::CallFrame frame) {
+    auto task = std::make_shared<RuntimeTaskState>(frame.returnTypeName);
+    auto child = std::make_shared<VM>(scheduler_);
+    frame.returnIp = chunk->code.size();
+    child->asyncInvocation_ = AsyncInvocation{std::move(chunk), functionIndex, std::move(frame), task, 0, false, {}};
+    // A queued/suspended VM owns roots but is not a running mutator.
+    child->beginBlockingNativeCall();
+    scheduler_->enqueue(std::make_shared<AsyncFrame>([child]() { child->resumeAsyncInvocation(); }));
+    return task;
 }
 
 void VM::resumeAsyncInvocation() {
     if (!asyncInvocation_) return;
+    endBlockingNativeCall();
+    struct SuspendGuard {
+        VM* vm;
+        ~SuspendGuard() { vm->beginBlockingNativeCall(); }
+    } suspendGuard{this};
     try {
+        if (asyncInvocation_->awaitedTask && asyncInvocation_->awaitedTask->isTerminal()) {
+            try {
+                state_.push(asyncInvocation_->awaitedTask->observe());
+            } catch (...) {
+                pendingResumeException_ = std::current_exception();
+            }
+            asyncInvocation_->awaitedTask.reset();
+        }
         if (!asyncInvocation_->started) {
             const TaskStatus taskStatus = asyncInvocation_->task->status();
             if (taskStatus == TaskStatus::Cancelled) {
@@ -1715,16 +1374,8 @@ void VM::resumeAsyncInvocation() {
                 throw std::logic_error("VM: invalid initial async task state");
             }
             asyncInvocation_->task->start();
-            const auto& fn = asyncInvocation_->chunk->functions[asyncInvocation_->functionIndex];
-            ExecutionState::CallFrame frame;
-            frame.returnIp = asyncInvocation_->chunk->code.size();
-            frame.functionName = asyncInvocation_->chunk->functions[asyncInvocation_->functionIndex].name;
-            if (asyncInvocation_->receiver) frame.locals["this"] = *asyncInvocation_->receiver;
-            for (std::size_t i = 0; i < asyncInvocation_->args.size(); ++i) {
-                frame.locals[fn.paramNames[i]] = asyncInvocation_->args[i];
-            }
-            state_.enterFrame(std::move(frame));
-            asyncInvocation_->resumeIp = fn.entryAddress;
+            state_.enterFrame(std::move(asyncInvocation_->frame));
+            asyncInvocation_->resumeIp = asyncInvocation_->chunk->functions[asyncInvocation_->functionIndex].entryAddress;
             asyncInvocation_->started = true;
         }
         if (asyncInvocation_->task->cancellationRequested()) {
@@ -1761,36 +1412,11 @@ void VM::resumeAsyncInvocation() {
 }
 
 
-void VM::invokeThreadClosure(const ClosureRef& closure) {
-    if (!closure || !closure->chunk) throw std::runtime_error("VM: invalid thread closure");
-    if (closure->functionIndex >= closure->chunk->functions.size()) throw std::runtime_error("VM: thread closure function index out of bounds");
-    const auto& fn = closure->chunk->functions[closure->functionIndex];
-    if (fn.isAsync) throw std::runtime_error("VM: async closure cannot run as a raw Thread entry");
-    if (!closure->paramNames.empty()) throw std::runtime_error("VM: thread closure expects zero arguments");
-    ExecutionState::CallFrame frame;
-    frame.returnIp = closure->chunk->code.size();
-    frame.functionName = "<thread>";
-    frame.locals = closure->captured;
-    state_.enterFrame(std::move(frame));
-    Value result;
-    const ExecuteStatus status = execute(*closure->chunk, fn.entryAddress, true, {}, &result);
-    if (status != ExecuteStatus::Completed) throw std::runtime_error("VM: thread closure suspended unexpectedly");
-}
-
 Value VM::invokeTaskClosure(const ClosureRef& closure) {
-    if (!closure || !closure->chunk) throw std::runtime_error("VM: invalid task closure");
-    if (closure->functionIndex >= closure->chunk->functions.size()) throw std::runtime_error("VM: invalid task function index");
-    const auto& fn = closure->chunk->functions[closure->functionIndex];
-    if (fn.isAsync) throw std::runtime_error("VM: task closure must be synchronous");
-    ExecutionState::CallFrame frame;
-    frame.returnIp = closure->chunk->code.size();
-    frame.functionName = "<task>";
-    frame.locals = closure->captured;
-    state_.enterFrame(std::move(frame));
-    Value result;
-    const ExecuteStatus status = execute(*closure->chunk, fn.entryAddress, true, {}, &result);
-    if (status != ExecuteStatus::Completed) throw std::runtime_error("VM: task closure suspended unexpectedly");
-    return result;
+    if (!closure || !closure->chunk || closure->functionIndex >= closure->chunk->functions.size())
+        throw std::runtime_error("VM: invalid task closure");
+    if (closure->isAsync) throw std::runtime_error("VM: task closure must be synchronous");
+    return invokeFunction(*closure->chunk, closure->functionIndex, {}, std::nullopt, closure);
 }
 
 Value VM::invokeReflectiveFunction(const Value& functionValue, const Value& argsList) {
@@ -1813,18 +1439,14 @@ Value VM::invokeReflectiveFunction(const Value& functionValue, const Value& args
     for (std::size_t i = 0; i < values.size(); ++i) {
         const std::string expected = i < (*closure)->parameterTypeNames.size()
             ? (*closure)->parameterTypeNames[i] : "unknown";
-        if (!reflectiveTypeMatchesName(values[i], expected, activeChunk_))
+        if (!runtimeAssignableToType(values[i], expected, activeChunk_))
             throwReflectionException("ReflectionError.InvalidArguments: argument type mismatch at index " + std::to_string(i), activeChunk_, &state_);
     }
     if (fn.isAsync) {
-        auto task = std::make_shared<RuntimeTaskState>(fn.returnTypeName.empty() ? "void" : fn.returnTypeName);
-        auto child = std::make_shared<VM>(scheduler_);
-        auto chunkRef = std::make_shared<Chunk>(*(*closure)->chunk);
-        child->beginAsyncInvocation(chunkRef, (*closure)->functionIndex, values, std::nullopt, task);
-        scheduler_->enqueue(std::make_shared<AsyncFrame>([child]() mutable { child->resumeAsyncInvocation(); }));
-        return Value{std::move(task)};
+        auto frame = makeCallFrame(*(*closure)->chunk, fn, values, std::nullopt, *closure);
+        return scheduleAsyncInvocation((*closure)->chunk, (*closure)->functionIndex, std::move(frame));
     }
-    return invokeFunction(*(*closure)->chunk, (*closure)->functionIndex, values, std::nullopt);
+    return invokeFunction(*(*closure)->chunk, (*closure)->functionIndex, values, std::nullopt, *closure);
 }
 
 Value VM::invokeReflectiveMethod(const Value& methodValue, const Value& receiver, const Value& argsList) {
@@ -1849,29 +1471,18 @@ Value VM::invokeReflectiveMethod(const Value& methodValue, const Value& receiver
     const auto& values = (*list)->items;
     if (fn.paramNames.size() != values.size())
         throwReflectionException("ReflectionError.InvalidArguments: expected " + std::to_string(fn.paramNames.size()) + " argument(s), got " + std::to_string(values.size()), activeChunk_, &state_);
-    std::vector<std::string> reflectedParameterTypes;
-    if (auto pit = (*methodObj)->fields.find("parameters"); pit != (*methodObj)->fields.end()) {
-        if (auto plist = std::get_if<ListRef>(&pit->second); plist && *plist) {
-            for (const auto& entry : (*plist)->items) {
-                if (auto text = std::get_if<std::string>(&entry)) reflectedParameterTypes.push_back(*text);
-            }
-        }
-    }
+    const auto bindings = !isStatic
+        ? receiverTypeBindings(*std::get<ObjectRef>(receiver), *activeChunk_, fn.ownerClassName)
+        : RuntimeTypeBindings{};
     for (std::size_t i = 0; i < values.size(); ++i) {
-        const std::string expected = i < reflectedParameterTypes.size()
-            ? reflectedParameterTypes[i]
-            : (i < fn.parameterTypeNames.size() ? fn.parameterTypeNames[i] : "unknown");
-        if (!reflectiveTypeMatchesName(values[i], expected, activeChunk_))
+        const std::string expected = i < fn.parameterTypeNames.size()
+            ? substituteTypeParams(fn.parameterTypeNames[i], bindings) : "unknown";
+        if (!runtimeAssignableToType(values[i], expected, activeChunk_))
             throwReflectionException("ReflectionError.InvalidArguments: argument type mismatch at index " + std::to_string(i), activeChunk_, &state_);
     }
     if (fn.isAsync) {
-        auto task = std::make_shared<RuntimeTaskState>(fn.returnTypeName.empty() ? "void" : fn.returnTypeName);
-        auto chunkRef = std::make_shared<Chunk>(*activeChunk_);
-        auto child = std::make_shared<VM>(scheduler_);
-        std::optional<Value> r = isStatic ? std::nullopt : std::optional<Value>(receiver);
-        child->beginAsyncInvocation(chunkRef, index, values, r, task);
-        scheduler_->enqueue(std::make_shared<AsyncFrame>([child]() mutable { child->resumeAsyncInvocation(); }));
-        return Value{std::move(task)};
+        auto frame = makeCallFrame(*activeChunk_, fn, values, isStatic ? std::nullopt : std::optional<Value>(receiver));
+        return scheduleAsyncInvocation(std::make_shared<Chunk>(*activeChunk_), index, std::move(frame));
     }
     return invokeFunction(*activeChunk_, index, values, isStatic ? std::nullopt : std::optional<Value>(receiver));
 }
@@ -1895,19 +1506,9 @@ Value VM::invokeReflectiveConstructor(const Value& constructorValue, const Value
     const auto& values = (*list)->items;
     if (fn.paramNames.size() != values.size())
         throwReflectionException("ReflectionError.InvalidArguments: expected " + std::to_string(fn.paramNames.size()) + " argument(s), got " + std::to_string(values.size()), activeChunk_, &state_);
-    std::vector<std::string> reflectedParameterTypes;
-    if (auto pit = (*ctorObj)->fields.find("parameters"); pit != (*ctorObj)->fields.end()) {
-        if (auto plist = std::get_if<ListRef>(&pit->second); plist && *plist) {
-            for (const auto& entry : (*plist)->items) {
-                if (auto text = std::get_if<std::string>(&entry)) reflectedParameterTypes.push_back(*text);
-            }
-        }
-    }
     for (std::size_t i = 0; i < values.size(); ++i) {
-        const std::string expected = i < reflectedParameterTypes.size()
-            ? reflectedParameterTypes[i]
-            : (i < fn.parameterTypeNames.size() ? fn.parameterTypeNames[i] : "unknown");
-        if (!reflectiveTypeMatchesName(values[i], expected, activeChunk_))
+        const std::string expected = i < fn.parameterTypeNames.size() ? fn.parameterTypeNames[i] : "unknown";
+        if (!runtimeAssignableToType(values[i], expected, activeChunk_))
             throwReflectionException("ReflectionError.InvalidArguments: argument type mismatch at index " + std::to_string(i), activeChunk_, &state_);
     }
     Value object = makeEmptyObject(std::get<std::string>(oit->second));
@@ -1919,22 +1520,25 @@ Value VM::invokeReflectiveConstructor(const Value& constructorValue, const Value
 }
 
 Value VM::invokeFunction(const Chunk& chunk, std::size_t functionIndex,
-                         const std::vector<Value>& args, const std::optional<Value>& receiver) {
+                         const std::vector<Value>& args, const std::optional<Value>& receiver,
+                         const ClosureRef& closure) {
     if (functionIndex >= chunk.functions.size()) {
         throw std::runtime_error("VM: function index out of bounds");
     }
     const FunctionInfo& fn = chunk.functions[functionIndex];
-    if (fn.paramNames.size() != args.size()) {
-        throw std::runtime_error("VM: function argument count mismatch");
-    }
-    ExecutionState::CallFrame frame;
+    auto frame = makeCallFrame(chunk, fn, args, receiver, closure);
     frame.returnIp = chunk.code.size();
-    if (receiver) frame.locals["this"] = *receiver;
-    for (std::size_t i = 0; i < args.size(); ++i) frame.locals[fn.paramNames[i]] = args[i];
+    const std::size_t callerFrames = state_.callDepth();
+    const std::size_t callerStackSize = state_.valueStackSize();
     state_.enterFrame(std::move(frame));
     Value result;
-    const ExecuteStatus status = execute(chunk, fn.entryAddress, true, {}, &result);
-    if (status != ExecuteStatus::Completed) throw std::runtime_error("VM: function execution suspended unexpectedly");
+    try {
+        const ExecuteStatus status = execute(chunk, fn.entryAddress, true, {}, &result);
+        if (status != ExecuteStatus::Completed) throw std::runtime_error("VM: function execution suspended unexpectedly");
+    } catch (...) {
+        state_.restoreToDepth(callerStackSize, callerFrames);
+        throw;
+    }
     return result;
 }
 

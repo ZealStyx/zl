@@ -1,5 +1,6 @@
 #include "zl/vm/gc.hpp"
 #include "zl/vm/runtime_task.hpp"
+#include "zl/compiler/bytecode.hpp"
 
 #include <unordered_set>
 #include <utility>
@@ -10,7 +11,7 @@
 namespace zl {
 namespace {
 
-void appendValueChildren(const Value& value, std::vector<Value>& work) {
+void appendValueChildren(const Value& value, std::vector<Value>& work, std::vector<const Chunk*>& programs) {
     std::visit([&](const auto& held) {
         using T = std::decay_t<decltype(held)>;
         if constexpr (std::is_same_v<T, ListRef>) {
@@ -28,11 +29,17 @@ void appendValueChildren(const Value& value, std::vector<Value>& work) {
             if (held->atomicRefState) work.push_back(held->atomicRefState->value);
             if (held->channelState) {
                 for (const auto& item : held->channelState->items) work.push_back(item);
-                for (const auto& pending : held->channelState->pendingSends) work.push_back(pending.value);
+                for (const auto& pending : held->channelState->pendingSends) {
+                    work.push_back(pending.value);
+                    if (pending.task) work.emplace_back(pending.task);
+                }
+                for (const auto& pending : held->channelState->pendingReceives)
+                    if (pending.task) work.emplace_back(pending.task);
             }
         } else if constexpr (std::is_same_v<T, ClosureRef>) {
             if (!held) return;
             for (const auto& capture : held->captured) work.push_back(capture.second);
+            if (held->chunk) programs.push_back(held->chunk.get());
         } else if constexpr (std::is_same_v<T, TaskRef>) {
             if (!held) return;
             held->appendGCRoots(work);
@@ -55,18 +62,54 @@ const void* identity(const Value& value) {
     }, value);
 }
 
-void markValue(const Value& root, std::unordered_set<const void*>& marked) {
-    std::vector<Value> work{root};
-    while (!work.empty()) {
-        Value value = std::move(work.back());
-        work.pop_back();
-        const void* id = identity(value);
-        if (!id || !marked.insert(id).second) continue;
-        appendValueChildren(value, work);
+class Marker {
+public:
+    std::unordered_set<const void*> marked;
+
+    void trace(const GCRoots& roots) {
+        auto work = roots.values;
+        auto programs = roots.programs;
+        while (!work.empty() || !programs.empty()) {
+            if (!work.empty()) {
+                Value value = std::move(work.back());
+                work.pop_back();
+                const auto* id = identity(value);
+                if (id && marked.insert(id).second) appendValueChildren(value, work, programs);
+                continue;
+            }
+            const auto* program = programs.back();
+            programs.pop_back();
+            if (!program || !programs_.insert(program).second) continue;
+            work.insert(work.end(), program->constants.begin(), program->constants.end());
+            const auto& storage = program->staticStorage;
+            if (!storage || !statics_.insert(storage.get()).second) continue;
+            // Every managed writer is stopped. Do not acquire initialization
+            // locks: a parked native waiter may already have reacquired one
+            // and be waiting for this trace to finish before it can resume.
+            for (const auto& entry : storage->fields) {
+                if (!entry.second) continue;
+                work.push_back(entry.second->value);
+                entry.second->failure.appendGCRoots(work);
+            }
+        }
     }
-}
+private:
+    std::unordered_set<const Chunk*> programs_;
+    std::unordered_set<const StaticRuntimeStorage*> statics_;
+};
 
 } // namespace
+
+void appendExceptionRoots(const std::exception_ptr& error, std::vector<Value>& roots) {
+    if (!error) return;
+    try {
+        std::rethrow_exception(error);
+    } catch (const ZlThrownException& exception) {
+        if (exception.value()) roots.emplace_back(exception.value());
+    } catch (...) {
+        // Native exception objects do not contain managed ZL payloads.
+    }
+}
 
 ListRef makeGCList() {
     auto& gc = TracingGC::instance();
@@ -151,19 +194,19 @@ void TracingGC::track(const Value& value) {
     }, value);
 }
 
-TracingGC::Stats TracingGC::collect(const std::vector<Value>& roots) {
-    // Only one collection may sweep at a time. Allocation can continue while
-    // tracing; newly allocated entries simply become eligible for the next GC.
+TracingGC::Collection TracingGC::collect(const GCRoots& roots) {
+    // The coordinator must stop all mutators before entering this method.
+    // Serializing collectors alone does not make tracing concurrent-safe.
     std::lock_guard<std::mutex> collectLock(collectMutex_);
 
     std::unordered_set<const void*> protectedIds;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        protectedIds = protectedRoots_;
+        for (const auto& entry : protectedRoots_) protectedIds.insert(entry.first);
     }
 
-    std::unordered_set<const void*> marked;
-    for (const auto& root : roots) markValue(root, marked);
+    Marker marker;
+    marker.trace(roots);
 
     // Convert protected identities into temporary non-owning Value roots while
     // the registry is stable. Marking itself happens outside the registry lock
@@ -190,14 +233,19 @@ TracingGC::Stats TracingGC::collect(const std::vector<Value>& roots) {
             }
         }
     }
-    for (const auto& root : protectedValues) markValue(root, marked);
+    marker.trace(GCRoots{std::move(protectedValues)});
 
     std::lock_guard<std::mutex> lock(mutex_);
-    Stats stats;
+    Collection result;
+    auto& stats = result.stats;
     stats.tracked = entries_.size();
 
     std::vector<Entry> survivors;
     survivors.reserve(entries_.size());
+    result.retired_.reserve(entries_.size());
+    // Complete allocations before mutating the registry. On failure the
+    // coordinator can safely resume without a partially detached heap.
+    static_assert(std::is_nothrow_move_constructible<Entry>::value, "GC retirement must not throw");
     for (auto& entry : entries_) {
         const void* id = nullptr;
         switch (entry.kind) {
@@ -206,29 +254,18 @@ TracingGC::Stats TracingGC::collect(const std::vector<Value>& roots) {
             case Entry::Kind::Object: id = entry.object.get(); break;
             case Entry::Kind::Closure: id = entry.closure.get(); break;
         }
-        if (marked.count(id)) {
+        if (marker.marked.count(id)) {
             ++stats.reachable;
             survivors.push_back(std::move(entry));
             continue;
         }
 
         ++stats.unreachable;
-        if (entry.kind == Entry::Kind::List) entry.list->items.clear();
-        else if (entry.kind == Entry::Kind::Map) entry.map->entries.clear();
-        else if (entry.kind == Entry::Kind::Object) {
-            entry.object->fields.clear();
-            if (entry.object->atomicRefState) entry.object->atomicRefState->value = Value{};
-            if (entry.object->channelState) {
-                entry.object->channelState->items.clear();
-                entry.object->channelState->pendingSends.clear();
-                entry.object->channelState->pendingReceives.clear();
-            }
-        } else entry.closure->captured.clear();
+        result.retired_.push_back(std::move(entry));
         ++stats.reclaimed;
     }
     entries_.swap(survivors);
     stats.tracked = entries_.size();
-    stats.reachable = marked.empty() ? 0 : stats.reachable;
     stats.deferred = 0;
 
     // Adapt the next collection threshold to the live heap instead of using
@@ -241,19 +278,20 @@ TracingGC::Stats TracingGC::collect(const std::vector<Value>& roots) {
         : entries_.size() * 2;
     allocationThreshold_ = std::max(kMinimumAllocationThreshold, liveHeapBudget);
     allocationsSinceCollection_ = 0;
-    return stats;
+    return result;
 }
 
 void TracingGC::protect(const void* identity) {
     if (!identity) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    protectedRoots_.insert(identity);
+    ++protectedRoots_[identity];
 }
 
 void TracingGC::unprotect(const void* identity) {
     if (!identity) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    protectedRoots_.erase(identity);
+    auto it = protectedRoots_.find(identity);
+    if (it != protectedRoots_.end() && --it->second == 0) protectedRoots_.erase(it);
 }
 
 bool TracingGC::shouldCollect() const {

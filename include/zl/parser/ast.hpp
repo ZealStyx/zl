@@ -105,6 +105,7 @@ struct Param {
     std::string name;
     TypeAnnotation type;
     OwnershipKind ownership{OwnershipKind::GC};
+    mutable std::string storageName;
 };
 
 // @Override, @Deprecated, @SuppressWarnings("deprecation")
@@ -267,6 +268,7 @@ struct MatchExpr : AstNode {
         std::size_t line{0};
     };
     struct Arm {
+        mutable std::unordered_map<std::string, std::string> storageBindings;
         PatternKind patternKind{PatternKind::Literal};
         std::string raw;
         TokenType literalType{TokenType::UNKNOWN};
@@ -321,6 +323,8 @@ struct VarDecl : AstNode {
     bool hasExplicitType{false};
     TypeAnnotation type;       // only meaningful when hasExplicitType is true
     std::string name;
+    mutable std::string storageName;
+    mutable std::string assertedTypeName;
     NodePtr initializer;       // nullptr if no `= expr` given
     AccessModifier access{AccessModifier::DEFAULT};
     bool isStatic{false};
@@ -363,6 +367,7 @@ struct ReturnStmt : AstNode {
 // descending ranges work: `for i in 0..10 { }` and `for i in 10..0 step -1 { }`.
 struct ForStmt : AstNode {
     std::string varName;
+    mutable std::string storageName;
     NodePtr start;
     NodePtr end;
     NodePtr step;      // never null - parser fills in a literal 1 if 'step' was omitted
@@ -399,6 +404,7 @@ struct CatchClause {
     std::optional<TypeAnnotation> type;
     NodePtr block;
     std::size_t line{0};
+    mutable std::string storageName;
 };
 
 struct TryStmt : AstNode {
@@ -431,6 +437,7 @@ struct Literal : AstNode {
 
 struct Identifier : AstNode {
     std::string name;
+    mutable std::string storageName;
     Identifier() : AstNode(NodeKind::Identifier) {}
 };
 
@@ -479,9 +486,13 @@ struct CallExpr : AstNode {
     // Compiler::compileCall checks this first, the same way
     // FieldAccessExpr::isEnumMemberAccess redirects compileFieldAccess.
     mutable bool isValueCall{false};
+    mutable std::string calleeStorageName;
     // `Type.of(MyClass)` is a class/type literal rather than a variable lookup.
     mutable bool isClassTypeLiteral{false};
     mutable std::string classTypeLiteralName;
+    // Declared identity of a fresh native-factory result (not a cast). Kept
+    // separate from value inference so existing objects are never relabelled.
+    mutable std::string nativeFactoryTypeName;
     CallExpr() : AstNode(NodeKind::CallExpr) {}
 };
 
@@ -491,12 +502,17 @@ struct CallExpr : AstNode {
 // move expr - explicitly consumes an owned local and transfers its ownership.
 struct MoveExpr : AstNode {
     std::string name;
+    mutable std::string storageName;
     MoveExpr() : AstNode(NodeKind::MoveExpr) {}
 };
 
 struct AssignExpr : AstNode {
     std::string name;
+    mutable std::string storageName;
     NodePtr value;
+    // The storage contract chosen by semantic checking, not an inferred
+    // type of the RHS. Codegen checks it before overwriting the old value.
+    mutable std::string assertedTypeName;
     AssignExpr() : AstNode(NodeKind::AssignExpr) {}
 };
 
@@ -641,10 +657,12 @@ struct LambdaExpr : AstNode {
     NodePtr exprBody;         // used when hasExprBody (implicit `return`)
     NodePtr blockBody;        // used when !hasExprBody, a BlockStmt (explicit `return` required)
     mutable std::vector<std::string> captureNames;
+    mutable std::vector<std::string> captureStorageNames;
     mutable bool usesThis{false};
     // Type information inferred during semantic checking and copied into the
     // runtime closure for callable reflection.
     mutable std::vector<std::string> inferredParameterTypeNames;
+    // The body result; isAsync wraps it in Task<T> at the call boundary.
     mutable std::string inferredReturnTypeName;
     LambdaExpr() : AstNode(NodeKind::LambdaExpr) {}
 };

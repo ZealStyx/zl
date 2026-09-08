@@ -1,4 +1,6 @@
 #include "zl/compiler/type_resolver.hpp"
+#include "zl/common/type_annotation.hpp"
+#include "zl/common/type_name.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -13,13 +15,51 @@ namespace {
 void TypeResolver::reset() {
     genericInstantiationCache_.clear();
     genericInstantiationByName_.clear();
+    unions_.clear();
+}
+
+const std::vector<ResolvedTypeArg>& TypeResolver::unionMembers(const std::string& name) const {
+    return unions_.at(name);
+}
+
+ResolvedTypeArg TypeResolver::makeUnion(std::vector<ResolvedTypeArg> members) {
+    std::vector<ResolvedTypeArg> flattened;
+    for (const auto& member : members) {
+        if (member.type == ZlType::UNION) {
+            const auto& nested = unionMembers(member.className);
+            flattened.insert(flattened.end(), nested.begin(), nested.end());
+        } else flattened.push_back(member);
+    }
+    const auto nameOf = [](const ResolvedTypeArg& member) {
+        auto name = member.className.empty() ? zlTypeName(member.type) : member.className;
+        if (member.type == ZlType::FUNCTION && name != "func") name = "(" + name + ")";
+        return name;
+    };
+    std::sort(flattened.begin(), flattened.end(), [&](const auto& a, const auto& b) { return nameOf(a) < nameOf(b); });
+    flattened.erase(std::unique(flattened.begin(), flattened.end()), flattened.end());
+    std::string name;
+    for (const auto& member : flattened) { if (!name.empty()) name += "|"; name += nameOf(member); }
+    unions_[name] = std::move(flattened);
+    return {ZlType::UNION, name};
 }
 
 ZlType TypeResolver::resolveType(const TypeAnnotation& annotation,
                                  const std::string& currentClassName,
                                  const std::vector<std::string>& currentClassTypeParams,
                                  std::string* outClassName) {
+    if (!annotation.unionOf.empty()) {
+        std::vector<ResolvedTypeArg> members;
+        for (const auto& member : annotation.unionOf) {
+            std::string name;
+            auto type = resolveType(member, currentClassName, currentClassTypeParams, &name);
+            members.push_back({type, std::move(name)});
+        }
+        const auto result = makeUnion(std::move(members));
+        if (outClassName) *outClassName = result.className;
+        return result.type;
+    }
     const std::string& n = annotation.name;
+    if (n == "nil" || n == "null") return ZlType::NIL;
     if (n == "int") return ZlType::INT;
     if (n == "double") return ZlType::DOUBLE;
     if (n == "float") return ZlType::DOUBLE;
@@ -28,7 +68,6 @@ ZlType TypeResolver::resolveType(const TypeAnnotation& annotation,
     if (n == "unknown") return ZlType::UNKNOWN;
     if (n == "void") return ZlType::VOID_TYPE;
     if (n == "list" || n == "array" || n == "set" || n == "map") {
-        if (!annotation.unionOf.empty()) return ZlType::UNKNOWN;
         // Bare collection types remain valid as runtime/untyped collection
         // slots (the builtin classes use these for their native backing fields).
         // Only an explicitly parameterized collection gets a canonical generic
@@ -77,7 +116,10 @@ ZlType TypeResolver::resolveType(const TypeAnnotation& annotation,
              : n == "set" ? ZlType::SET
              : ZlType::MAP;
     }
-    if (n == "func") return ZlType::FUNCTION;
+    if (n == "func") {
+        if (outClassName && annotation.functionHasSignature) *outClassName = describeTypeAnnotation(annotation);
+        return ZlType::FUNCTION;
+    }
     if (n == "Task") {
         if (annotation.typeArgs.size() != 1) {
             typeError("Task requires exactly one type argument, for example Task<int>", annotation.line);
@@ -89,7 +131,6 @@ ZlType TypeResolver::resolveType(const TypeAnnotation& annotation,
         if (outClassName) *outClassName = "Task<" + valueName + ">";
         return ZlType::TASK;
     }
-    if (!annotation.unionOf.empty()) return ZlType::UNKNOWN;
 
     for (const std::string& param : currentClassTypeParams) {
         if (n == param) {
@@ -170,6 +211,41 @@ ZlType TypeResolver::resolveType(const TypeAnnotation& annotation,
     return ZlType::UNKNOWN;
 }
 
+ClassFieldInfo TypeResolver::fieldInContext(const ClassFieldInfo& field,
+        const std::string& receiverClass, const std::string& declaringClass,
+        const std::string& currentClass, const std::vector<std::string>& currentTypeParams) {
+    // A template body still has a raw `this` class. Walk declared parent
+    // arguments without instantiating a fictitious concrete receiver (which
+    // would incorrectly validate symbolic parameters as concrete arguments).
+    std::unordered_map<std::string, std::string> bindings;
+    std::string owner = receiverClass;
+    while (owner != declaringClass) {
+        const auto* shape = semanticModel_.findClass(owner);
+        if (!shape || shape->parentName.empty()) break;
+        const auto* parent = semanticModel_.findClass(shape->parentName);
+        if (!parent) break;
+        std::unordered_map<std::string, std::string> next;
+        for (std::size_t i = 0; i < shape->parentTypeArgs.size() && i < parent->typeParams.size(); ++i)
+            next.emplace(parent->typeParams[i], substituteTypeParams(describeTypeAnnotation(shape->parentTypeArgs[i]), bindings));
+        bindings = std::move(next);
+        owner = shape->parentName;
+    }
+    if (bindings.empty()) return field;
+    auto result = field;
+    const auto substitute = [&](ZlType& type, std::string& name) {
+        const auto original = name.empty() ? zlTypeName(type) : name;
+        const auto resolved = substituteTypeParams(original, bindings);
+        if (resolved == original) return;
+        name.clear();
+        type = resolveType(typeAnnotationFromName(parseTypeName(resolved)), currentClass, currentTypeParams, &name);
+    };
+    substitute(result.type, result.className);
+    for (std::size_t i = 0; i < result.functionParamTypes.size(); ++i)
+        substitute(result.functionParamTypes[i], result.functionParamClassNames[i]);
+    substitute(result.functionReturnType, result.functionReturnClassName);
+    return result;
+}
+
 std::string TypeResolver::instantiateGenericClass(const std::string& genericName,
                                                    const std::vector<ResolvedTypeArg>& typeArgs,
                                                    std::size_t line) {
@@ -194,147 +270,51 @@ std::string TypeResolver::instantiateGenericClass(const std::string& genericName
     genericInstantiationCache_.emplace(identity, key);
     genericInstantiationByName_[key] = identity;
 
-    auto canonicalTypeName = [](const ResolvedTypeArg& value) {
-        if (!value.className.empty()) return value.className;
-        switch (value.type) {
-            case ZlType::INT: return std::string("int");
-            case ZlType::DOUBLE: return std::string("double");
-            case ZlType::STRING: return std::string("string");
-            case ZlType::BOOL: return std::string("bool");
-            case ZlType::VOID_TYPE: return std::string("void");
-            case ZlType::NIL: return std::string("nil");
-            case ZlType::LIST: return std::string("list");
-            case ZlType::MAP: return std::string("map");
-            case ZlType::SET: return std::string("set");
-            case ZlType::ARRAY: return std::string("array");
-            case ZlType::OBJECT: return std::string("object");
-            case ZlType::FUNCTION: return std::string("func");
-            case ZlType::TASK: return std::string("Task");
-            case ZlType::UNKNOWN: return std::string("unknown");
-        }
-        return std::string("unknown");
+    const auto canonicalTypeName = [](const ResolvedTypeArg& value) {
+        return value.className.empty() ? zlTypeName(value.type) : value.className;
     };
 
-    std::function<std::string(const std::string&)> substituteCanonicalName;
-    substituteCanonicalName = [&](const std::string& name) {
-        const auto lt = name.find('<');
-        if (lt == std::string::npos || name.empty() || name.back() != '>') return name;
-        const std::string base = name.substr(0, lt);
-        const std::string body = name.substr(lt + 1, name.size() - lt - 2);
-        std::vector<std::string> parts;
-        std::size_t start = 0;
-        std::size_t depth = 0;
-        for (std::size_t i = 0; i <= body.size(); ++i) {
-            if (i == body.size() || (body[i] == ',' && depth == 0)) {
-                parts.push_back(body.substr(start, i - start));
-                start = i + 1;
-            } else if (body[i] == '<') {
-                ++depth;
-            } else if (body[i] == '>') {
-                --depth;
+    std::unordered_map<std::string, std::string> bindings;
+    for (std::size_t i = 0; i < generic.typeParams.size(); ++i) bindings.emplace(generic.typeParams[i], canonicalTypeName(typeArgs[i]));
+
+    std::function<ResolvedTypeArg(const TypeName&)> resolveCanonicalType;
+    resolveCanonicalType = [&](const TypeName& name) -> ResolvedTypeArg {
+        if (!name.unionMembers.empty()) {
+            std::vector<ResolvedTypeArg> members;
+            for (const auto& member : name.unionMembers) members.push_back(resolveCanonicalType(member));
+            return makeUnion(std::move(members));
+        }
+        auto type = zlTypeFromBaseName(name.name);
+        const auto rendered = describeTypeName(name);
+        if (type == ZlType::FUNCTION) {
+            ResolvedTypeArg result{type, name.args.empty() ? "" : rendered};
+            if (!name.args.empty()) {
+                result.functionHasSignature = true;
+                for (std::size_t i = 0; i + 1 < name.args.size(); ++i) result.functionParamTypes.push_back(resolveCanonicalType(name.args[i]));
+                result.functionReturnType = std::make_shared<ResolvedTypeArg>(resolveCanonicalType(name.args.back()));
+            }
+            return result;
+        }
+        if (type == ZlType::OBJECT && !name.args.empty()) {
+            const auto* shape = semanticModel_.findClass(name.name);
+            if (shape && !shape->typeParams.empty()) {
+                std::vector<ResolvedTypeArg> args;
+                for (const auto& arg : name.args) args.push_back(resolveCanonicalType(arg));
+                return {type, instantiateGenericClass(name.name, args, line)};
             }
         }
-        for (auto& part : parts) {
-            for (std::size_t i = 0; i < generic.typeParams.size(); ++i) {
-                if (part == generic.typeParams[i]) {
-                    part = canonicalTypeName(typeArgs[i]);
-                    break;
-                }
-            }
-            // A nested generic type can itself contain one of our type
-            // parameters (e.g. Box<T> inside list<Box<T>>). Recurse through
-            // the canonical spelling instead of treating the whole argument
-            // as opaque metadata.
-            const auto nestedLt = part.find('<');
-            if (nestedLt != std::string::npos && !part.empty() && part.back() == '>') {
-                std::string rebuilt = substituteCanonicalName(part);
-                part = std::move(rebuilt);
-            }
-        }
-        std::string rebuilt = base + "<";
-        for (std::size_t i = 0; i < parts.size(); ++i) {
-            if (i) rebuilt += ",";
-            rebuilt += parts[i];
-        }
-        rebuilt += ">";
-        return rebuilt;
+        return {type, (type == ZlType::OBJECT || !name.args.empty()) ? rendered : std::string{}};
     };
 
-    std::function<ResolvedTypeArg(const std::string&, std::size_t)> resolveCanonicalType;
-    resolveCanonicalType = [&](const std::string& name, std::size_t nestedLine) -> ResolvedTypeArg {
-        if (name == "int") return {ZlType::INT, ""};
-        if (name == "double") return {ZlType::DOUBLE, ""};
-        if (name == "string") return {ZlType::STRING, ""};
-        if (name == "bool") return {ZlType::BOOL, ""};
-        if (name == "void") return {ZlType::VOID_TYPE, ""};
-        if (name == "nil") return {ZlType::NIL, ""};
-        if (name == "unknown") return {ZlType::UNKNOWN, ""};
-        const auto lt = name.find('<');
-        if (lt == std::string::npos || name.empty() || name.back() != '>') return {ZlType::OBJECT, name};
-        const std::string base = name.substr(0, lt);
-        const std::string body = name.substr(lt + 1, name.size() - lt - 2);
-        std::vector<std::string> parts;
-        std::size_t start = 0;
-        std::size_t depth = 0;
-        for (std::size_t i = 0; i <= body.size(); ++i) {
-            if (i == body.size() || (body[i] == ',' && depth == 0)) {
-                parts.push_back(body.substr(start, i - start));
-                start = i + 1;
-            } else if (body[i] == '<') {
-                ++depth;
-            } else if (body[i] == '>') {
-                if (depth == 0) typeError("malformed generic type '" + name + "'", nestedLine);
-                --depth;
-            }
-        }
-        const auto* genericShape = semanticModel_.findClass(base);
-        if (genericShape == nullptr || genericShape->typeParams.empty()) {
-            return {ZlType::OBJECT, name};
-        }
-        if (parts.size() != genericShape->typeParams.size()) {
-            typeError("generic type '" + base + "' requires " + std::to_string(genericShape->typeParams.size()) +
-                      " type argument(s)", nestedLine);
-        }
-        std::vector<ResolvedTypeArg> args;
-        args.reserve(parts.size());
-        for (const auto& part : parts) args.push_back(resolveCanonicalType(part, nestedLine));
-        return {ZlType::OBJECT, instantiateGenericClass(base, args, nestedLine)};
-    };
-
-    auto substitute = [&](ZlType type, const std::string& className) -> ResolvedTypeArg {
+    const auto substitute = [&](ZlType type, const std::string& className) -> ResolvedTypeArg {
         if (type == ZlType::OBJECT) {
-            for (std::size_t i = 0; i < generic.typeParams.size(); ++i) {
-                if (generic.typeParams[i] == className) return typeArgs[i];
-            }
+            const auto own = std::find(generic.typeParams.begin(), generic.typeParams.end(), className);
+            if (own != generic.typeParams.end()) return typeArgs[static_cast<std::size_t>(own - generic.typeParams.begin())];
         }
         if (className.empty()) return {type, className};
-
-        const std::string substitutedName = substituteCanonicalName(className);
-        if (substitutedName != className) {
-            if (type == ZlType::OBJECT && substitutedName.find('<') != std::string::npos) {
-                return resolveCanonicalType(substitutedName, line);
-            }
-            return {type, substitutedName};
-        }
-
-        if (type == ZlType::OBJECT) {
-            auto nestedIt = genericInstantiationByName_.find(className);
-            if (nestedIt != genericInstantiationByName_.end()) {
-                const GenericInstantiation& nested = nestedIt->second;
-                std::vector<ResolvedTypeArg> nestedArgs;
-                nestedArgs.reserve(nested.args.size());
-                for (const auto& nestedArg : nested.args) {
-                    auto ownParam = std::find(generic.typeParams.begin(), generic.typeParams.end(), nestedArg.className);
-                    if (nestedArg.type == ZlType::OBJECT && ownParam != generic.typeParams.end()) {
-                        nestedArgs.push_back(typeArgs[static_cast<std::size_t>(ownParam - generic.typeParams.begin())]);
-                    } else {
-                        nestedArgs.push_back(nestedArg);
-                    }
-                }
-                return {ZlType::OBJECT, instantiateGenericClass(nested.base, nestedArgs, line)};
-            }
-        }
-        return {type, className};
+        const auto resolvedName = substituteTypeParams(className, bindings);
+        if (resolvedName == className) return {type, className};
+        return resolveCanonicalType(parseTypeName(resolvedName));
     };
 
     auto substituteCallable = [&](std::vector<ZlType>& paramTypes,

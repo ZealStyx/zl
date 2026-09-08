@@ -1,19 +1,44 @@
 #include "zl/vm/runtime_thread.hpp"
 
 namespace zl {
+namespace {
+thread_local DeferredThreadJoins* currentJoins = nullptr;
+}
+
+ThreadJoinNode::~ThreadJoinNode() {
+    if (!thread.joinable()) return;
+    if (thread.get_id() == std::this_thread::get_id()) thread.detach();
+    else thread.join();
+}
+
+DeferredThreadJoins::~DeferredThreadJoins() { drain(); }
+
+DeferredThreadJoins* DeferredThreadJoins::bind(DeferredThreadJoins* queue) noexcept {
+    return std::exchange(currentJoins, queue);
+}
+
+void DeferredThreadJoins::retire(std::unique_ptr<ThreadJoinNode> node) noexcept {
+    if (!node || !node->thread.joinable()) return;
+    if (!currentJoins || node->thread.get_id() == std::this_thread::get_id()) return;
+    node->next = std::move(currentJoins->pending_);
+    currentJoins->pending_ = std::move(node);
+}
+
+void DeferredThreadJoins::drain() noexcept {
+    while (pending_) {
+        auto node = std::move(pending_);
+        pending_ = std::move(node->next);
+        node.reset();
+    }
+}
 
 RuntimeThreadState::~RuntimeThreadState() {
-    std::thread local;
+    std::unique_ptr<ThreadJoinNode> local;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!worker_.joinable()) return;
-        if (worker_.get_id() == std::this_thread::get_id()) {
-            worker_.detach();
-            return;
-        }
         local = std::move(worker_);
     }
-    local.join();
+    DeferredThreadJoins::retire(std::move(local));
 }
 
 void RuntimeThreadState::join() {
@@ -21,10 +46,10 @@ void RuntimeThreadState::join() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!started_) throw std::logic_error("thread has not been started");
-        if (!worker_.joinable()) return;
-        if (worker_.get_id() == std::this_thread::get_id())
+        if (!worker_ || !worker_->thread.joinable()) return;
+        if (worker_->thread.get_id() == std::this_thread::get_id())
             throw std::logic_error("thread cannot join itself");
-        local = std::move(worker_);
+        local = std::move(worker_->thread);
     }
     local.join();
 }
@@ -33,5 +58,4 @@ bool RuntimeThreadState::isAlive() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return started_ && done_ && !done_->load(std::memory_order_acquire);
 }
-
 } // namespace zl

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "zl/vm/runtime_exception.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -149,6 +150,8 @@ struct FunctionInfo {
 struct ClassReflectionInfo {
     RuntimeTypeId id{0};
     std::string baseClassName;
+    // Unsubstituted parent type, e.g. Base<V,K> for class Derived<K,V>.
+    std::string baseTypeName;
     std::vector<std::string> interfaces;
     std::vector<std::string> typeParameters;
     bool isDataType{false};
@@ -164,10 +167,11 @@ struct Instruction {
     OpCode op;
     std::size_t operand{0};
     std::size_t line{0};
-    // Second operand, used by call opcodes for argument counts and by
-    // exception handlers for catch-type name indices.
+    // Second operand: argument counts for calls, catch-type name indices for
+    // handlers, or a fresh native factory's type-name index + 1 (zero = none).
     std::size_t operand2{0};
-    // Third operand, currently used by PushHandler for its catch-group id.
+    // Third operand: PushHandler catch-group id, or NewObject's concrete
+    // type-name index + 1 (zero = use the unparameterized class name).
     std::size_t operand3{0};
 };
 
@@ -180,7 +184,7 @@ struct StaticFieldState {
     std::condition_variable cv;
     Status status{Status::Uninitialized};
     Value value{};
-    std::exception_ptr failure;
+    StoredException failure;
     std::thread::id ownerThread{};
     std::size_t initializerFunction{static_cast<std::size_t>(-1)};
 };

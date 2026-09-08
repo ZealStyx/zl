@@ -1,4 +1,5 @@
 #include "zl/compiler/native_catalog.hpp"
+#include "zl/common/type_name.hpp"
 #include "zl/compiler/semantic_types.hpp"
 
 namespace zl {
@@ -14,6 +15,26 @@ namespace {
 
 std::vector<NativeSignature> buildSignatureTable() {
     std::vector<NativeSignature> sigs;
+
+    // Declare native type relationships once. Coarse kinds still drive native
+    // dispatch; compiler inference and VM result validation share the templates.
+    const auto generic = [&](NativeId id, const char* name, std::vector<std::string> parameters,
+                             const char* result, const char* package = "zl.lang") {
+        const auto first = parseTypeName(parameters.front());
+        const auto kind = [&](const std::string& type) {
+            const auto parsed = parseTypeName(type);
+            for (const auto& parameter : first.args) if (parameter.name == parsed.name) return ZlType::UNKNOWN;
+            return zlTypeFromBaseName(parsed.name);
+        };
+        std::vector<ZlType> kinds;
+        for (const auto& parameter : parameters) kinds.push_back(kind(parameter));
+        NativeSignature signature{id, name, std::move(kinds), kind(result), package, {},
+                                  NativeReturnTypeRule::FIRST_ARGUMENT_TYPES, ZlType::UNKNOWN, result};
+        signature.parameterTypeNames = std::move(parameters);
+        if (first.name == "list" || first.name == "set" || first.name == "array")
+            signature.acceptedParamTypes = {{ZlType::LIST, ZlType::ARRAY, ZlType::SET, ZlType::UNKNOWN}};
+        sigs.push_back(std::move(signature));
+    };
 
     // --- Reflection / Type ---
     // The catalog owns language metadata; VM callbacks bind by NativeId.
@@ -92,33 +113,33 @@ std::vector<NativeSignature> buildSignatureTable() {
     sigs.push_back({NativeId::IO_READLINE, "IO.readLine", {},                   ZlType::STRING});
     sigs.push_back({NativeId::IO_CLEAR, "IO.clear",     {},                   ZlType::VOID_TYPE});
     sigs.push_back({NativeId::COLLECTION_NEWLIST, "Collection.newList",   {},                                     ZlType::LIST});
-    sigs.push_back({NativeId::COLLECTION_PUSH, "Collection.push",      {ZlType::LIST, ZlType::UNKNOWN},        ZlType::VOID_TYPE});
-    sigs.push_back({NativeId::COLLECTION_POP, "Collection.pop",       {ZlType::LIST},                         ZlType::UNKNOWN});
-    sigs.push_back({NativeId::COLLECTION_GET, "Collection.get",       {ZlType::LIST, ZlType::INT},            ZlType::UNKNOWN});
-    sigs.push_back({NativeId::COLLECTION_SET, "Collection.set",       {ZlType::LIST, ZlType::INT, ZlType::UNKNOWN}, ZlType::VOID_TYPE});
+    generic(NativeId::COLLECTION_PUSH, "Collection.push", {"list<T>", "T"}, "void");
+    generic(NativeId::COLLECTION_POP, "Collection.pop", {"list<T>"}, "T");
+    generic(NativeId::COLLECTION_GET, "Collection.get", {"list<T>", "int"}, "T");
+    generic(NativeId::COLLECTION_SET, "Collection.set", {"list<T>", "int", "T"}, "void");
     sigs.push_back({NativeId::COLLECTION_LENGTH, "Collection.length",    {ZlType::UNKNOWN},                      ZlType::INT, "zl.lang", {{ZlType::LIST, ZlType::ARRAY, ZlType::SET, ZlType::MAP, ZlType::STRING, ZlType::UNKNOWN}}});
     sigs.push_back({NativeId::COLLECTION_NEWMAP, "Collection.newMap",    {},                                     ZlType::MAP});
-    sigs.push_back({NativeId::COLLECTION_MAPSET, "Collection.mapSet",    {ZlType::MAP, ZlType::UNKNOWN, ZlType::UNKNOWN}, ZlType::VOID_TYPE});
-    sigs.push_back({NativeId::COLLECTION_MAPGET, "Collection.mapGet",    {ZlType::MAP, ZlType::UNKNOWN},         ZlType::UNKNOWN});
-    sigs.push_back({NativeId::COLLECTION_MAPHAS, "Collection.mapHas",    {ZlType::MAP, ZlType::UNKNOWN},         ZlType::BOOL});
-    sigs.push_back({NativeId::COLLECTION_MAPREMOVE, "Collection.mapRemove", {ZlType::MAP, ZlType::UNKNOWN},         ZlType::VOID_TYPE});
-    sigs.push_back({NativeId::COLLECTION_MAPKEYS, "Collection.mapKeys", {ZlType::MAP}, ZlType::LIST});
-    sigs.push_back({NativeId::COLLECTION_MAPVALUES, "Collection.mapValues", {ZlType::MAP}, ZlType::LIST});
+    generic(NativeId::COLLECTION_MAPSET, "Collection.mapSet", {"map<K,V>", "K", "V"}, "void");
+    generic(NativeId::COLLECTION_MAPGET, "Collection.mapGet", {"map<K,V>", "K"}, "V");
+    generic(NativeId::COLLECTION_MAPHAS, "Collection.mapHas", {"map<K,V>", "K"}, "bool");
+    generic(NativeId::COLLECTION_MAPREMOVE, "Collection.mapRemove", {"map<K,V>", "K"}, "void");
+    generic(NativeId::COLLECTION_MAPKEYS, "Collection.mapKeys", {"map<K,V>"}, "list<K>");
+    generic(NativeId::COLLECTION_MAPVALUES, "Collection.mapValues", {"map<K,V>"}, "list<V>");
     sigs.push_back({NativeId::COLLECTION_NEWSET, "Collection.newSet",    {},                                     ZlType::SET});
-    sigs.push_back({NativeId::COLLECTION_SETADD, "Collection.setAdd",    {ZlType::SET, ZlType::UNKNOWN},         ZlType::VOID_TYPE});
-    sigs.push_back({NativeId::COLLECTION_SETHAS, "Collection.setHas",    {ZlType::SET, ZlType::UNKNOWN},         ZlType::BOOL});
-    sigs.push_back({NativeId::COLLECTION_SETREMOVE, "Collection.setRemove", {ZlType::SET, ZlType::UNKNOWN},         ZlType::VOID_TYPE});
-    sigs.push_back({NativeId::COLLECTION_SETITEMS, "Collection.setItems", {ZlType::SET}, ZlType::LIST});
+    generic(NativeId::COLLECTION_SETADD, "Collection.setAdd", {"set<T>", "T"}, "void");
+    generic(NativeId::COLLECTION_SETHAS, "Collection.setHas", {"set<T>", "T"}, "bool");
+    generic(NativeId::COLLECTION_SETREMOVE, "Collection.setRemove", {"set<T>", "T"}, "void");
+    generic(NativeId::COLLECTION_SETITEMS, "Collection.setItems", {"set<T>"}, "list<T>");
     sigs.push_back({NativeId::QUEUE_NEWQUEUE, "Queue.newQueue", {},                             ZlType::LIST, "zl.util.Queue"});
-    sigs.push_back({NativeId::QUEUE_ENQUEUE, "Queue.enqueue",  {ZlType::LIST, ZlType::UNKNOWN}, ZlType::VOID_TYPE, "zl.util.Queue"});
-    sigs.push_back({NativeId::QUEUE_DEQUEUE, "Queue.dequeue",  {ZlType::LIST},                 ZlType::UNKNOWN, "zl.util.Queue"});
-    sigs.push_back({NativeId::QUEUE_PEEK, "Queue.peek",     {ZlType::LIST},                 ZlType::UNKNOWN, "zl.util.Queue"});
+    generic(NativeId::QUEUE_ENQUEUE, "Queue.enqueue", {"list<T>", "T"}, "void", "zl.util.Queue");
+    generic(NativeId::QUEUE_DEQUEUE, "Queue.dequeue", {"list<T>"}, "T", "zl.util.Queue");
+    generic(NativeId::QUEUE_PEEK, "Queue.peek", {"list<T>"}, "T", "zl.util.Queue");
     sigs.push_back({NativeId::QUEUE_ISEMPTY, "Queue.isEmpty",  {ZlType::LIST},                 ZlType::BOOL, "zl.util.Queue"});
     sigs.push_back({NativeId::QUEUE_SIZE, "Queue.size", {ZlType::LIST}, ZlType::INT, "zl.util.Queue"});
     sigs.push_back({NativeId::STACK_NEWSTACK, "Stack.newStack", {},                             ZlType::LIST, "zl.util.Stack"});
-    sigs.push_back({NativeId::STACK_PUSH, "Stack.push",     {ZlType::LIST, ZlType::UNKNOWN}, ZlType::VOID_TYPE, "zl.util.Stack"});
-    sigs.push_back({NativeId::STACK_POP, "Stack.pop",      {ZlType::LIST},                 ZlType::UNKNOWN, "zl.util.Stack"});
-    sigs.push_back({NativeId::STACK_PEEK, "Stack.peek",     {ZlType::LIST},                 ZlType::UNKNOWN, "zl.util.Stack"});
+    generic(NativeId::STACK_PUSH, "Stack.push", {"list<T>", "T"}, "void", "zl.util.Stack");
+    generic(NativeId::STACK_POP, "Stack.pop", {"list<T>"}, "T", "zl.util.Stack");
+    generic(NativeId::STACK_PEEK, "Stack.peek", {"list<T>"}, "T", "zl.util.Stack");
     sigs.push_back({NativeId::STACK_ISEMPTY, "Stack.isEmpty",  {ZlType::LIST},                 ZlType::BOOL, "zl.util.Stack"});
     sigs.push_back({NativeId::STACK_SIZE, "Stack.size", {ZlType::LIST}, ZlType::INT, "zl.util.Stack"});
     sigs.push_back({NativeId::STRING_LENGTH, "String.length",    {ZlType::STRING},                           ZlType::INT});
@@ -130,7 +151,7 @@ std::vector<NativeSignature> buildSignatureTable() {
     sigs.push_back({NativeId::STRING_CHARAT, "String.charAt",    {ZlType::STRING, ZlType::INT},              ZlType::STRING});
     sigs.push_back({NativeId::STRING_SUBSTRING, "String.substring", {ZlType::STRING, ZlType::INT, ZlType::INT}, ZlType::STRING});
     sigs.push_back({NativeId::STRING_REPLACE, "String.replace",   {ZlType::STRING, ZlType::STRING, ZlType::STRING}, ZlType::STRING});
-    sigs.push_back({NativeId::STRING_SPLIT, "String.split",     {ZlType::STRING, ZlType::STRING},           ZlType::LIST});
+    sigs.push_back({NativeId::STRING_SPLIT, "String.split", {ZlType::STRING, ZlType::STRING}, ZlType::LIST, "zl.lang", {}, NativeReturnTypeRule::NONE, ZlType::UNKNOWN, "list<string>"});
     sigs.push_back({NativeId::STRING_TOINT, "String.toInt",     {ZlType::STRING},                           ZlType::INT});
     sigs.push_back({NativeId::STRING_TOFLOAT, "String.toFloat",   {ZlType::STRING},                           ZlType::DOUBLE});
     sigs.push_back({NativeId::FILESYSTEM_READFILE, "FileSystem.readFile",   {ZlType::STRING},                      ZlType::STRING});
@@ -234,5 +255,16 @@ findNativeSignature(const std::string& qualifiedName) {
     return std::nullopt;
 }
 
+
+std::unordered_map<std::string, std::string> nativeTypeBindings(const NativeSignature& signature,
+                                                               const std::string& firstArgumentType) {
+    std::unordered_map<std::string, std::string> bindings;
+    if (signature.returnTypeRule != NativeReturnTypeRule::FIRST_ARGUMENT_TYPES) return bindings;
+    const auto declared = parseTypeName(signature.parameterTypeNames.front());
+    const auto actual = parseTypeName(firstArgumentType);
+    for (std::size_t i = 0; i < declared.args.size(); ++i)
+        bindings.emplace(declared.args[i].name, i < actual.args.size() ? describeTypeName(actual.args[i]) : "unknown");
+    return bindings;
+}
 
 } // namespace zl

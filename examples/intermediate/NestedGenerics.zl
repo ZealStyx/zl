@@ -13,8 +13,8 @@
 // a nested type argument list needs - which is why `>>` still works as a shift
 // operator in ordinary expressions, shown at the end.
 //
-// Note that `List<int> nums = [1, 2, 3]` is still rejected: build the list with
-// `new List<int>()` and `push`, as below.
+// Typed literals such as `List<int> nums = [1, 2, 3]` preserve the same runtime
+// identity as construction with `new List<int>()` and `push`.
 // ============================================================================
 
 class Box<T> {

@@ -36,11 +36,11 @@ const ClassMethodInfo* OverloadResolver::resolve(
             {
                 const std::string argClass = i < argClassNames.size() ? argClassNames[i] : std::string();
                 const std::string paramClass = i < c->second.paramClassNames.size() ? c->second.paramClassNames[i] : std::string();
-                const bool paramGeneric = i < c->second.paramIsGeneric.size() && c->second.paramIsGeneric[i];
                 const bool needsIdentity = argTypes[i] == ZlType::OBJECT || argTypes[i] == ZlType::LIST ||
                                            argTypes[i] == ZlType::MAP || argTypes[i] == ZlType::SET ||
-                                           argTypes[i] == ZlType::ARRAY;
-                if (!paramGeneric && !argClass.empty() && !paramClass.empty() && needsIdentity && argClass != paramClass) {
+                                           argTypes[i] == ZlType::ARRAY || argTypes[i] == ZlType::UNION ||
+                                           argTypes[i] == ZlType::TASK;
+                if (!argClass.empty() && !paramClass.empty() && needsIdentity && argClass != paramClass) {
                     allExact = false;
                     break;
                 }
@@ -58,24 +58,18 @@ const ClassMethodInfo* OverloadResolver::resolve(
     }
 
     // Tier 2: widening match (e.g. int -> double), same isAssignable rule
-    // used for ordinary assignment. Object-typed parameters only compare by
-    // the generic ZlType::OBJECT tag here (see the ClassMethodInfo comment
-    // on paramTypes) - two overloads differing only by two different
-    // object-class parameter types can't be disambiguated today; that's a
-    // known, documented limitation, not a silent bug.
+    // used for ordinary assignment. The generic dispatch marker selects a
+    // shared bytecode slot; it must never exempt an instantiated signature
+    // from semantic compatibility checking.
     std::vector<const std::pair<std::string, ClassMethodInfo>*> widening;
     for (const auto* c : arityMatches) {
         bool allAssignable = true;
         for (std::size_t i = 0; i < argTypes.size(); ++i) {
             const std::string argClass = i < argClassNames.size() ? argClassNames[i] : std::string();
             const std::string paramClass = i < c->second.paramClassNames.size() ? c->second.paramClassNames[i] : std::string();
-            const bool paramGeneric = i < c->second.paramIsGeneric.size() && c->second.paramIsGeneric[i];
             if (!checker_.isAssignable(argTypes[i], c->second.paramTypes[i], argClass, paramClass)) {
-                if (!(argTypes[i] == ZlType::OBJECT && c->second.paramTypes[i] == ZlType::OBJECT &&
-                      paramGeneric)) {
-                    allAssignable = false;
-                    break;
-                }
+                allAssignable = false;
+                break;
             }
         }
         if (allAssignable) widening.push_back(c);

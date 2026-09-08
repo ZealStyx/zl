@@ -1,6 +1,7 @@
 #include "zl/compiler/type_checker.hpp"
 #include "zl/compiler/operator_rules.hpp"
 #include "zl/compiler/generic_instantiation.hpp"
+#include "zl/compiler/thread_capture.hpp"
 #include "zl/common/type_annotation.hpp"
 
 #include <functional>
@@ -12,23 +13,6 @@
 #include <unordered_set>
 
 namespace zl {
-
-namespace {
-// Whether a captured local is safe to carry across a thread boundary.
-// `Shared<T>` is the explicit opt-in wrapper; the rest are the runtime's own
-// synchronisation primitives, whose state is guarded internally and which are
-// exactly what the diagnostic tells you to use. Keep this list in step with
-// isThreadSafeClassName in src/vm/native.cpp.
-bool capturedValueCrossesThreadBoundary(const SymbolTable& symbols, const std::string& captured) {
-    const auto info = symbols.lookupVar(captured);
-    if (!info || info->type != ZlType::OBJECT) return false;
-    const auto& cls = info->className;
-    const bool threadSafe = cls == "Shared" || cls.rfind("Shared<", 0) == 0 ||
-                            cls == "Atomic" || cls == "Mutex" || cls == "RwLock" ||
-                            cls == "Semaphore" || cls == "Channel" || cls == "Condition";
-    return !threadSafe;
-}
-} // namespace
 
 namespace {
 bool genericCollectionCompatible(const std::string& from, const std::string& to) {
@@ -140,6 +124,7 @@ std::string zlTypeName(ZlType t) {
         case ZlType::FUNCTION: return "func";
         case ZlType::TASK: return "Task";
         case ZlType::UNKNOWN: return "unknown";
+        case ZlType::UNION: return "union";
     }
     return "unknown";
 }
@@ -156,49 +141,119 @@ void SymbolTable::popScope() {
     if (!scopes_.empty()) scopes_.pop_back();
 }
 
-bool SymbolTable::defineVar(const std::string& name, ZlType type, bool isConst, const std::string& className,
+SymbolTable::VarInfo& SymbolTable::defineVar(const std::string& name, ZlType type, bool isConst, const std::string& className,
                              const std::vector<ZlType>& functionParamTypes,
                              ZlType functionReturnType,
                              ZlType taskValueType,
                              const std::string& taskValueClassName,
-                             const std::vector<ZlType>& unionTypes,
-                             const std::vector<std::string>& unionClassNames,
                              std::optional<int> fixedArraySize,
                              ZlType arrayElementType,
                              const std::vector<std::string>& functionCaptureNames,
                              bool functionUsesThis,
                              bool functionHasSignature,
                              OwnershipKind ownership) {
-    if (scopes_.empty()) return false;
-    auto& top = scopes_.back();
-    if (top.count(name)) return false;
-    top[name] = VarInfo{type, isConst, ownership, className, functionParamTypes, {}, functionReturnType, "", false, taskValueType, taskValueClassName, functionCaptureNames, functionUsesThis,
-                        functionHasSignature, unionTypes, unionClassNames, fixedArraySize, arrayElementType};
-    return true;
+    return defineVar(name, VarInfo{type, isConst, ownership, className, functionParamTypes, {}, functionReturnType, "", false, taskValueType, taskValueClassName, functionCaptureNames, functionUsesThis,
+                        functionHasSignature, fixedArraySize, arrayElementType});
+}
+
+SymbolTable::VarInfo& SymbolTable::defineVar(const std::string& name, VarInfo info) {
+    if (scopes_.empty()) throw std::logic_error("variable definition without a scope");
+    if (scopes_.back().count(name)) throw TypeCheckError("duplicate variable '" + name + "' in the same scope");
+    info.storageName = "$local" + std::to_string(nextStorageId_++);
+    return scopes_.back().emplace(name, std::move(info)).first->second;
+}
+
+void SymbolTable::refine(const std::string& name, VarInfo view) {
+    // A pattern binding of the same spelling shadows the subject, rather
+    // than changing the declaration/constness of the original variable.
+    if (scopes_.back().count(name)) return;
+    const auto source = lookupVar(name);
+    if (!source) return;
+    view.declaration = source->declaration ? source->declaration : std::make_shared<VarInfo>(*source);
+    view.storageName = source->storageName;
+    view.isConst = source->isConst;
+    view.ownership = source->ownership;
+    view.functionCaptureNames = source->functionCaptureNames;
+    view.functionUsesThis = source->functionUsesThis;
+    view.functionIsAsync = source->functionIsAsync;
+    scopes_.back().emplace(name, std::move(view));
+}
+
+void SymbolTable::invalidate(const std::string& name) {
+    const auto binding = lookupVar(name);
+    if (!binding) return;
+    const auto slot = binding->storageName;
+    for (auto& scope : scopes_) for (auto& entry : scope) {
+        auto& view = entry.second;
+        if (view.storageName != slot || !view.declaration) continue;
+        auto declaration = view.declaration;
+        view = *declaration;
+        view.declaration = std::move(declaration);
+    }
+}
+
+void SymbolTable::joinRefinements(ScopeState entry, const std::vector<ScopeState>& exits) {
+    restore(std::move(entry));
+    for (std::size_t i = 0; i < scopes_.size(); ++i) for (auto& binding : scopes_[i]) {
+        if (!binding.second.declaration) continue;
+        for (const auto& exit : exits) {
+            bool preserved = false;
+            if (i < exit.size()) {
+                const auto found = exit[i].find(binding.first);
+                preserved = found != exit[i].end() && found->second.type == binding.second.type &&
+                            found->second.className == binding.second.className;
+            }
+            if (!preserved) {
+                auto declaration = binding.second.declaration;
+                binding.second = *declaration;
+                binding.second.declaration = std::move(declaration);
+                break;
+            }
+        }
+    }
 }
 
 void SymbolTable::setFunctionSignature(const std::string& name, std::vector<std::string> paramClassNames,
                                        std::string returnClassName, bool isAsync, bool hasSignature) {
-    if (scopes_.empty()) return;
-    for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
-        auto found = it->find(name);
-        if (found != it->end()) {
-            found->second.functionParamClassNames = std::move(paramClassNames);
-            found->second.functionReturnClassName = std::move(returnClassName);
-            found->second.functionIsAsync = isAsync;
-            found->second.functionHasSignature = hasSignature;
-            return;
-        }
-    }
+    auto& info = binding(name);
+    info.functionParamClassNames = std::move(paramClassNames);
+    info.functionReturnClassName = std::move(returnClassName);
+    info.functionIsAsync = isAsync;
+    info.functionHasSignature = hasSignature;
 }
-std::optional<SymbolTable::VarInfo>
-SymbolTable::lookupVar(const std::string& name) const {
-    // Walk scopes from innermost to outermost.
+
+std::optional<SymbolTable::VarInfo> SymbolTable::lookupVar(const std::string& name) const {
     for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
         auto found = it->find(name);
         if (found != it->end()) return found->second;
     }
     return std::nullopt;
+}
+
+SymbolTable::VarInfo& SymbolTable::binding(const std::string& name) {
+    for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
+        auto found = it->find(name);
+        if (found != it->end()) return found->second;
+    }
+    throw std::logic_error("unknown variable binding: " + name);
+}
+
+std::string SymbolTable::VarInfo::runtimeTypeName() const {
+    if (annotation) return describeTypeAnnotation(*annotation);
+    const auto nameOf = [](ZlType type, const std::string& className) {
+        return className.empty() ? zlTypeName(type) : className;
+    };
+    if (type == ZlType::FUNCTION && functionHasSignature) {
+        std::string out = "func(";
+        for (std::size_t i = 0; i < functionParamTypes.size(); ++i) {
+            if (i) out += ",";
+            out += nameOf(functionParamTypes[i], i < functionParamClassNames.size() ? functionParamClassNames[i] : "");
+        }
+        return out + "):" + nameOf(functionReturnType, functionReturnClassName);
+    }
+    if (type == ZlType::TASK && className.empty())
+        return "Task<" + nameOf(taskValueType, taskValueClassName) + ">";
+    return nameOf(type, className);
 }
 
 void SymbolTable::defineFunc(const FuncInfo& info) {
@@ -218,6 +273,28 @@ SymbolTable::lookupFunc(const std::string& name) const {
 
 ZlType TypeChecker::resolveType(const TypeAnnotation& annotation, std::string* outClassName) {
     return typeResolver_.resolveType(annotation, currentClassName_, currentClassTypeParams_, outClassName);
+}
+
+SymbolTable::VarInfo TypeChecker::variableInfo(const TypeAnnotation& annotation) {
+    SymbolTable::VarInfo info;
+    info.type = resolveType(annotation, &info.className);
+    info.annotation = annotation;
+    info.fixedArraySize = annotation.fixedSize;
+    if (info.type == ZlType::ARRAY && !annotation.typeArgs.empty())
+        info.arrayElementType = resolveType(annotation.typeArgs.front());
+    if (info.type == ZlType::TASK && !annotation.typeArgs.empty())
+        info.taskValueType = resolveType(annotation.typeArgs.front(), &info.taskValueClassName);
+    if (info.type == ZlType::FUNCTION) {
+        info.functionHasSignature = annotation.functionHasSignature;
+        for (const auto& param : annotation.functionParamTypes) {
+            std::string name;
+            info.functionParamTypes.push_back(resolveType(param, &name));
+            info.functionParamClassNames.push_back(std::move(name));
+        }
+        if (annotation.functionReturnType)
+            info.functionReturnType = resolveType(*annotation.functionReturnType, &info.functionReturnClassName);
+    }
+    return info;
 }
 
 void TypeChecker::validateOwnership(const TypeAnnotation& annotation, OwnershipKind ownership, std::size_t line) {
@@ -243,7 +320,22 @@ static std::string canonicalTaskTypeName(ZlType valueType, const std::string& va
 
 bool TypeChecker::isAssignable(ZlType from, ZlType to, const std::string& fromClassName,
                                 const std::string& toClassName) const {
+    if (from == ZlType::UNKNOWN || to == ZlType::UNKNOWN) return true;
+    if (from == ZlType::UNION) {
+        const auto& members = typeResolver_.unionMembers(fromClassName);
+        return std::all_of(members.begin(), members.end(), [&](const auto& member) {
+            return isAssignable(member.type, to, member.className, toClassName);
+        });
+    }
+    if (to == ZlType::UNION) {
+        const auto& members = typeResolver_.unionMembers(toClassName);
+        return std::any_of(members.begin(), members.end(), [&](const auto& member) {
+            return isAssignable(from, member.type, fromClassName, member.className);
+        });
+    }
     if (from == to) {
+        if (from == ZlType::FUNCTION && !fromClassName.empty() && !toClassName.empty())
+            return fromClassName == toClassName;
         // Collection types carry canonical generic arguments in className even
         // though their runtime kind is LIST/MAP/SET/ARRAY. Preserve those
         // arguments through assignability so list<Field> cannot silently
@@ -273,11 +365,13 @@ bool TypeChecker::isAssignable(ZlType from, ZlType to, const std::string& fromCl
         }
         return true;
     }
-    // UNKNOWN is a wildcard - if we can't determine the type, we allow it.
-    if (from == ZlType::UNKNOWN || to == ZlType::UNKNOWN) return true;
     // NIL is only assignable to reference-like/runtime-nullable types.
     // Primitive numeric/bool values are not nullable.
     if (from == ZlType::NIL) {
+        if (to == ZlType::OBJECT) {
+            const auto* shape = semanticModel_.findClass(toClassName);
+            if (shape && shape->isEnumType) return false;
+        }
         switch (to) {
             case ZlType::STRING:
             case ZlType::LIST:
@@ -454,6 +548,7 @@ DispatchSignature TypeChecker::dispatchSignature(const std::string& methodName, 
             case ZlType::MAP: signature.parameters.push_back({DispatchTypeKind::MAP, {}}); break;
             case ZlType::FUNCTION: signature.parameters.push_back({DispatchTypeKind::FUNCTION, {}}); break;
             case ZlType::TASK: signature.parameters.push_back({DispatchTypeKind::GENERIC_OBJECT, {}}); break;
+            case ZlType::UNION: signature.parameters.push_back({DispatchTypeKind::OBJECT, method.paramClassNames.at(i)}); break;
             case ZlType::NIL:
             case ZlType::OBJECT:
             case ZlType::UNKNOWN:
@@ -989,6 +1084,21 @@ void TypeChecker::check(const Program& program, bool requireMain) {
         }
     }
 
+    // Object storage is keyed by field name, not by (declaring class, name).
+    // Check after all shapes/parents exist so declaration order cannot hide
+    // a second contract for the same inherited slot.
+    for (const auto& decl : program.declarations) {
+        if (decl->kind != NodeKind::ClassDecl && decl->kind != NodeKind::DataDecl) continue;
+        const auto name = decl->kind == NodeKind::ClassDecl ? static_cast<const ClassDecl*>(decl.get())->name
+                                                          : static_cast<const DataDecl*>(decl.get())->name;
+        const auto* shape = semanticModel_.findClass(name);
+        if (shape->parentName.empty()) continue;
+        for (const auto& field : shape->fields) {
+            if (semanticModel_.findFieldInHierarchy(shape->parentName, field.first))
+                typeError("type '" + name + "' cannot redeclare inherited field '" + field.first + "'", decl->line);
+        }
+    }
+
     // Index all named static functions before any body is checked so interprocedural
     // confinement analysis is independent of declaration order.
     indexNamedFunctions(program);
@@ -1165,8 +1275,8 @@ void TypeChecker::registerClassShape(const ClassDecl* node) {
             // (e.g. "T"), which is how it's distinguished from an ordinary
             // object-typed parameter (paramClassName would be a real,
             // registered class name there instead).
-            bool isGeneric = std::find(node->typeParams.begin(), node->typeParams.end(), paramClassName) !=
-                              node->typeParams.end();
+            const bool isGeneric = std::find(node->typeParams.begin(), node->typeParams.end(), paramClassName) != node->typeParams.end() ||
+                (paramType == ZlType::UNION && containsTypeParameter(p.type, node->typeParams));
             m.paramIsGeneric.push_back(isGeneric);
         }
 
@@ -1227,12 +1337,6 @@ void TypeChecker::registerDataShape(const DataDecl* node) {
             if (field.type.functionReturnType) {
                 fieldInfo.functionReturnType = resolveType(*field.type.functionReturnType,
                                                            &fieldInfo.functionReturnClassName);
-            }
-        }
-        if (!node->extendsName.empty()) {
-            const auto* parentField = semanticModel_.findFieldInHierarchy(node->extendsName, field.name);
-            if (parentField) {
-                typeError("data type '" + node->name + "' cannot redeclare inherited field '" + field.name + "'", field.type.line);
             }
         }
         info.fields[field.name] = std::move(fieldInfo);
@@ -1717,44 +1821,11 @@ void TypeChecker::checkFunctionDecl(const FunctionDecl* node) {
     lockOrderRanks_.clear();
 
     for (const auto& p : node->params) {
-        std::string paramClassName;
-        ZlType paramType = resolveType(p.type, &paramClassName);
+        auto info = variableInfo(p.type);
+        info.ownership = p.ownership;
         validateOwnership(p.type, p.ownership, p.type.line);
-        ZlType taskValueType = ZlType::UNKNOWN;
-        std::string taskValueClassName;
-        if (paramType == ZlType::TASK && p.type.typeArgs.size() == 1) {
-            taskValueType = resolveType(p.type.typeArgs[0], &taskValueClassName);
-        }
-        std::vector<ZlType> functionParamTypes;
-        std::vector<std::string> functionParamClassNames;
-        ZlType functionReturnType = ZlType::UNKNOWN;
-        std::string functionReturnClassName;
-        if (paramType == ZlType::FUNCTION) {
-            for (const auto& fp : p.type.functionParamTypes) {
-                std::string cls;
-                functionParamTypes.push_back(resolveType(fp, &cls));
-                functionParamClassNames.push_back(std::move(cls));
-            }
-            if (p.type.functionReturnType) {
-                functionReturnType = resolveType(*p.type.functionReturnType, &functionReturnClassName);
-            }
-        }
-        symbols_.defineVar(p.name, paramType, /*isConst=*/false, paramClassName,
-                           functionParamTypes, functionReturnType, taskValueType, taskValueClassName,
-                           {}, {}, std::nullopt, ZlType::UNKNOWN, {}, false,
-                           paramType == ZlType::FUNCTION && p.type.functionHasSignature, p.ownership);
-        // A borrow-annotated parameter is a live borrow for the entire
-        // function body. Its concrete owner is established by the caller,
-        // so the local flow model uses a sentinel source. This is enough to
-        // prevent suspension until a real lifetime/region system can prove
-        // that the owner outlives the async frame.
-        if (p.ownership == OwnershipKind::BORROW) {
-            borrowSources_[p.name] = "<borrow-parameter>";
-        }
-        if (paramType == ZlType::FUNCTION) {
-            symbols_.setFunctionSignature(p.name, std::move(functionParamClassNames),
-                                          std::move(functionReturnClassName), false, p.type.functionHasSignature);
-        }
+        p.storageName = symbols_.defineVar(p.name, std::move(info)).storageName;
+        if (p.ownership == OwnershipKind::BORROW) borrowSources_[p.name] = "<borrow-parameter>";
     }
 
     if (node->body) {
@@ -2014,54 +2085,60 @@ TypeChecker::InferredType TypeChecker::inferIndexAccess(const IndexAccessExpr* n
     if (!object.className.empty()) {
         const std::string prefix = "List<";
         if (object.className.rfind(prefix, 0) == 0 && object.className.back() == '>') {
+            // The element type is the generic argument, e.g. "Task<int>" from
+            // "List<Task<int>>". It can itself be instantiated, so decode the
+            // full name via the shared name<->type helpers rather than
+            // re-matching spellings here: a class keeps its full instantiation
+            // as its name (`List<int>`, `Shared<int>`, `Widget`), and `Task<T>`
+            // carries its value type so `xs[0].block()` type-checks the same as
+            // `xs.get(0).block()`.
             const std::string elem = object.className.substr(prefix.size(), object.className.size() - prefix.size() - 1);
-            // An element name can carry its own type arguments (`Task<int>`),
-            // so match on the base name and keep the full instantiation.
-            auto canonicalOf = [](const std::string& name, std::string& klass) {
-                if (name == "int") return ZlType::INT;
-                if (name == "double") return ZlType::DOUBLE;
-                if (name == "string") return ZlType::STRING;
-                if (name == "bool") return ZlType::BOOL;
-                if (name == "nil") return ZlType::NIL;
-                if (name == "func") return ZlType::FUNCTION;
-                if (name == "Task") return ZlType::TASK;
-                if (name == "list") return ZlType::LIST;
-                if (name == "map") return ZlType::MAP;
-                if (name == "set") return ZlType::SET;
-                if (name == "array") return ZlType::ARRAY;
-                klass = name;
-                return ZlType::OBJECT;
-            };
-            const std::size_t angle = elem.find('<');
-            const std::string base = angle == std::string::npos ? elem : elem.substr(0, angle);
-            std::string elemClass;
-            result.type = canonicalOf(base, elemClass);
-            result.className = elemClass;
-            if (result.type == ZlType::OBJECT) {
-                // A class keeps its full instantiation as its name -
-                // `List<int>`, `Shared<int>`, `Widget`. The base name alone
-                // would drop the type arguments, so the next indexed access on
-                // the result would no longer see a `List<T>`.
-                result.className = elem;
-            }
-            if (result.type == ZlType::TASK) {
-                // `Task<T>` is its own type kind, not an OBJECT whose class name
-                // happens to be "Task<int>". Reporting it as OBJECT made
-                // `xs[0].block()` fail with "type 'Task' has no method 'block'"
-                // while the equivalent `xs.get(0).block()` worked.
-                result.className = elem;
-                if (angle != std::string::npos && elem.back() == '>' && elem.size() > angle + 1) {
-                    std::string valueClass;
-                    result.taskValueType =
-                        canonicalOf(elem.substr(angle + 1, elem.size() - angle - 2), valueClass);
-                    result.taskValueClassName = valueClass;
+            auto inferNamedType = [](InferredType& out, const std::string& fullName) {
+                const auto [base, args] = splitGenericName(fullName);
+                out.type = zlTypeFromBaseName(base);
+                out.className = (out.type == ZlType::OBJECT || out.type == ZlType::TASK) ? fullName : std::string{};
+                if (out.type == ZlType::TASK) {
+                    out.taskValueType = zlTypeFromBaseName(splitGenericName(args).first);
+                    out.taskValueClassName = (out.taskValueType == ZlType::OBJECT) ? args : std::string{};
                 }
-            }
+            };
+            inferNamedType(result, elem);
             return result;
         }
     }
     result.type = ZlType::UNKNOWN;
     return result;
+}
+
+TypeChecker::InferredType TypeChecker::inferExpected(const AstNode* node, ZlType type,
+                                                     const std::string& className, const TypeAnnotation& annotation) {
+    struct RestoreExpectation {
+        FunctionExpectation& slot;
+        FunctionExpectation saved;
+        ~RestoreExpectation() { slot = std::move(saved); }
+    } restore{currentLambdaExpectation_, std::move(currentLambdaExpectation_)};
+    currentLambdaExpectation_ = {};
+    if (type == ZlType::FUNCTION && node->kind == NodeKind::LambdaExpr && annotation.functionHasSignature) {
+        currentLambdaExpectation_.active = true;
+        for (const auto& param : annotation.functionParamTypes) {
+            std::string cls;
+            currentLambdaExpectation_.paramTypes.push_back(resolveType(param, &cls));
+            currentLambdaExpectation_.paramClassNames.push_back(std::move(cls));
+        }
+        if (annotation.functionReturnType) {
+            currentLambdaExpectation_.returnType = resolveType(*annotation.functionReturnType, &currentLambdaExpectation_.returnClassName);
+        }
+    }
+    if (node->kind == NodeKind::CollectionLiteral) {
+        if ((type == ZlType::LIST || type == ZlType::MAP || type == ZlType::SET) && annotation.typeArgs.empty()) {
+            const auto* literal = static_cast<const CollectionLiteral*>(node);
+            if (type == ZlType::SET) literal->targetCollectionKind = "set";
+            return inferCollectionLiteral(literal);
+        }
+        const auto inferred = inferCollectionLiteralExpected(static_cast<const CollectionLiteral*>(node), type, className, annotation);
+        return InferredType(inferred, className);
+    }
+    return inferExpr(node);
 }
 
 void TypeChecker::checkVarDecl(const VarDecl* node) {
@@ -2078,58 +2155,7 @@ void TypeChecker::checkVarDecl(const VarDecl* node) {
         if (!node->initializer) {
             typeError("explicitly typed local variable '" + node->name + "' must be initialized", node->line);
         }
-        if (!node->type.unionOf.empty()) {
-            std::vector<ZlType> unionTypes;
-            std::vector<std::string> unionClassNames;
-            for (const auto& member : node->type.unionOf) {
-                std::string memberClassName;
-                unionTypes.push_back(resolveType(member, &memberClassName));
-                unionClassNames.push_back(std::move(memberClassName));
-            }
-            const auto initResult = inferExpr(node->initializer.get());
-            ZlType init = initResult.type;
-            bool allowed = false;
-            std::string initClass = initResult.className;
-            for (std::size_t i = 0; i < unionTypes.size(); ++i) {
-                const std::string& memberClassName = i < unionClassNames.size() ? unionClassNames[i] : std::string();
-                if (isAssignable(init, unionTypes[i], initClass, memberClassName)) { allowed = true; break; }
-            }
-            if (!allowed) {
-                typeError("cannot assign " + zlTypeName(init) + " to union variable '" + node->name + "'", node->line);
-            }
-            symbols_.defineVar(node->name, ZlType::UNKNOWN, node->isConst, "", {}, ZlType::UNKNOWN, ZlType::UNKNOWN, "", unionTypes, unionClassNames, std::nullopt, ZlType::UNKNOWN, {}, false, false, node->ownership);
-            return;
-        }
-
-        FunctionExpectation previousLambdaExpectation = currentLambdaExpectation_;
-        currentLambdaExpectation_ = {};
-        if (declaredType == ZlType::FUNCTION && node->initializer->kind == NodeKind::LambdaExpr &&
-            node->type.functionHasSignature) {
-            currentLambdaExpectation_.active = true;
-            for (const auto& param : node->type.functionParamTypes) {
-                std::string cls;
-                currentLambdaExpectation_.paramTypes.push_back(resolveType(param, &cls));
-                currentLambdaExpectation_.paramClassNames.push_back(std::move(cls));
-            }
-            if (node->type.functionReturnType) {
-                currentLambdaExpectation_.returnType = resolveType(*node->type.functionReturnType, &currentLambdaExpectation_.returnClassName);
-                if (currentLambdaExpectation_.returnType == ZlType::TASK &&
-                    node->type.functionReturnType->typeArgs.size() == 1) {
-                    currentLambdaExpectation_.taskValueType =
-                        resolveType(node->type.functionReturnType->typeArgs[0],
-                                    &currentLambdaExpectation_.taskValueClassName);
-                }
-            }
-        }
-        InferredType initResult;
-        if (node->initializer->kind == NodeKind::CollectionLiteral) {
-            initResult.type = inferCollectionLiteralExpected(
-                static_cast<const CollectionLiteral*>(node->initializer.get()),
-                declaredType, declaredClassName, node->type);
-        } else {
-            initResult = inferExpr(node->initializer.get());
-        }
-        currentLambdaExpectation_ = std::move(previousLambdaExpectation);
+        const InferredType initResult = inferExpected(node->initializer.get(), declaredType, declaredClassName, node->type);
         initType = initResult.type;
         initClassName = initResult.className;
         initTaskValueType = initResult.taskValueType;
@@ -2186,37 +2212,13 @@ void TypeChecker::checkVarDecl(const VarDecl* node) {
         } else if (initResult.ownership == OwnershipKind::BORROW) {
             typeError("cannot initialize non-borrow variable '" + node->name + "' from a borrowed value", node->line);
         }
-        ZlType arrayElementType = ZlType::UNKNOWN;
-        if (declaredType == ZlType::ARRAY && node->type.typeArgs.size() == 1) {
-            arrayElementType = resolveType(node->type.typeArgs[0], nullptr);
-        }
-        if (declaredType == ZlType::TASK && node->type.typeArgs.size() == 1) {
-            std::string taskClass;
-            initTaskValueType = resolveType(node->type.typeArgs[0], &taskClass);
-            initTaskValueClassName = taskClass;
-        }
-        std::vector<ZlType> declaredFunctionParams;
-        std::vector<std::string> declaredFunctionParamClasses;
-        ZlType declaredFunctionReturn = ZlType::UNKNOWN;
-        std::string declaredFunctionReturnClass;
-        if (declaredType == ZlType::FUNCTION) {
-            for (const auto& param : node->type.functionParamTypes) {
-                std::string cls;
-                declaredFunctionParams.push_back(resolveType(param, &cls));
-                declaredFunctionParamClasses.push_back(std::move(cls));
-            }
-            if (node->type.functionReturnType) {
-                declaredFunctionReturn = resolveType(*node->type.functionReturnType, &declaredFunctionReturnClass);
-            }
-        }
-        symbols_.defineVar(node->name, declaredType, node->isConst, declaredClassName,
-                           declaredFunctionParams, declaredFunctionReturn, initTaskValueType, initTaskValueClassName,
-                           {}, {}, node->type.fixedSize, arrayElementType, {}, false,
-                           declaredType == ZlType::FUNCTION && node->type.functionHasSignature, node->ownership);
-        if (declaredType == ZlType::FUNCTION) {
-            symbols_.setFunctionSignature(node->name, std::move(declaredFunctionParamClasses),
-                                          std::move(declaredFunctionReturnClass), false, node->type.functionHasSignature);
-        }
+        auto info = variableInfo(node->type);
+        info.isConst = node->isConst;
+        info.ownership = node->ownership;
+        info.functionIsAsync = initResult.functionIsAsync;
+        info.functionCaptureNames = initResult.functionCaptureNames;
+        info.functionUsesThis = initResult.functionUsesThis;
+        symbols_.defineVar(node->name, std::move(info));
     } else {
         InferredType initResult;
         bool hasInitializer = false;
@@ -2241,18 +2243,20 @@ void TypeChecker::checkVarDecl(const VarDecl* node) {
         if (initType == ZlType::FUNCTION) {
             symbols_.defineVar(node->name, initType, node->isConst, initClassName,
                                initResult.functionParamTypes, initResult.functionReturnType,
-                               ZlType::UNKNOWN, "",
-                               {}, {}, std::nullopt, ZlType::UNKNOWN,
+                               ZlType::UNKNOWN, "", std::nullopt, ZlType::UNKNOWN,
                                initResult.functionCaptureNames, initResult.functionUsesThis, initResult.functionHasSignature, inferredOwnership);
             symbols_.setFunctionSignature(node->name, initResult.functionParamClassNames,
                                            initResult.functionReturnClassName, initResult.functionIsAsync, initResult.functionHasSignature);
         } else if (hasInitializer && initType == ZlType::TASK) {
             symbols_.defineVar(node->name, initType, node->isConst, initClassName,
-                               {}, ZlType::UNKNOWN, initResult.taskValueType, initResult.taskValueClassName, {}, {}, std::nullopt, ZlType::UNKNOWN, {}, false, false, node->ownership);
+                               {}, ZlType::UNKNOWN, initResult.taskValueType, initResult.taskValueClassName, std::nullopt, ZlType::UNKNOWN, {}, false, false, node->ownership);
         } else {
-            symbols_.defineVar(node->name, initType, node->isConst, initClassName, {}, ZlType::UNKNOWN, ZlType::UNKNOWN, "", {}, {}, std::nullopt, ZlType::UNKNOWN, {}, false, false, inferredOwnership);
+            symbols_.defineVar(node->name, initType, node->isConst, initClassName, {}, ZlType::UNKNOWN, ZlType::UNKNOWN, "", std::nullopt, ZlType::UNKNOWN, {}, false, false, inferredOwnership);
         }
     }
+    node->storageName = symbols_.lookupVar(node->name)->storageName;
+    if (node->hasExplicitType) symbols_.binding(node->name).annotation = node->type;
+    node->assertedTypeName = symbols_.lookupVar(node->name)->runtimeTypeName();
     if (node->initializer) {
         if (auto owner = sharedPayloadOwnerForExpr(node->initializer.get(), sharedPayloadOwners_, sharedCellAliases_))
             sharedPayloadOwners_[node->name] = *owner;
@@ -2599,25 +2603,30 @@ TypeChecker::OwnershipFlowState TypeChecker::joinOwnershipStates(
 void TypeChecker::checkIfStmt(const IfStmt* node) {
     const OwnershipFlowState incoming = captureOwnershipState();
     std::vector<OwnershipFlowState> exits;
-    exits.reserve(node->branches.size() + (node->elseBody ? 1 : 2));
-
+    const auto entryTypes = symbols_.snapshot();
+    auto fallthroughTypes = entryTypes;
+    std::vector<SymbolTable::ScopeState> typeExits;
     for (const auto& branch : node->branches) {
         restoreOwnershipState(incoming);
+        symbols_.restore(fallthroughTypes);
         if (branch.condition) (void)inferExpr(branch.condition.get());
+        fallthroughTypes = symbols_.snapshot();
         if (branch.body) checkStatement(branch.body.get());
         exits.push_back(captureOwnershipState());
+        typeExits.push_back(symbols_.snapshot());
     }
-
+    symbols_.restore(fallthroughTypes);
     if (node->elseBody) {
         restoreOwnershipState(incoming);
         checkStatement(node->elseBody.get());
         exits.push_back(captureOwnershipState());
+        typeExits.push_back(symbols_.snapshot());
     } else {
-        // No branch may execute. Keep the incoming state as a reachable path.
         exits.push_back(incoming);
+        typeExits.push_back(fallthroughTypes);
     }
-
     restoreOwnershipState(joinOwnershipStates(exits));
+    symbols_.joinRefinements(entryTypes, typeExits);
 }
 
 void TypeChecker::checkReturnStmt(const ReturnStmt* node) {
@@ -2704,6 +2713,7 @@ void TypeChecker::checkReturnStmt(const ReturnStmt* node) {
 }
 
 void TypeChecker::checkForStmt(const ForStmt* node) {
+    for (const auto& assigned : collectLambdaCaptureRefs(node, {}).assignedNames) symbols_.invalidate(assigned);
     ZlType startType = inferExpr(node->start.get());
     ZlType endType = inferExpr(node->end.get());
     ZlType stepType = inferExpr(node->step.get());
@@ -2715,7 +2725,8 @@ void TypeChecker::checkForStmt(const ForStmt* node) {
     }
     ZlType loopType = (startType == ZlType::DOUBLE || endType == ZlType::DOUBLE ||
                        stepType == ZlType::DOUBLE) ? ZlType::DOUBLE : ZlType::INT;
-    symbols_.defineVar(node->varName, loopType, /*isConst=*/false);
+    symbols_.pushScope();
+    node->storageName = symbols_.defineVar(node->varName, loopType, /*isConst=*/false).storageName;
 
     const OwnershipFlowState incoming = captureOwnershipState();
     if (node->body) {
@@ -2725,9 +2736,11 @@ void TypeChecker::checkForStmt(const ForStmt* node) {
         // are both reachable after the loop.
         restoreOwnershipState(joinOwnershipStates({incoming, bodyExit}));
     }
+    symbols_.popScope();
 }
 
 void TypeChecker::checkWhileStmt(const WhileStmt* node) {
+    for (const auto& assigned : collectLambdaCaptureRefs(node, {}).assignedNames) symbols_.invalidate(assigned);
     if (node->condition) (void)inferExpr(node->condition.get());
     const OwnershipFlowState incoming = captureOwnershipState();
     if (node->body) {
@@ -2740,6 +2753,7 @@ void TypeChecker::checkWhileStmt(const WhileStmt* node) {
 }
 
 void TypeChecker::checkRepeatStmt(const RepeatStmt* node) {
+    for (const auto& assigned : collectLambdaCaptureRefs(node, {}).assignedNames) symbols_.invalidate(assigned);
     // do-while executes the body at least once, then may execute it again.
     if (node->body) checkStatement(node->body.get());
     if (node->condition) (void)inferExpr(node->condition.get());
@@ -2751,6 +2765,7 @@ void TypeChecker::checkTryStmt(const TryStmt* node) {
     std::vector<std::string> typedCatchClasses;
     bool seenCatchAll = false;
     for (const auto& clause : node->catches) {
+        symbols_.pushScope();
         if (seenCatchAll) {
             throw TypeCheckError("catch clause is unreachable after a catch-all clause");
         }
@@ -2772,7 +2787,9 @@ void TypeChecker::checkTryStmt(const TryStmt* node) {
             seenCatchAll = true;
             symbols_.defineVar(clause.varName, ZlType::STRING, false);
         }
+        clause.storageName = symbols_.lookupVar(clause.varName)->storageName;
         checkStatement(clause.block.get());
+        symbols_.popScope();
     }
     if (node->finallyBlock) checkStatement(node->finallyBlock.get());
 }
@@ -2817,94 +2834,28 @@ TypeChecker::InferredArguments TypeChecker::inferArguments(const std::vector<Nod
 }
 
 
-namespace {
-void collectThreadRefs(const AstNode* node, std::unordered_set<std::string>& refs, bool& usesThis,
-                       const std::unordered_set<std::string>& params) {
-    if (!node) return;
-    switch (node->kind) {
-        case NodeKind::Identifier: {
-            const auto* n=static_cast<const Identifier*>(node);
-            if (!params.count(n->name)) refs.insert(n->name);
-            break;
-        }
-        case NodeKind::ThisExpr: usesThis=true; break;
-        case NodeKind::UnaryExpr: { auto* n=static_cast<const UnaryExpr*>(node); collectThreadRefs(n->operand.get(),refs,usesThis,params); break; }
-        case NodeKind::AwaitExpr: { auto* n=static_cast<const AwaitExpr*>(node); collectThreadRefs(n->operand.get(),refs,usesThis,params); break; }
-        case NodeKind::BinaryExpr: { auto* n=static_cast<const BinaryExpr*>(node); collectThreadRefs(n->left.get(),refs,usesThis,params); collectThreadRefs(n->right.get(),refs,usesThis,params); break; }
-        case NodeKind::CallExpr: { auto* n=static_cast<const CallExpr*>(node);
-            // The callee is a NAME, not a child node, so walking only the
-            // arguments misses it. `f(g(x))` references both f and g, and a
-            // lambda that calls a captured func value must capture it - only
-            // names that actually resolve to a local are captured at runtime,
-            // so recording a class or method name here is harmless.
-            if (n->namespaceName.empty() && !n->calleeName.empty() && !params.count(n->calleeName)) {
-                refs.insert(n->calleeName);
-            }
-            for (auto& a : n->arguments) { collectThreadRefs(a.get(), refs, usesThis, params); }
-            break; }
-        case NodeKind::AssignExpr: { auto* n=static_cast<const AssignExpr*>(node); if(!params.count(n->name)) refs.insert(n->name); collectThreadRefs(n->value.get(),refs,usesThis,params); break; }
-        case NodeKind::MoveExpr: { auto* n=static_cast<const MoveExpr*>(node); if(!params.count(n->name)) refs.insert(n->name); break; }
-        case NodeKind::FieldAccessExpr: { auto* n=static_cast<const FieldAccessExpr*>(node); collectThreadRefs(n->object.get(),refs,usesThis,params); break; }
-        case NodeKind::IndexAccessExpr: { auto* n=static_cast<const IndexAccessExpr*>(node); collectThreadRefs(n->object.get(),refs,usesThis,params); collectThreadRefs(n->index.get(),refs,usesThis,params); break; }
-        case NodeKind::FieldAssignExpr: { auto* n=static_cast<const FieldAssignExpr*>(node); collectThreadRefs(n->object.get(),refs,usesThis,params); collectThreadRefs(n->value.get(),refs,usesThis,params); break; }
-        case NodeKind::MethodCallExpr: { auto* n=static_cast<const MethodCallExpr*>(node); collectThreadRefs(n->object.get(),refs,usesThis,params); for(auto& a:n->arguments) collectThreadRefs(a.get(),refs,usesThis,params); break; }
-        case NodeKind::NewExpr: { auto* n=static_cast<const NewExpr*>(node); for(auto& a:n->arguments) collectThreadRefs(a.get(),refs,usesThis,params); break; }
-        case NodeKind::CollectionLiteral: { auto* n=static_cast<const CollectionLiteral*>(node); for(auto& a:n->elements) collectThreadRefs(a.get(),refs,usesThis,params); for(auto& e:n->entries){collectThreadRefs(e.first.get(),refs,usesThis,params);collectThreadRefs(e.second.get(),refs,usesThis,params);} break; }
-        case NodeKind::BlockStmt: { auto* n=static_cast<const BlockStmt*>(node); for(auto& a:n->statements) collectThreadRefs(a.get(),refs,usesThis,params); break; }
-        case NodeKind::VarDecl: { auto* n=static_cast<const VarDecl*>(node); collectThreadRefs(n->initializer.get(),refs,usesThis,params); break; }
-        case NodeKind::LogStmt: { auto* n=static_cast<const LogStmt*>(node); collectThreadRefs(n->argument.get(),refs,usesThis,params); break; }
-        case NodeKind::IfStmt: { auto* n=static_cast<const IfStmt*>(node); for(auto& b:n->branches){collectThreadRefs(b.condition.get(),refs,usesThis,params);collectThreadRefs(b.body.get(),refs,usesThis,params);} collectThreadRefs(n->elseBody.get(),refs,usesThis,params); break; }
-        case NodeKind::ReturnStmt: { auto* n=static_cast<const ReturnStmt*>(node); collectThreadRefs(n->value.get(),refs,usesThis,params); break; }
-        case NodeKind::ForStmt: { auto* n=static_cast<const ForStmt*>(node); collectThreadRefs(n->start.get(),refs,usesThis,params);collectThreadRefs(n->end.get(),refs,usesThis,params);collectThreadRefs(n->step.get(),refs,usesThis,params);collectThreadRefs(n->body.get(),refs,usesThis,params); break; }
-        case NodeKind::WhileStmt: { auto* n=static_cast<const WhileStmt*>(node); collectThreadRefs(n->condition.get(),refs,usesThis,params);collectThreadRefs(n->body.get(),refs,usesThis,params); break; }
-        case NodeKind::RepeatStmt: { auto* n=static_cast<const RepeatStmt*>(node); collectThreadRefs(n->body.get(),refs,usesThis,params);collectThreadRefs(n->condition.get(),refs,usesThis,params); break; }
-        case NodeKind::TryStmt: { auto* n=static_cast<const TryStmt*>(node); collectThreadRefs(n->tryBlock.get(),refs,usesThis,params);for(auto& c:n->catches)collectThreadRefs(c.block.get(),refs,usesThis,params);collectThreadRefs(n->finallyBlock.get(),refs,usesThis,params);break; }
-        case NodeKind::ThrowStmt: { auto* n=static_cast<const ThrowStmt*>(node); collectThreadRefs(n->value.get(),refs,usesThis,params); break; }
-        case NodeKind::ExprStmt: { auto* n=static_cast<const ExprStmt*>(node); collectThreadRefs(n->expression.get(),refs,usesThis,params); break; }
-        case NodeKind::LambdaExpr: {
-            // A lambda nested in this body needs whatever IT references, so the
-            // enclosing lambda has to carry those names across for it: at
-            // runtime MakeClosure captures from the frame it executes in, and
-            // that frame holds exactly this lambda's captures. Without this,
-            // `func() { var inner = func() => n; inner() }` captures nothing
-            // for `inner` to see and dies with "undefined variable 'n'".
-            // The nested lambda's own parameters shadow outer names, so they
-            // must not be recorded as captures.
-            auto* n = static_cast<const LambdaExpr*>(node);
-            std::unordered_set<std::string> nestedParams(params);
-            for (const auto& p : n->params) nestedParams.insert(p.name);
-            collectThreadRefs(n->hasExprBody ? n->exprBody.get() : n->blockBody.get(),
-                              refs, usesThis, nestedParams);
-            break;
-        }
-        default: break;
-    }
-}
-}
 void TypeChecker::analyzeLambdaCaptures(LambdaExpr* node) {
-    std::unordered_set<std::string> refs, params;
+    std::unordered_set<std::string> params;
     for (const auto& p : node->params) params.insert(p.name);
-    bool usesThis=false;
-    collectThreadRefs(node->hasExprBody ? node->exprBody.get() : node->blockBody.get(), refs, usesThis, params);
-    node->captureNames.assign(refs.begin(), refs.end());
+    const AstNode* body = node->hasExprBody ? static_cast<const AstNode*>(node->exprBody.get())
+                                            : static_cast<const AstNode*>(node->blockBody.get());
+    const auto refs = collectLambdaCaptureRefs(body, params);
+    node->captureNames.assign(refs.names.begin(), refs.names.end());
     std::sort(node->captureNames.begin(), node->captureNames.end());
-    node->usesThis=usesThis;
+    node->captureStorageNames.clear();
+    for (const auto& name : node->captureNames) {
+        if (name == "this") node->captureStorageNames.push_back(name);
+        else if (const auto variable = symbols_.lookupVar(name)) node->captureStorageNames.push_back(variable->storageName);
+    }
+    node->usesThis = refs.usesThis;
 }
 void TypeChecker::validateThreadLambda(const LambdaExpr* node, const char* apiName) {
     if (!node) return;
     if (node->usesThis) typeError(std::string(apiName)+" cannot capture 'this'; wrap the object in Shared<T>", node->line);
+    // Same policy and class list as the func-value spawn/start paths in
+    // inferCall, via the one shared predicate - do not re-inline it here.
     for (const auto& name : node->captureNames) {
-        auto info=symbols_.lookupVar(name);
-        if (!info) continue;
-        // Shared<T> is the explicit opt-in wrapper. The synchronisation
-        // primitives are also allowed: their state is guarded internally, and
-        // they are what this message tells you to reach for. Keep this list in
-        // step with isThreadSafeClassName in src/vm/native.cpp.
-        const auto& cls = info->className;
-        const bool threadSafe = cls == "Shared" || cls.rfind("Shared<", 0) == 0 ||
-                                cls == "Atomic" || cls == "Mutex" || cls == "RwLock" ||
-                                cls == "Semaphore" || cls == "Channel" || cls == "Condition";
-        if (!(info->type==ZlType::OBJECT && threadSafe))
+        if (capturedValueCrossesThreadBoundary(symbols_, name))
             typeError(std::string(apiName)+" cannot capture '"+name+"' across a thread boundary; use Shared<T>, Atomic, or Mutex for mutable shared state", node->line);
     }
 }
@@ -2941,6 +2892,21 @@ TypeChecker::InferredType TypeChecker::inferExpr(const AstNode* node) {
     }
 }
 
+namespace {
+// Decode one rendered generic argument name (e.g. "int", "Widget",
+// "List<int>") into the (kind, className) used to check a match pattern's
+// children. A generic class keeps its full instantiation as its class name.
+struct DecodedType { ZlType type; std::string className; };
+DecodedType decodeRenderedType(std::string name) {
+    const auto notSpace = [](char c) { return c != ' ' && c != '\t' && c != '\n' && c != '\r'; };
+    name.erase(name.begin(), std::find_if(name.begin(), name.end(), notSpace));
+    name.erase(std::find_if(name.rbegin(), name.rend(), notSpace).base(), name.end());
+    const auto [base, args] = splitGenericName(name);
+    const ZlType type = zlTypeFromBaseName(base);
+    return {type, (type == ZlType::OBJECT || !args.empty()) ? name : std::string{}};
+}
+} // namespace
+
 TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
     const InferredType subject = inferExpr(node->subject.get());
     if (node->arms.empty()) typeError("match requires at least one arm", node->line);
@@ -2948,22 +2914,36 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
     InferredType result;
     bool haveResult = false;
     bool hasWildcard = false;
-    std::unordered_set<std::string> matchedEnumMembers;
     bool matchedTrue = false, matchedFalse = false;
-    bool matchedOptionSome = false, matchedOptionNone = false;
-    bool matchedResultOk = false, matchedResultErr = false;
-    const bool subjectIsUnion = !subject.unionTypes.empty();
-    auto unionMemberMatches = [&](ZlType from, const std::string& fromClass, ZlType to, const std::string& toClass) {
-        return isAssignable(from, to, fromClass, toClass) || isAssignable(to, from, toClass, fromClass);
-    };
-    auto unionAccepts = [&](ZlType patternType, const std::string& patternClass) {
-        if (!subjectIsUnion) return false;
-        for (std::size_t i = 0; i < subject.unionTypes.size(); ++i) {
-            const std::string memberClass = i < subject.unionClassNames.size() ? subject.unionClassNames[i] : std::string();
-            if (unionMemberMatches(patternType, patternClass, subject.unionTypes[i], memberClass)) return true;
+    const bool subjectIsUnion = subject.type == ZlType::UNION;
+    std::function<bool(ZlType, const std::string&, ZlType, const std::string&)> overlaps;
+    overlaps = [&](ZlType actual, const std::string& actualClass, ZlType pattern, const std::string& patternClass) {
+        if (actual == ZlType::UNION) {
+            const auto& members = typeResolver_.unionMembers(actualClass);
+            return std::any_of(members.begin(), members.end(), [&](const auto& member) {
+                return overlaps(member.type, member.className, pattern, patternClass);
+            });
         }
-        return false;
+        if (pattern == ZlType::UNION) return overlaps(pattern, patternClass, actual, actualClass);
+        return isAssignable(actual, pattern, actualClass, patternClass) || isAssignable(pattern, actual, patternClass, actualClass);
     };
+    std::vector<ResolvedTypeArg> remaining = subjectIsUnion
+        ? typeResolver_.unionMembers(subject.className) : std::vector<ResolvedTypeArg>{{subject.type, subject.className}};
+    {
+        // Reference types are nullable in ZL. A string/object type pattern
+        // excludes nil, so its implicit nil alternative still needs coverage.
+        if (std::any_of(remaining.begin(), remaining.end(), [&](const auto& member) {
+                return isAssignable(ZlType::NIL, member.type, "", member.className);
+            }) && std::none_of(remaining.begin(), remaining.end(), [](const auto& member) { return member.type == ZlType::NIL; }))
+            remaining.push_back({ZlType::NIL, ""});
+    }
+    const auto entryTypes = symbols_.snapshot();
+    auto fallthroughTypes = entryTypes;
+    std::vector<SymbolTable::ScopeState> typeExits;
+    const auto* subjectId = node->subject->kind == NodeKind::Identifier
+        ? static_cast<const Identifier*>(node->subject.get()) : nullptr;
+    bool stableSubject = subjectId != nullptr;
+    std::unordered_map<std::string, std::unordered_set<std::string>> coveredEnums;
     std::unordered_set<std::string> unconditionalPatterns;
     std::vector<std::pair<std::string, std::string>> priorTypePatterns;
     bool unconditionalPatternSeen = false;
@@ -2997,8 +2977,8 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
                     literal.literalType = pattern.literalType;
                     literal.raw = pattern.raw;
                     const InferredType pt = inferLiteral(&literal);
-                    const bool compatible = subjectIsUnion
-                        ? unionAccepts(pt.type, pt.className)
+                    const bool compatible = subjectType == ZlType::UNION
+                        ? overlaps(subjectType, subjectClass, pt.type, pt.className)
                         : ((subjectType == ZlType::UNKNOWN) ||
                            isAssignable(pt.type, subjectType, pt.className, subjectClass) ||
                            isAssignable(subjectType, pt.type, subjectClass, pt.className));
@@ -3014,16 +2994,12 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
                     if (!enumShape || !enumShape->isEnumType) typeError("unknown enum type in match pattern: '" + pattern.enumTypeName + "'", pattern.line);
                     if (std::find(enumShape->enumMembers.begin(), enumShape->enumMembers.end(), pattern.enumMemberName) == enumShape->enumMembers.end())
                         typeError("unknown enum member '" + pattern.enumTypeName + "." + pattern.enumMemberName + "'", pattern.line);
-                    const bool enumCompatible = subjectIsUnion
-                        ? unionAccepts(ZlType::OBJECT, pattern.enumTypeName)
+                    const bool enumCompatible = subjectType == ZlType::UNION
+                        ? overlaps(subjectType, subjectClass, ZlType::OBJECT, pattern.enumTypeName)
                         : (subjectType == ZlType::OBJECT && subjectClass == pattern.enumTypeName);
                     if (!enumCompatible)
                         typeError("enum match pattern '" + pattern.enumTypeName + "." + pattern.enumMemberName + "' does not match subject type", pattern.line);
-                    matchedEnumMembers.insert(pattern.enumMemberName);
-                    if (node->subject && node->subject->kind == NodeKind::Identifier) {
-                        const auto& subjectName = static_cast<const Identifier*>(node->subject.get())->name;
-                        symbols_.defineVar(subjectName, ZlType::OBJECT, false, pattern.enumTypeName);
-                    }
+
                     return false;
                 }
                 case MatchExpr::PatternKind::Wildcard:
@@ -3035,21 +3011,18 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
                 case MatchExpr::PatternKind::Type: {
                     std::string patternClass;
                     const ZlType patternType = resolveType(pattern.typePattern, &patternClass);
-                    const bool typeCompatible = subjectIsUnion
-                        ? unionAccepts(patternType, patternClass)
+                    const bool typeCompatible = subjectType == ZlType::UNION
+                        ? overlaps(subjectType, subjectClass, patternType, patternClass)
                         : ((subjectType == ZlType::UNKNOWN) ||
                            isAssignable(patternType, subjectType, patternClass, subjectClass) ||
                            isAssignable(subjectType, patternType, subjectClass, patternClass));
                     if (!typeCompatible)
                         typeError("match type pattern does not match subject type", pattern.line);
-                    if (pattern.bindingName == "_") return false;
-                    if (!pattern.bindingName.empty()) symbols_.defineVar(pattern.bindingName, patternType, false, patternClass);
+                    if (!pattern.bindingName.empty() && pattern.bindingName != "_")
+                        symbols_.defineVar(pattern.bindingName, variableInfo(pattern.typePattern));
                     // Flow-sensitive narrowing: within this arm the original subject identifier
                     // is refined to the matched type. The arm scope is discarded afterward.
-                    if (node->subject && node->subject->kind == NodeKind::Identifier) {
-                        const auto& subjectName = static_cast<const Identifier*>(node->subject.get())->name;
-                        symbols_.defineVar(subjectName, patternType, false, patternClass);
-                    }
+
                     return false;
                 }
                 case MatchExpr::PatternKind::List: {
@@ -3068,38 +3041,16 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
 
                     ZlType elementType = ZlType::UNKNOWN;
                     std::string elementClass;
-                    const auto lt = subjectClass.find('<');
-                    if (lt != std::string::npos && subjectClass.back() == '>') {
-                        const std::string body = subjectClass.substr(lt + 1, subjectClass.size() - lt - 2);
-                        std::size_t depth = 0;
-                        std::size_t comma = std::string::npos;
-                        for (std::size_t i = 0; i < body.size(); ++i) {
-                            if (body[i] == '<') ++depth;
-                            else if (body[i] == '>') { if (depth) --depth; }
-                            else if (body[i] == ',' && depth == 0) { comma = i; break; }
-                        }
-                        const std::string rawArg = body.substr(0, comma == std::string::npos ? body.size() : comma);
-                        const auto trim = [](std::string s) {
-                            const auto begin = s.find_first_not_of(" \t\n\r");
-                            const auto end = s.find_last_not_of(" \t\n\r");
-                            if (begin == std::string::npos) return std::string();
-                            return s.substr(begin, end - begin + 1);
-                        };
-                        const std::string arg = trim(rawArg);
-                        if (arg == "int") elementType = ZlType::INT;
-                        else if (arg == "double") elementType = ZlType::DOUBLE;
-                        else if (arg == "string") elementType = ZlType::STRING;
-                        else if (arg == "bool") elementType = ZlType::BOOL;
-                        else if (arg == "nil") elementType = ZlType::NIL;
-                        else if (arg == "func") elementType = ZlType::FUNCTION;
-                        else if (arg == "Task") elementType = ZlType::TASK;
-                        else if (arg == "list") elementType = ZlType::LIST;
-                        else if (arg == "map") elementType = ZlType::MAP;
-                        else if (arg == "set") elementType = ZlType::SET;
-                        else if (arg == "array") elementType = ZlType::ARRAY;
-                        else {
-                            elementType = ZlType::OBJECT;
-                            elementClass = arg;
+                    // A list/set subject carries its element type as the first
+                    // (and only) generic argument in its rendered class name.
+                    {
+                        const auto [subBase, subArgs] = splitGenericName(subjectClass);
+                        if (!subArgs.empty() && (subBase == "List" || subBase == "Set" ||
+                                                 subBase == "list" || subBase == "set")) {
+                            const auto arg = splitGenericArgs(subArgs).front();
+                            const auto decoded = decodeRenderedType(arg);
+                            elementType = decoded.type;
+                            elementClass = decoded.className;
                         }
                     }
                     std::unordered_set<std::string> seenSetElements;
@@ -3125,46 +3076,18 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
 
                     ZlType keyType = ZlType::UNKNOWN, valueType = ZlType::UNKNOWN;
                     std::string keyClass, valueClass;
-                    // Inferred/declaration-level map types preserve their K,V
-                    // arguments in className (e.g. map<string,int>). Decode
-                    // only the top-level comma so nested generic arguments
-                    // remain intact.
-                    const auto lt = subjectClass.find('<');
-                    if (lt != std::string::npos && !subjectClass.empty() && subjectClass.back() == '>') {
-                        const std::string base = subjectClass.substr(0, lt);
-                        if (base == "map" || base == "Map") {
-                            const std::string body = subjectClass.substr(lt + 1, subjectClass.size() - lt - 2);
-                            std::size_t depth = 0, comma = std::string::npos;
-                            for (std::size_t i = 0; i < body.size(); ++i) {
-                                if (body[i] == '<') ++depth;
-                                else if (body[i] == '>' && depth) --depth;
-                                else if (body[i] == ',' && depth == 0) { comma = i; break; }
-                            }
-                            if (comma != std::string::npos) {
-                                auto trim = [](std::string s) {
-                                    const auto b = s.find_first_not_of(" \t\n\r");
-                                    const auto e = s.find_last_not_of(" \t\n\r");
-                                    return b == std::string::npos ? std::string() : s.substr(b, e - b + 1);
-                                };
-                                const std::string k = trim(body.substr(0, comma));
-                                const std::string v = trim(body.substr(comma + 1));
-                                auto resolveCanonical = [&](const std::string& name, std::string& klass) {
-                                    if (name == "int") return ZlType::INT;
-                                    if (name == "double") return ZlType::DOUBLE;
-                                    if (name == "string") return ZlType::STRING;
-                                    if (name == "bool") return ZlType::BOOL;
-                                    if (name == "nil") return ZlType::NIL;
-                                    if (name == "func") return ZlType::FUNCTION;
-                                    if (name == "Task") return ZlType::TASK;
-                                    if (name == "list") return ZlType::LIST;
-                                    if (name == "map") return ZlType::MAP;
-                                    if (name == "set") return ZlType::SET;
-                                    if (name == "array") return ZlType::ARRAY;
-                                    klass = name;
-                                    return ZlType::OBJECT;
-                                };
-                                keyType = resolveCanonical(k, keyClass);
-                                valueType = resolveCanonical(v, valueClass);
+                    // A map subject preserves its K,V arguments in className
+                    // (e.g. map<string,int>); split on the top-level comma so a
+                    // nested generic argument stays intact.
+                    {
+                        const auto [subBase, subArgs] = splitGenericName(subjectClass);
+                        if (!subArgs.empty() && (subBase == "map" || subBase == "Map")) {
+                            const auto kv = splitGenericArgs(subArgs);
+                            if (kv.size() == 2) {
+                                const auto k = decodeRenderedType(kv[0]);
+                                const auto v = decodeRenderedType(kv[1]);
+                                keyType = k.type; keyClass = k.className;
+                                valueType = v.type; valueClass = v.className;
                             }
                         }
                     }
@@ -3189,8 +3112,8 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
                     const auto* shape = semanticModel_.findClass(pattern.typePattern.name);
                     if (!shape || !shape->isDataType)
                         typeError("unknown data type in match pattern: '" + pattern.typePattern.name + "'", pattern.line);
-                    const bool dataCompatible = subjectIsUnion
-                        ? unionAccepts(ZlType::OBJECT, pattern.typePattern.name)
+                    const bool dataCompatible = subjectType == ZlType::UNION
+                        ? overlaps(subjectType, subjectClass, ZlType::OBJECT, pattern.typePattern.name)
                         : (subjectType == ZlType::OBJECT && subjectClass == pattern.typePattern.name);
                     if (!dataCompatible)
                         typeError("data match pattern does not match subject type", pattern.line);
@@ -3248,6 +3171,8 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
         };
 
     for (auto& arm : node->arms) {
+        symbols_.restore(fallthroughTypes);
+        if (remaining.empty()) typeError("unreachable match arm: subject is already covered", arm.line);
         if (unconditionalPatternSeen)
             typeError("unreachable match arm: a previous irrefutable pattern matches every value", arm.line);
         const bool armUnconditional = (arm.guard == nullptr);
@@ -3268,7 +3193,7 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
         }
         if (armUnconditional && !patternKey.empty() && unconditionalPatterns.count(patternKey))
             typeError("unreachable duplicate match arm", arm.line);
-        if (armUnconditional && (arm.patternKind == MatchExpr::PatternKind::Type) && arm.typePattern.typeArgs.empty()) {
+        if (armUnconditional && (arm.patternKind == MatchExpr::PatternKind::Type) && arm.typePattern.typeArgs.empty() && !arm.typePattern.name.empty()) {
             for (const auto& prior : priorTypePatterns) {
                 const bool laterIsSubtype = isAssignable(ZlType::OBJECT, ZlType::OBJECT, arm.typePattern.name, prior.second);
                 if (laterIsSubtype && arm.typePattern.name != prior.second) {
@@ -3277,26 +3202,6 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
             }
         }
         if (armUnconditional && arm.patternKind == MatchExpr::PatternKind::Wildcard) unconditionalPatternSeen = true;
-        const bool boolBeforeTrue = matchedTrue, boolBeforeFalse = matchedFalse;
-        const auto enumBefore = matchedEnumMembers;
-
-        if (armUnconditional && arm.patternKind == MatchExpr::PatternKind::Type && !arm.typePattern.name.empty()) {
-            if (arm.typePattern.name == "Some") matchedOptionSome = true;
-            else if (arm.typePattern.name == "None") matchedOptionNone = true;
-            else if (arm.typePattern.name == "Ok") matchedResultOk = true;
-            else if (arm.typePattern.name == "Err") matchedResultErr = true;
-        }
-
-        if (arm.patternKind == MatchExpr::PatternKind::Data && arm.positional) {
-            const auto* shape = semanticModel_.findClass(arm.typePattern.name);
-            if (!shape || !shape->isDataType)
-                typeError("unknown data type in positional match pattern: '" + arm.typePattern.name + "'", arm.line);
-            if (arm.dataFields.size() > shape->fieldOrder.size())
-                typeError("too many positional fields in data match pattern '" + arm.typePattern.name + "'", arm.line);
-            for (std::size_t i = 0; i < arm.dataFields.size(); ++i)
-                arm.dataFields[i].fieldName = shape->fieldOrder[i];
-        }
-
         symbols_.pushScope();
         MatchExpr::Pattern p;
         p.kind = arm.patternKind; p.raw = arm.raw; p.literalType = arm.literalType;
@@ -3319,7 +3224,26 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
             p.mapEntries.push_back(std::move(copied));
         }
         p.containerKind = arm.containerKind; p.line = arm.line;
-        const bool irrefutable = checkPattern(p, subject.type, subject.className);
+        auto armSubject = ResolvedTypeArg{subject.type, subject.className};
+        const bool catchAll = arm.patternKind == MatchExpr::PatternKind::Wildcard || arm.patternKind == MatchExpr::PatternKind::Variable;
+        if (subjectIsUnion && catchAll && !remaining.empty())
+            armSubject = remaining.size() == 1 ? remaining.front() : typeResolver_.makeUnion(remaining);
+        const bool irrefutableShape = checkPattern(p, armSubject.type, armSubject.className);
+        if (stableSubject) {
+            if (arm.patternKind == MatchExpr::PatternKind::Type || arm.patternKind == MatchExpr::PatternKind::Data ||
+                arm.patternKind == MatchExpr::PatternKind::EnumMember) {
+                TypeAnnotation annotation = arm.typePattern;
+                if (arm.patternKind == MatchExpr::PatternKind::EnumMember) annotation.name = arm.enumTypeName;
+                symbols_.refine(subjectId->name, variableInfo(annotation));
+            } else if (subjectIsUnion && catchAll) {
+                SymbolTable::VarInfo view;
+                view.type = armSubject.type;
+                view.className = armSubject.className;
+                symbols_.refine(subjectId->name, std::move(view));
+            }
+        }
+        arm.storageBindings.clear();
+        for (const auto& binding : symbols_.currentScope()) arm.storageBindings[binding.first] = binding.second.storageName;
         // Only a root wildcard or bare variable is an unconditional catch-all
         // for purposes of arm reachability/exhaustiveness. Structural patterns
         // may contain only irrefutable children (for example Point(x, y)) but
@@ -3330,23 +3254,55 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
              arm.patternKind == MatchExpr::PatternKind::Variable);
         if (rootCatchAll) hasWildcard = true;
         if (armUnconditional && !patternKey.empty()) unconditionalPatterns.insert(patternKey);
-        if (armUnconditional && arm.patternKind == MatchExpr::PatternKind::Type && arm.typePattern.typeArgs.empty()) {
+        if (armUnconditional && arm.patternKind == MatchExpr::PatternKind::Type && arm.typePattern.typeArgs.empty() && !arm.typePattern.name.empty()) {
             priorTypePatterns.emplace_back(arm.typePattern.name, arm.typePattern.name);
         }
         if (rootCatchAll) unconditionalPatternSeen = true;
-        if (arm.guard) {
-            // Guarded arms do not establish exhaustiveness: a true/false or enum
-            // case may still fail its guard and fall through to a later arm.
-            matchedTrue = boolBeforeTrue;
-            matchedFalse = boolBeforeFalse;
-            for (auto it = matchedEnumMembers.begin(); it != matchedEnumMembers.end(); ) {
-                if (!enumBefore.count(*it)) it = matchedEnumMembers.erase(it);
-                else ++it;
+        if (armUnconditional) {
+            if (arm.patternKind == MatchExpr::PatternKind::Literal && arm.literalType == TokenType::BOOL_LITERAL) {
+                if (arm.raw == "true") matchedTrue = true; else matchedFalse = true;
             }
+            if (arm.patternKind == MatchExpr::PatternKind::EnumMember)
+                coveredEnums[arm.enumTypeName].insert(arm.enumMemberName);
+            remaining.erase(std::remove_if(remaining.begin(), remaining.end(), [&](const auto& member) {
+                if (catchAll) return true;
+                if (arm.patternKind == MatchExpr::PatternKind::Type) {
+                    std::string cls;
+                    auto type = resolveType(arm.typePattern, &cls);
+                    if (member.type == ZlType::NIL) return type == ZlType::NIL;
+                    if (member.type == ZlType::UNKNOWN) return arm.typePattern.name == "unknown";
+                    return isAssignable(member.type, type, member.className, cls);
+                }
+                if (arm.patternKind == MatchExpr::PatternKind::Data && irrefutableShape) {
+                    return member.type == ZlType::OBJECT &&
+                           isAssignable(member.type, ZlType::OBJECT, member.className, arm.typePattern.name);
+                }
+                if (arm.patternKind == MatchExpr::PatternKind::Literal) {
+                    if (member.type == ZlType::NIL && arm.literalType == TokenType::KW_NULL) return true;
+                    return member.type == ZlType::BOOL && matchedTrue && matchedFalse;
+                }
+                if (arm.patternKind == MatchExpr::PatternKind::EnumMember && member.type == ZlType::OBJECT) {
+                    const auto* shape = semanticModel_.findClass(member.className);
+                    return shape && shape->isEnumType && std::all_of(shape->enumMembers.begin(), shape->enumMembers.end(), [&](const auto& name) {
+                        return coveredEnums[member.className].count(name) != 0;
+                    });
+                }
+                return false;
+            }), remaining.end());
+        }
+        bool guardWritesSubject = false;
+        if (subjectId && arm.guard) {
+            for (const auto& name : collectLambdaCaptureRefs(arm.guard.get(), {}).assignedNames) {
+                const auto binding = symbols_.lookupVar(name);
+                guardWritesSubject = guardWritesSubject || (binding && binding->storageName == subjectId->storageName);
+            }
+        }
+        if (arm.guard) {
             const InferredType guardType = inferExpr(arm.guard.get());
             if (guardType.type != ZlType::BOOL && guardType.type != ZlType::UNKNOWN)
                 typeError("match guard must produce bool", arm.line);
         }
+        const auto afterGuard = symbols_.snapshot();
         const InferredType armResult = inferExpr(arm.result.get());
         if (!haveResult) { result = armResult; haveResult = true; }
         else if (armResult.type != result.type || armResult.className != result.className) {
@@ -3355,49 +3311,22 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
                 typeError("all match arms must produce the same type", arm.line);
         }
         symbols_.popScope();
+        typeExits.push_back(symbols_.snapshot());
+        symbols_.restore(afterGuard);
+        symbols_.popScope();
+        symbols_.joinRefinements(fallthroughTypes, {fallthroughTypes, symbols_.snapshot()});
+        fallthroughTypes = symbols_.snapshot();
+        stableSubject = stableSubject && !guardWritesSubject;
     }
+    symbols_.joinRefinements(entryTypes, typeExits);
 
-    if (!hasWildcard) {
-        // Open/explicit union subjects are conservatively non-exhaustive.
-        // Until the language has a closed-union exhaustiveness model, require
-        // an irrefutable arm so every runtime union member has a fallback.
-        if (subjectIsUnion)
-            typeError("non-exhaustive match: union subject requires a wildcard or irrefutable variable pattern", node->line);
-        if (subject.type == ZlType::BOOL && !(matchedTrue && matchedFalse))
-            typeError("non-exhaustive match: bool subject requires both true and false or a wildcard", node->line);
-        // Integers, doubles and strings have an open value space, so a set of
-        // literal patterns can never cover it. Reaching the end of the arm list
-        // evaluates the match to the SUBJECT itself, which has a different type
-        // from the arms: `match n { 1 => "one" }` yields the int 3 when n is 3.
-        // That either surfaces later as a runtime type assertion, or not at all
-        // when the result is untyped, so reject it here. An irrefutable variable
-        // pattern already counts as a wildcard (rootCatchAll above).
-        if (!subjectIsUnion &&
-            (subject.type == ZlType::INT || subject.type == ZlType::DOUBLE ||
-             subject.type == ZlType::STRING)) {
-            typeError("non-exhaustive match: " + zlTypeName(subject.type) +
-                      " subject requires a wildcard or irrefutable variable pattern", node->line);
+    if (!hasWildcard && !remaining.empty()) {
+        std::string uncovered;
+        for (const auto& member : remaining) {
+            if (!uncovered.empty()) uncovered += "|";
+            uncovered += member.className.empty() ? zlTypeName(member.type) : member.className;
         }
-        if (subject.type == ZlType::OBJECT && !subject.className.empty()) {
-            const auto* shape = semanticModel_.findClass(subject.className);
-            if (shape && shape->isEnumType) {
-                for (const auto& m : shape->enumMembers)
-                    if (!matchedEnumMembers.count(m))
-                        typeError("non-exhaustive match: missing enum case '" + subject.className + "." + m + "'", node->line);
-            }
-
-            const auto baseTypeName = [](const std::string& name) {
-                const auto lt = name.find('<');
-                return lt == std::string::npos ? name : name.substr(0, lt);
-            };
-            const std::string subjectBaseName = baseTypeName(subject.className);
-            if (subjectBaseName == "Option" && !(matchedOptionSome && matchedOptionNone)) {
-                typeError("non-exhaustive match: Option subject requires both Some and None or a wildcard", node->line);
-            }
-            if (subjectBaseName == "Result" && !(matchedResultOk && matchedResultErr)) {
-                typeError("non-exhaustive match: Result subject requires both Ok and Err or a wildcard", node->line);
-            }
-        }
+        typeError("non-exhaustive match: uncovered " + uncovered + "; add a covering pattern or wildcard", node->line);
     }
     return result;
 }
@@ -3437,6 +3366,7 @@ TypeChecker::InferredType TypeChecker::inferLiteral(const Literal* node) {
 TypeChecker::InferredType TypeChecker::inferIdentifier(const Identifier* node) {
     auto info = symbols_.lookupVar(node->name);
     if (info) {
+        node->storageName = info->storageName;
         if (movedVariables_.count(node->name)) {
             typeError("use of moved variable '" + node->name + "'", node->line);
         }
@@ -3458,8 +3388,6 @@ TypeChecker::InferredType TypeChecker::inferIdentifier(const Identifier* node) {
         result.functionHasSignature = info->functionHasSignature;
         result.taskValueType = info->taskValueType;
         result.taskValueClassName = info->taskValueClassName;
-        result.unionTypes = info->unionTypes;
-        result.unionClassNames = info->unionClassNames;
         auto namedIt = namedFunctionBindings_.find(node->name);
         if (namedIt != namedFunctionBindings_.end()) {
             result.functionIsNamedReference = true;
@@ -3577,6 +3505,13 @@ TypeChecker::InferredType TypeChecker::inferBinary(const BinaryExpr* node) {
                            node->op == TokenType::STAR || node->op == TokenType::SLASH ||
                            node->op == TokenType::PERCENT || node->op == TokenType::POW;
 
+    if ((left == ZlType::UNION || right == ZlType::UNION) &&
+        node->op != TokenType::EQ && node->op != TokenType::NEQ &&
+        node->op != TokenType::AND && node->op != TokenType::OR &&
+        !(node->op == TokenType::PLUS && (left == ZlType::STRING || right == ZlType::STRING))) {
+        typeError("operator requires narrowing the union operand with match", node->line);
+    }
+
     // Untyped lambda parameters are intentionally UNKNOWN until ZL grows
     // full func-type inference. Keep those expressions polymorphic rather
     // than rejecting otherwise valid lambdas such as `func(x) => x + 1`.
@@ -3691,6 +3626,7 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
             instantiateGenericClass("Shared",
                 {ResolvedTypeArg{value.type, value.className}},
                 node->line);
+        node->nativeFactoryTypeName = sharedClass;
         return InferredType(ZlType::OBJECT, sharedClass);
     }
 
@@ -3884,35 +3820,9 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
             }
 
             const auto args = inferArguments(node->arguments);
+            const auto nativeBindings = nativeTypeBindings(*sig, args.types.empty() ? "unknown" :
+                (args.classNames.front().empty() ? zlTypeName(args.types.front()) : args.classNames.front()));
 
-            // Shared.share<T>(value) is type-preserving. The generic class
-            // machinery already knows how to materialize Shared<int>,
-            // Shared<Person>, etc.; use it instead of returning bare object.
-            if (qualifiedName == "Shared.share" && args.types.size() == 1) {
-                const std::string className =
-                    instantiateGenericClass("Shared",
-                        {ResolvedTypeArg{args.types[0], args.classNames[0]}},
-                        node->line);
-                return InferredType(ZlType::OBJECT, className);
-            }
-
-            // Collection.length is intentionally polymorphic at runtime, but
-            // it is not a universal operation. Keep the native signature
-            // table simple while enforcing the actual accepted types here.
-            if (qualifiedName == "Collection.length" && args.types.size() == 1) {
-                const ZlType t = args.types[0];
-                const bool accepted = t == ZlType::LIST || t == ZlType::ARRAY ||
-                                      t == ZlType::MAP || t == ZlType::SET ||
-                                      t == ZlType::STRING || t == ZlType::UNKNOWN;
-                if (!accepted) {
-                    typeError("argument 1 to 'Collection.length': expected list, array, set, map, or string, got " +
-                              zlTypeName(t), node->line);
-                }
-            }
-
-            // Check each argument against the catalog-declared accepted set.
-            // Fixed paramTypes remain the common case; polymorphic natives opt
-            // into acceptedParamTypes without leaking special cases into this dispatcher.
             for (std::size_t i = 0; i < args.types.size(); ++i) {
                 const ZlType argType = args.types[i];
                 const std::string& argClass = args.classNames[i];
@@ -3921,14 +3831,21 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
 
                 bool accepted = false;
                 if (i < sig->acceptedParamTypes.size() && !sig->acceptedParamTypes[i].empty()) {
-                    for (const ZlType candidate : sig->acceptedParamTypes[i]) {
-                        if (argType == candidate || isAssignable(argType, candidate)) {
-                            accepted = true;
-                            break;
-                        }
-                    }
+                    std::vector<ResolvedTypeArg> alternatives;
+                    for (const auto candidate : sig->acceptedParamTypes[i])
+                        if (candidate != ZlType::UNKNOWN) alternatives.push_back({candidate, ""});
+                    // UNKNOWN allows a genuinely dynamic argument, not a
+                    // wildcard that silently admits known unsupported kinds.
+                    const auto allowed = typeResolver_.makeUnion(std::move(alternatives));
+                    accepted = isAssignable(argType, allowed.type, argClass, allowed.className);
                 } else {
-                    accepted = isAssignable(argType, sig->paramTypes[i]) || genericNumericAccepted;
+                    accepted = isAssignable(argType, sig->paramTypes[i], argClass) || genericNumericAccepted;
+                }
+
+                if (accepted && i > 0 && i < sig->parameterTypeNames.size()) {
+                    const auto expectedName = substituteTypeParams(sig->parameterTypeNames[i], nativeBindings);
+                    const auto expected = variableInfo(typeAnnotationFromName(parseTypeName(expectedName)));
+                    accepted = isAssignable(argType, expected.type, argClass, expected.className);
                 }
 
                 if (!accepted) {
@@ -3969,6 +3886,19 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                 task.className = canonicalTaskTypeName(task.taskValueType, "");
                 return task;
             }
+            if (!sig->returnClassName.empty()) {
+                const auto resultName = substituteTypeParams(sig->returnClassName, nativeBindings);
+                const auto info = variableInfo(typeAnnotationFromName(parseTypeName(resultName)));
+                InferredType result(info.type, info.className);
+                result.functionParamTypes = info.functionParamTypes;
+                result.functionParamClassNames = info.functionParamClassNames;
+                result.functionReturnType = info.functionReturnType;
+                result.functionReturnClassName = info.functionReturnClassName;
+                result.functionHasSignature = info.functionHasSignature;
+                result.taskValueType = info.taskValueType;
+                result.taskValueClassName = info.taskValueClassName;
+                return result;
+            }
             return InferredType(sig->returnType, sig->returnClassName);
         }
         typeError("unknown qualified func '" + qualifiedName + "'", node->line);
@@ -3985,6 +3915,7 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
         auto localVar = symbols_.lookupVar(node->calleeName);
         if (localVar && localVar->type == ZlType::FUNCTION) {
             node->isValueCall = true;
+            node->calleeStorageName = localVar->storageName;
             if (!localVar->functionParamTypes.empty() &&
                 localVar->functionParamTypes.size() != node->arguments.size()) {
                 typeError("func value '" + node->calleeName + "' expects " +
@@ -4008,7 +3939,7 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                     }
                 }
             }
-            return localVar->functionReturnType;
+            return InferredType(localVar->functionReturnType, localVar->functionReturnClassName);
         }
     }
 
@@ -4113,6 +4044,7 @@ TypeChecker::InferredType TypeChecker::inferMove(const MoveExpr* node) {
     }
     if (info->ownership != OwnershipKind::OWNED)
         typeError("move requires an owned variable; '" + node->name + "' is " + ownershipName(info->ownership), node->line);
+    node->storageName = info->storageName;
     movedVariables_.insert(node->name);
     InferredType result(info->type, info->className);
     result.ownership = OwnershipKind::OWNED;
@@ -4120,11 +4052,24 @@ TypeChecker::InferredType TypeChecker::inferMove(const MoveExpr* node) {
 }
 
 TypeChecker::InferredType TypeChecker::inferAssign(const AssignExpr* node) {
-    const auto valueResult = inferExpr(node->value.get());
-    ZlType valueType = valueResult.type;
-
     auto varInfo = symbols_.lookupVar(node->name);
     if (varInfo) {
+        node->storageName = varInfo->storageName;
+        if (varInfo->declaration) varInfo = *varInfo->declaration;
+    }
+    InferredType valueResult;
+    TypeAnnotation expected;
+    if (varInfo) {
+        expected = varInfo->annotation ? *varInfo->annotation : typeAnnotationFromName(parseTypeName(varInfo->runtimeTypeName()));
+        valueResult = inferExpected(node->value.get(), varInfo->type, varInfo->className, expected);
+    } else {
+        valueResult = inferExpr(node->value.get());
+    }
+    ZlType valueType = valueResult.type;
+    if (varInfo) {
+        node->assertedTypeName = varInfo->runtimeTypeName();
+        if (valueType == ZlType::FUNCTION)
+            validateFunctionTypeAssignment(expected, valueResult, node->line);
         for (const auto& [borrowName, sourceName] : borrowSources_) {
             if (sourceName == node->name && borrowName != node->name) {
                 typeError("cannot reassign owner '" + node->name + "' while borrow '" + borrowName + "' is active", node->line);
@@ -4187,27 +4132,9 @@ TypeChecker::InferredType TypeChecker::inferAssign(const AssignExpr* node) {
                                   "] to array[" + std::to_string(*varInfo->fixedArraySize) + "] variable '" +
                                   node->name + "'", node->line);
                     }
-                    if (source->arrayElementType != ZlType::UNKNOWN &&
-                        varInfo->arrayElementType != ZlType::UNKNOWN &&
-                        !isAssignable(source->arrayElementType, varInfo->arrayElementType)) {
-                        typeError("cannot assign array with element type " +
-                                  zlTypeName(source->arrayElementType) + " to array of " +
-                                  zlTypeName(varInfo->arrayElementType), node->line);
-                    }
+
                 }
             }
-        }
-        if (!varInfo->unionTypes.empty()) {
-            bool allowed = false;
-            for (std::size_t i = 0; i < varInfo->unionTypes.size(); ++i) {
-                const std::string& memberClassName = i < varInfo->unionClassNames.size() ? varInfo->unionClassNames[i] : std::string();
-                if (isAssignable(valueType, varInfo->unionTypes[i], valueClassName, memberClassName)) { allowed = true; break; }
-            }
-            if (!allowed) {
-                typeError("cannot assign " + zlTypeName(valueType) +
-                          " to union variable '" + node->name + "'", node->line);
-            }
-            return ZlType::UNKNOWN;
         }
         if (!isAssignable(valueType, varInfo->type, valueClassName, varInfo->className)) {
             typeError(
@@ -4246,6 +4173,7 @@ TypeChecker::InferredType TypeChecker::inferAssign(const AssignExpr* node) {
         } else {
             lockAliases_.erase(node->name);
         }
+        symbols_.invalidate(node->name);
         InferredType result(varInfo->type, varInfo->className);
         result.ownership = varInfo->ownership;
         if (varInfo->ownership == OwnershipKind::BORROW) result.borrowSource = borrowSources_[node->name];
@@ -4536,7 +4464,7 @@ TypeChecker::InferredType TypeChecker::inferNewExpr(const NewExpr* node) {
     const auto args = inferArguments(node->arguments);
 
     std::string owner;
-    const ClassMethodInfo* ctor = resolveOverload(candidates, args.types, {}, node->className, node->line, &owner);
+    const ClassMethodInfo* ctor = resolveOverload(candidates, args.types, args.classNames, node->className, node->line, &owner);
     warnIfDeprecatedMethod(*ctor, node->className, node->className, node->line);
     node->resolvedDispatch = dispatchSignature(node->className, *ctor);
 
@@ -4772,6 +4700,8 @@ TypeChecker::InferredType TypeChecker::inferFieldAccess(const FieldAccessExpr* n
     if (!field) {
         typeError("class '" + objClassName + "' has no field '" + node->fieldName + "'", node->line);
     }
+    const auto fieldType = typeResolver_.fieldInContext(*field, objClassName, owner, currentClassName_, currentClassTypeParams_);
+    field = &fieldType;
     if (field->isStatic) {
         typeError("static field '" + objClassName + "." + node->fieldName + "' must be accessed through its class", node->line);
     }
@@ -4853,6 +4783,8 @@ TypeChecker::InferredType TypeChecker::inferFieldAssign(const FieldAssignExpr* n
     }
 
     std::string valueClassName = valueResult.className;
+    const auto fieldType = typeResolver_.fieldInContext(*field, objClassName, owner, currentClassName_, currentClassTypeParams_);
+    field = &fieldType;
     if (!isAssignable(valueType, field->type, valueClassName, field->className)) {
         typeError(
             "cannot assign " + zlTypeName(valueType) + " to field '" + node->fieldName +
@@ -5102,7 +5034,7 @@ TypeChecker::InferredType TypeChecker::inferSuperCallExpr(const SuperCallExpr* n
     const auto args = inferArguments(node->arguments);
 
     std::string owner;
-    const ClassMethodInfo* ctor = resolveOverload(candidates, args.types, {}, parentName, node->line, &owner);
+    const ClassMethodInfo* ctor = resolveOverload(candidates, args.types, args.classNames, parentName, node->line, &owner);
     node->resolvedDispatch = dispatchSignature(parentName, *ctor);
 
     return ZlType::VOID_TYPE;
@@ -5202,19 +5134,24 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
     }
     lastFunctionParamTypes_.clear();
     lastFunctionReturnType_ = ZlType::UNKNOWN;
+    const auto enclosingSymbols = symbols_.snapshot();
     symbols_.pushScope();
+    const auto* body = node->hasExprBody ? node->exprBody.get() : node->blockBody.get();
+    std::unordered_set<std::string> boundParams;
+    for (const auto& param : node->params) boundParams.insert(param.name);
+    for (const auto& assigned : collectLambdaCaptureRefs(body, boundParams).assignedNames) symbols_.invalidate(assigned);
     for (std::size_t i = 0; i < node->params.size(); ++i) {
         const auto& p = node->params[i];
-        std::string paramClassName;
-        ZlType paramType = p.type.name.empty() ? ZlType::UNKNOWN : resolveType(p.type, &paramClassName);
-        if (!p.type.name.empty()) validateOwnership(p.type, p.ownership, p.type.line);
-        if (currentLambdaExpectation_.active && p.type.name.empty() &&
-            i < currentLambdaExpectation_.paramTypes.size()) {
-            paramType = currentLambdaExpectation_.paramTypes[i];
-            paramClassName = i < currentLambdaExpectation_.paramClassNames.size()
-                ? currentLambdaExpectation_.paramClassNames[i] : std::string();
+        SymbolTable::VarInfo info;
+        if (!p.type.name.empty() || !p.type.unionOf.empty()) {
+            info = variableInfo(p.type);
+            validateOwnership(p.type, p.ownership, p.type.line);
+        } else if (currentLambdaExpectation_.active && i < currentLambdaExpectation_.paramTypes.size()) {
+            info.type = currentLambdaExpectation_.paramTypes[i];
+            if (i < currentLambdaExpectation_.paramClassNames.size()) info.className = currentLambdaExpectation_.paramClassNames[i];
         }
-        symbols_.defineVar(p.name, paramType, /*isConst=*/false, paramClassName, {}, ZlType::UNKNOWN, ZlType::UNKNOWN, "", {}, {}, std::nullopt, ZlType::UNKNOWN, {}, false, false, p.ownership);
+        info.ownership = p.ownership;
+        p.storageName = symbols_.defineVar(p.name, std::move(info)).storageName;
     }
 
     const auto previousMovedVariables = movedVariables_;
@@ -5222,22 +5159,21 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
     ZlType previousReturnType = currentReturnType_;
     std::string previousReturnClassName = currentReturnClassName_;
     std::string previousFunctionName = currentFunctionName_;
-    // For an async lambda assigned to `func(...): Task<T>`, the lambda body
-    // produces T; only the callable value is wrapped in Task<T>. Synchronous
-    // lambdas returning an explicit Task<T> still check against the full task
-    // type.
+    const bool previousFunctionIsAsync = currentFunctionIsAsync_;
+    currentFunctionIsAsync_ = node->isAsync;
     currentReturnType_ = currentLambdaExpectation_.active
-        ? ((node->isAsync && currentLambdaExpectation_.returnType == ZlType::TASK &&
-            currentLambdaExpectation_.taskValueType != ZlType::UNKNOWN)
-              ? currentLambdaExpectation_.taskValueType
-              : currentLambdaExpectation_.returnType)
-        : ZlType::UNKNOWN;
+        ? currentLambdaExpectation_.returnType : ZlType::UNKNOWN;
     currentReturnClassName_ = currentLambdaExpectation_.active
-        ? ((node->isAsync && currentLambdaExpectation_.returnType == ZlType::TASK &&
-            currentLambdaExpectation_.taskValueType != ZlType::UNKNOWN)
-              ? currentLambdaExpectation_.taskValueClassName
-              : currentLambdaExpectation_.returnClassName)
-        : std::string();
+        ? currentLambdaExpectation_.returnClassName : std::string();
+    // A callable annotation describes Task<T>, but an async body returns T.
+    // Decode the complete expected signature rather than depending on the
+    // optional task-value side metadata (which returned callbacks lacked).
+    if (node->isAsync && currentReturnType_ == ZlType::TASK) {
+        const auto [taskName, valueName] = splitGenericName(currentReturnClassName_);
+        const auto value = decodeRenderedType(valueName);
+        currentReturnType_ = value.type;
+        currentReturnClassName_ = value.className;
+    }
     currentFunctionName_ = "<lambda>";
     lastFunctionReturnType_ = ZlType::UNKNOWN;
     lastFunctionReturnClassName_.clear();
@@ -5252,19 +5188,8 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
             inferredReturnResult.className = lastFunctionReturnClassName_;
         } else if (currentLambdaExpectation_.active &&
                    currentLambdaExpectation_.returnType != ZlType::UNKNOWN) {
-            // A block lambda with no explicit `return` is a void-producing
-            // lambda when its expected signature says so. Async expected
-            // signatures expose Task<T>, while the body itself produces T.
-            inferredReturnResult.type =
-                (node->isAsync && currentLambdaExpectation_.returnType == ZlType::TASK &&
-                 currentLambdaExpectation_.taskValueType != ZlType::UNKNOWN)
-                    ? currentLambdaExpectation_.taskValueType
-                    : currentLambdaExpectation_.returnType;
-            inferredReturnResult.className =
-                (node->isAsync && currentLambdaExpectation_.returnType == ZlType::TASK &&
-                 currentLambdaExpectation_.taskValueType != ZlType::UNKNOWN)
-                    ? currentLambdaExpectation_.taskValueClassName
-                    : currentLambdaExpectation_.returnClassName;
+            inferredReturnResult.type = currentReturnType_;
+            inferredReturnResult.className = currentReturnClassName_;
         }
     }
     const ZlType inferredReturn = inferredReturnResult.type;
@@ -5277,27 +5202,27 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
     for (std::size_t i = 0; i < node->params.size(); ++i) {
         const auto& p = node->params[i];
         std::string paramClass;
-        const ZlType paramType = p.type.name.empty()
+        const ZlType paramType = (p.type.name.empty() && p.type.unionOf.empty())
             ? (currentLambdaExpectation_.active && i < currentLambdaExpectation_.paramTypes.size()
                 ? currentLambdaExpectation_.paramTypes[i] : ZlType::UNKNOWN)
             : resolveType(p.type, &paramClass);
-        if (paramClass.empty() && currentLambdaExpectation_.active && p.type.name.empty() &&
+        if (paramClass.empty() && currentLambdaExpectation_.active && (p.type.name.empty() && p.type.unionOf.empty()) &&
             i < currentLambdaExpectation_.paramClassNames.size()) {
             paramClass = currentLambdaExpectation_.paramClassNames[i];
         }
         lastFunctionParamTypes_.push_back(paramType);
         paramClassNames.push_back(paramClass);
         std::string typeName = zlTypeName(paramType);
-        if (paramType == ZlType::OBJECT && !paramClass.empty()) typeName = paramClass;
+        if (!paramClass.empty()) typeName = paramClass;
         node->inferredParameterTypeNames.push_back(typeName);
     }
     lastFunctionReturnType_ = inferredReturn;
     lastFunctionReturnClassName_ = inferredReturnClassName;
     const std::string inferredReturnName =
         inferredReturnClassName.empty() ? zlTypeName(inferredReturn) : inferredReturnClassName;
-    node->inferredReturnTypeName = node->isAsync
-        ? (inferredReturn == ZlType::VOID_TYPE ? "Task<void>" : "Task<" + inferredReturnName + ">")
-        : inferredReturnName;
+    // Bytecode/closure metadata stores the body's result, just like a named
+    // async function. Only the callable signature below adds Task<T>.
+    node->inferredReturnTypeName = inferredReturnName;
 
     InferredType result(ZlType::FUNCTION);
     result.functionParamTypes = lastFunctionParamTypes_;
@@ -5318,7 +5243,8 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
     currentReturnType_ = previousReturnType;
     currentReturnClassName_ = previousReturnClassName;
     currentFunctionName_ = previousFunctionName;
-    symbols_.popScope();
+    currentFunctionIsAsync_ = previousFunctionIsAsync;
+    symbols_.restore(enclosingSymbols);
     movedVariables_ = previousMovedVariables;
     borrowSources_ = previousBorrowSources;
     return result;

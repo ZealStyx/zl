@@ -1,4 +1,5 @@
 #include "zl/vm/runtime_task.hpp"
+#include "zl/vm/gc_roots.hpp"
 
 #include <stdexcept>
 #include <iostream>
@@ -19,21 +20,7 @@ RuntimeTaskState::~RuntimeTaskState() noexcept {
     try {
         std::lock_guard<std::mutex> lock(mutex_);
         if (status_ != TaskStatus::Failed || failureObserved_ || !error_) return;
-        std::string message;
-        try {
-            std::rethrow_exception(error_);
-        } catch (const ZlThrownException& e) {
-            if (e.value() && e.value()->fields.count("message")) {
-                message = valueToString(e.value()->fields.at("message"));
-            } else {
-                message = e.value() ? e.value()->className : std::string("ZL exception");
-            }
-        } catch (const std::exception& e) {
-            message = e.what();
-        } catch (...) {
-            message = "unknown exception";
-        }
-        std::cerr << "unobserved task failure: " << message << "\n";
+        std::cerr << "unobserved task failure: " << error_.message() << "\n";
     } catch (...) {
         // Reporting must never turn task destruction into a new runtime failure.
     }
@@ -55,7 +42,8 @@ bool RuntimeTaskState::failureObserved() const noexcept {
 }
 
 std::string RuntimeTaskState::valueTypeName() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Signature metadata is immutable; type validation must not wait for task
+    // completion/destruction while holding a container contract transaction.
     return valueTypeName_;
 }
 
@@ -68,7 +56,9 @@ void RuntimeTaskState::start() {
 }
 
 void RuntimeTaskState::succeed(Value value) {
+    std::vector<Value> releasedRoots;
     std::vector<std::function<void()>> continuations;
+    std::vector<std::function<void()>> cancelledObservers;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (isTerminalStatus(status_)) {
@@ -77,7 +67,8 @@ void RuntimeTaskState::succeed(Value value) {
         result_ = std::move(value);
         status_ = TaskStatus::Succeeded;
         continuations.swap(continuations_);
-        cancellationContinuations_.clear();
+        cancelledObservers.swap(cancellationContinuations_);
+        releasedRoots.swap(operationRoots_);
     }
     condition_.notify_all();
     std::exception_ptr firstError;
@@ -95,16 +86,20 @@ void RuntimeTaskState::fail(std::exception_ptr error) {
     if (!error) {
         throw std::invalid_argument("failed task requires an exception");
     }
+    StoredException captured(error);
+    std::vector<Value> releasedRoots;
     std::vector<std::function<void()>> continuations;
+    std::vector<std::function<void()>> cancelledObservers;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (isTerminalStatus(status_)) {
             throw std::logic_error("task is already terminal");
         }
-        error_ = std::move(error);
+        error_ = std::move(captured);
         status_ = TaskStatus::Failed;
         continuations.swap(continuations_);
-        cancellationContinuations_.clear();
+        cancelledObservers.swap(cancellationContinuations_);
+        releasedRoots.swap(operationRoots_);
     }
     condition_.notify_all();
     std::exception_ptr firstError;
@@ -119,6 +114,7 @@ void RuntimeTaskState::fail(std::exception_ptr error) {
 }
 
 void RuntimeTaskState::cancel() {
+    std::vector<Value> releasedRoots;
     std::vector<std::function<void()>> continuations;
     std::vector<std::function<void()>> cancellationContinuations;
     {
@@ -130,6 +126,7 @@ void RuntimeTaskState::cancel() {
         cancellationRequested_ = true;
         continuations.swap(continuations_);
         cancellationContinuations.swap(cancellationContinuations_);
+        releasedRoots.swap(operationRoots_);
     }
     condition_.notify_all();
     std::exception_ptr firstError;
@@ -177,15 +174,8 @@ void RuntimeTaskState::ignore() noexcept {
 void RuntimeTaskState::appendGCRoots(std::vector<Value>& roots) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (result_) roots.push_back(*result_);
-    if (error_) {
-        try {
-            std::rethrow_exception(error_);
-        } catch (const ZlThrownException& e) {
-            if (e.value()) roots.push_back(e.value());
-        } catch (...) {
-            // Native exceptions do not retain ZL managed values.
-        }
-    }
+    roots.insert(roots.end(), operationRoots_.begin(), operationRoots_.end());
+    error_.appendGCRoots(roots);
 }
 
 
@@ -224,7 +214,7 @@ Value RuntimeTaskState::observe() {
             return *result_;
         case TaskStatus::Failed:
             failureObserved_ = true;
-            std::rethrow_exception(error_);
+            error_.rethrow();
         case TaskStatus::Cancelled: {
             failureObserved_ = true;
             Value object = makeEmptyObject("CancellationException");

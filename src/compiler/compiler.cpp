@@ -72,29 +72,16 @@ Chunk Compiler::compile(const Program& program) {
 
     chunk_.classReflection = plan.classReflection;
 
-    // A bare class type parameter (e.g. `T`) is erased at runtime: it names no
-    // concrete type, so it must never reach a runtime type assertion. The VM
-    // would otherwise compare an argument or a returned value against the
-    // literal name "T" and reject every call into a generic method.
-    const auto& planTypeParams = plan.classTypeParams;
-    auto eraseTypeParam = [&planTypeParams](const std::string& ownerClassName, const std::string& described) {
-        auto it = planTypeParams.find(ownerClassName);
-        if (it == planTypeParams.end() || it->second.empty()) return described;
-        // A type mentions a type parameter when that parameter appears as a whole
-        // identifier token anywhere in it. That covers the bare case (`T`) and the
-        // nested cases (`List<T>`, `func():T`), all of which are equally unchecked
-        // after erasure.
-        for (std::size_t i = 0; i < described.size();) {
-            if (!(std::isalpha(static_cast<unsigned char>(described[i])) || described[i] == '_')) { ++i; continue; }
-            std::size_t start = i;
-            while (i < described.size() &&
-                   (std::isalnum(static_cast<unsigned char>(described[i])) || described[i] == '_')) ++i;
-            const std::string token = described.substr(start, i - start);
-            for (const auto& typeParam : it->second) {
-                if (token == typeParam) return std::string("unknown");
-            }
-        }
-        return described;
+    // Runtime signature names keep a generic method's own type parameters as
+    // their tokens (e.g. `List<T>.push(T item)` records parameter type "T").
+    // The static type checker already enforces types inside a generic body;
+    // the VM substitutes the receiver's concrete instantiation (T->string for a
+    // List<string>) before asserting at the call boundary, so generic writes
+    // are enforced even where the element type was statically erased. We render
+    // from the annotation AST (describeTypeAnnotation), which keeps concrete
+    // types even if their spelling coincides with a parameter elsewhere.
+    auto runtimeTypeName = [](const TypeAnnotation& type) {
+        return describeTypeAnnotation(type);
     };
 
     // --- pass 1: register every func's signature up front, so calls can ---
@@ -109,13 +96,13 @@ Chunk Compiler::compile(const Program& program) {
         paramNames.reserve(fn->params.size());
         parameterTypeNames.reserve(fn->params.size());
         for (const auto& p : fn->params) {
-            paramNames.push_back(p.name);
-            parameterTypeNames.push_back(eraseTypeParam(fn->ownerClassName, describeTypeAnnotation(p.type)));
+            paramNames.push_back(p.storageName);
+            parameterTypeNames.push_back(runtimeTypeName(p.type));
         }
         const DispatchSignature signature = dispatchSignature(*fn, classTypeParams.at(fn->ownerClassName));
         std::string qualifiedName = fn->ownerClassName + "." + signature.describe();
         FunctionInfo info{std::move(qualifiedName), std::move(paramNames), std::move(parameterTypeNames),
-                          (fn->returnType.name.empty() ? "void" : eraseTypeParam(fn->ownerClassName, describeTypeAnnotation(fn->returnType))), 0, fn->isStatic, fn->isAsync};
+                          ((fn->returnType.name.empty() && fn->returnType.unionOf.empty()) ? "void" : runtimeTypeName(fn->returnType)), 0, fn->isStatic, fn->isAsync};
         info.ownerClassName = fn->ownerClassName;
         info.isNative = std::any_of(fn->annotations.begin(), fn->annotations.end(), [](const Annotation& a) { return a.name == "native"; });
         info.dispatchSignature = signature;
@@ -214,14 +201,13 @@ Chunk Compiler::compile(const Program& program) {
         const FunctionDecl* fn = allFunctions[i];
         chunk_.functions[i].entryAddress = chunk_.code.size();
         currentClassName_ = fn->ownerClassName;
-        currentReturnTypeName_ = fn->returnType.name.empty() ? "void" : eraseTypeParam(fn->ownerClassName, describeTypeAnnotation(fn->returnType));
         auto parentIt = classParents_.find(currentClassName_);
         currentParentClassName_ = (parentIt != classParents_.end()) ? parentIt->second : std::string();
         activeOwnedLocalNames_.clear();
         for (const auto& param : fn->params) {
             if (param.ownership == OwnershipKind::OWNED &&
-                std::find(activeOwnedLocalNames_.begin(), activeOwnedLocalNames_.end(), param.name) == activeOwnedLocalNames_.end()) {
-                activeOwnedLocalNames_.push_back(param.name);
+                std::find(activeOwnedLocalNames_.begin(), activeOwnedLocalNames_.end(), param.storageName) == activeOwnedLocalNames_.end()) {
+                activeOwnedLocalNames_.push_back(param.storageName);
             }
         }
 
@@ -339,23 +325,22 @@ void Compiler::compileBlock(const BlockStmt* node) {
 }
 
 void Compiler::compileVarDecl(const VarDecl* node) {
-    // hasExplicitType (typed declarations like `int x = 5`) and the type
-    // annotation itself aren't enforced yet - only parsed and carried in the
-    // AST. At runtime this behaves exactly like `var x = 5`.
+    // Explicitly typed locals are dynamic boundaries too. The VM resolves
+    // generic annotations using the current invocation's lexical type bindings.
     if (node->initializer) {
         compileExpression(node->initializer.get());
-        if (node->hasExplicitType) {
-            emit(OpCode::AssertType, chunk_.addName(describeTypeAnnotation(node->type)), node->line);
+        if (!node->assertedTypeName.empty() && node->assertedTypeName != "unknown") {
+            emit(OpCode::AssertType, chunk_.addName(node->assertedTypeName), node->line);
         }
     } else {
         std::size_t nilIdx = chunk_.addConstant(Value{});
         emit(OpCode::PushConst, nilIdx, node->line);
     }
-    std::size_t nameIdx = chunk_.addName(node->name);
+    std::size_t nameIdx = chunk_.addName(node->storageName);
     emit(OpCode::DefineVar, nameIdx, node->line);
     if (node->ownership == OwnershipKind::OWNED &&
-        std::find(activeOwnedLocalNames_.begin(), activeOwnedLocalNames_.end(), node->name) == activeOwnedLocalNames_.end()) {
-        activeOwnedLocalNames_.push_back(node->name);
+        std::find(activeOwnedLocalNames_.begin(), activeOwnedLocalNames_.end(), node->storageName) == activeOwnedLocalNames_.end()) {
+        activeOwnedLocalNames_.push_back(node->storageName);
     }
 }
 
@@ -381,15 +366,6 @@ void Compiler::compileReturnStmt(const ReturnStmt* node) {
     } else {
         std::size_t nilIdx = chunk_.addConstant(Value{});
         emit(OpCode::PushConst, nilIdx, node->line);
-    }
-    // Typed returns form a dynamic-to-static boundary: a function declared to
-    // return int/double/object must not silently leak an unknown/dynamic value
-    // of another runtime type. The VM assertion preserves the value on stack.
-    // Bare/unknown returns remain unrestricted.
-    // The source AST carries the exact annotation, so this also supports
-    // unions and parameterized object names through the VM's reflection matcher.
-    if (!currentReturnTypeName_.empty() && currentReturnTypeName_ != "void" && currentReturnTypeName_ != "unknown") {
-        emit(OpCode::AssertType, chunk_.addName(currentReturnTypeName_), node->line);
     }
     // Return performs lexical cleanup before leaving the function. Finalizers
     // are emitted inner-to-outer. compileActiveFinallyCleanup temporarily
@@ -447,14 +423,14 @@ void Compiler::compileForStmt(const ForStmt* node) {
     std::string stepName = "__for_step_" + std::to_string(id);
 
     compileExpression(node->start.get());
-    emit(OpCode::DefineVar, chunk_.addName(node->varName), node->line);
+    emit(OpCode::DefineVar, chunk_.addName(node->storageName), node->line);
     compileExpression(node->end.get());
     emit(OpCode::DefineVar, chunk_.addName(endName), node->line);
     compileExpression(node->step.get());
     emit(OpCode::DefineVar, chunk_.addName(stepName), node->line);
 
     std::size_t loopStart = chunk_.code.size();
-    emit(OpCode::LoadVar, chunk_.addName(node->varName), node->line);
+    emit(OpCode::LoadVar, chunk_.addName(node->storageName), node->line);
     emit(OpCode::LoadVar, chunk_.addName(endName), node->line);
     emit(OpCode::LoadVar, chunk_.addName(stepName), node->line);
     emit(OpCode::RangeContinue, 0, node->line);
@@ -466,10 +442,10 @@ void Compiler::compileForStmt(const ForStmt* node) {
     compileStatement(node->body.get());
 
     std::size_t incrementLabel = chunk_.code.size();
-    emit(OpCode::LoadVar, chunk_.addName(node->varName), node->line);
+    emit(OpCode::LoadVar, chunk_.addName(node->storageName), node->line);
     emit(OpCode::LoadVar, chunk_.addName(stepName), node->line);
     emit(OpCode::Add, 0, node->line);
-    emit(OpCode::DefineVar, chunk_.addName(node->varName), node->line);
+    emit(OpCode::DefineVar, chunk_.addName(node->storageName), node->line);
     emit(OpCode::Jump, loopStart, node->line);
 
     std::size_t loopEnd = chunk_.code.size();
@@ -613,7 +589,7 @@ void Compiler::compileTryStmt(const TryStmt* node) {
         chunk_.code[handlerIndex].operand = chunk_.code.size();
 
         const CatchClause& clause = node->catches[catchIndex];
-        emit(OpCode::DefineVar, chunk_.addName(clause.varName), clause.line ? clause.line : node->line);
+        emit(OpCode::DefineVar, chunk_.addName(clause.storageName), clause.line ? clause.line : node->line);
         if (hasFinally) activeFinallyBlocks_.push_back(static_cast<const BlockStmt*>(node->finallyBlock.get()));
         compileStatement(clause.block.get());
         if (hasFinally) activeFinallyBlocks_.pop_back();
@@ -731,7 +707,7 @@ void Compiler::compileLiteral(const Literal* node) {
 }
 
 void Compiler::compileIdentifier(const Identifier* node) {
-    std::size_t idx = chunk_.addName(node->name);
+    std::size_t idx = chunk_.addName(node->storageName);
     emit(OpCode::LoadVar, idx, node->line);
 }
 
@@ -1017,11 +993,11 @@ void Compiler::compileMatchExpr(const MatchExpr* node) {
     compileExpression(node->subject.get());
     const std::string subjectTemp = "__match_subject_" + std::to_string(chunk_.names.size());
     const std::size_t subjectName = chunk_.addName(subjectTemp);
-    emit(OpCode::Dup, 0, node->line);
     emit(OpCode::DefineVar, subjectName, node->line);
 
     std::vector<std::size_t> endJumps;
     std::size_t tempCounter = 0;
+    const std::unordered_map<std::string, std::string>* bindings = nullptr;
     std::function<void(const MatchExpr::Pattern&, std::size_t, std::vector<std::size_t>&)> compilePattern =
         [&](const MatchExpr::Pattern& pattern, std::size_t sourceName, std::vector<std::size_t>& failJumps) {
             auto loadSource = [&]() { emit(OpCode::LoadVar, sourceName, pattern.line); };
@@ -1030,7 +1006,7 @@ void Compiler::compileMatchExpr(const MatchExpr* node) {
                 case MatchExpr::PatternKind::Variable:
                     if (pattern.kind == MatchExpr::PatternKind::Variable && !pattern.bindingName.empty() && pattern.bindingName != "_") {
                         loadSource();
-                        emit(OpCode::DefineVar, chunk_.addName(pattern.bindingName), pattern.line);
+                        emit(OpCode::DefineVar, chunk_.addName(bindings->at(pattern.bindingName)), pattern.line);
                     }
                     return;
                 case MatchExpr::PatternKind::Literal: {
@@ -1063,7 +1039,7 @@ void Compiler::compileMatchExpr(const MatchExpr* node) {
                     failJumps.push_back(emit(OpCode::JumpIfFalse, 0, pattern.line));
                     if (!pattern.bindingName.empty() && pattern.bindingName != "_") {
                         loadSource();
-                        emit(OpCode::DefineVar, chunk_.addName(pattern.bindingName), pattern.line);
+                        emit(OpCode::DefineVar, chunk_.addName(bindings->at(pattern.bindingName)), pattern.line);
                     }
                     return;
                 case MatchExpr::PatternKind::List: {
@@ -1176,6 +1152,7 @@ void Compiler::compileMatchExpr(const MatchExpr* node) {
         };
 
     for (const auto& arm : node->arms) {
+        bindings = &arm.storageBindings;
         std::function<std::unique_ptr<MatchExpr::Pattern>(const MatchExpr::Pattern&)> clonePattern = [&](const MatchExpr::Pattern& src) {
             auto out = std::make_unique<MatchExpr::Pattern>();
             out->kind = src.kind; out->raw = src.raw; out->literalType = src.literalType;
@@ -1228,20 +1205,24 @@ void Compiler::compileMatchExpr(const MatchExpr* node) {
         if (arm.guard) {
             compileExpression(arm.guard.get());
             const std::size_t guardFail = emit(OpCode::JumpIfFalse, 0, arm.line);
-            emit(OpCode::LoadVar, subjectName, arm.line);
-            emit(OpCode::Pop, 0, arm.line);
             compileExpression(arm.result.get());
             endJumps.push_back(emit(OpCode::Jump, 0, arm.line));
             patchJump(guardFail);
             for (auto j : failJumps) patchJump(j);
         } else {
-            emit(OpCode::LoadVar, subjectName, arm.line);
-            emit(OpCode::Pop, 0, arm.line);
             compileExpression(arm.result.get());
             endJumps.push_back(emit(OpCode::Jump, 0, arm.line));
             for (auto j : failJumps) patchJump(j);
         }
     }
+    // Static coverage proves a matching arm for well-typed inputs. Do not
+    // leak a subject/stack value if a dynamic or malformed value evades it.
+    emit(OpCode::NewObject, chunk_.addName("Exception"), node->line);
+    emit(OpCode::Dup, 0, node->line);
+    emit(OpCode::PushConst, chunk_.addConstant(std::string("non-exhaustive match")), node->line);
+    emit(OpCode::InvokeMethod, methodSlot(DispatchSignature{"Exception", {{DispatchTypeKind::STRING, {}}}}), node->line, 1);
+    emit(OpCode::Pop, 0, node->line);
+    emit(OpCode::Throw, 0, node->line);
     for (auto j : endJumps) patchJump(j);
 }
 
@@ -1251,7 +1232,7 @@ void Compiler::compileLambdaExpr(const LambdaExpr* node) {
 
     std::vector<std::string> paramNames;
     paramNames.reserve(node->params.size());
-    for (const auto& p : node->params) paramNames.push_back(p.name);
+    for (const auto& p : node->params) paramNames.push_back(p.storageName);
 
     std::string lambdaName = "$lambda" + std::to_string(lambdaCounter_++);
     std::size_t funcIndex = chunk_.functions.size();
@@ -1264,24 +1245,14 @@ void Compiler::compileLambdaExpr(const LambdaExpr* node) {
     }
     const std::string lambdaReturnTypeName =
         node->inferredReturnTypeName.empty() ? "unknown" : node->inferredReturnTypeName;
-    const std::string lambdaCallableReturnType = node->isAsync
-        ? (lambdaReturnTypeName == "void" ? "Task<void>" : "Task<" + lambdaReturnTypeName + ">")
-        : lambdaReturnTypeName;
     FunctionInfo lambdaInfo{std::move(lambdaName), paramNames, std::move(lambdaParameterTypeNames),
-                            lambdaCallableReturnType, entryAddress, false, node->isAsync, false, "", {}, node->captureNames};
+                            lambdaReturnTypeName, entryAddress, false, node->isAsync, false, currentClassName_, {}, node->captureStorageNames};
     chunk_.functions.push_back(std::move(lambdaInfo));
-
-    // A lambda body is its own function: its `return` must be checked against
-    // the lambda's own return type, never the enclosing named function's.
-    // Without this, a block-body lambda returning an int inside a `: func`
-    // factory emits AssertType("func") and fails the moment it is invoked.
-    const std::string savedReturnTypeName = currentReturnTypeName_;
-    currentReturnTypeName_ = lambdaReturnTypeName;
 
     const auto savedOwnedLocals = activeOwnedLocalNames_;
     activeOwnedLocalNames_.clear();
     for (const auto& param : node->params) {
-        if (param.ownership == OwnershipKind::OWNED) activeOwnedLocalNames_.push_back(param.name);
+        if (param.ownership == OwnershipKind::OWNED) activeOwnedLocalNames_.push_back(param.storageName);
     }
 
     if (node->hasExprBody) {
@@ -1301,7 +1272,6 @@ void Compiler::compileLambdaExpr(const LambdaExpr* node) {
 
     chunk_.functions[funcIndex].ownedLocalNames = activeOwnedLocalNames_;
     activeOwnedLocalNames_ = savedOwnedLocals;
-    currentReturnTypeName_ = savedReturnTypeName;
     patchJump(skipJump);
     // Capture-by-value happens HERE, at MakeClosure - every time this
     // LambdaExpr is evaluated (e.g. each time through a loop), a fresh
@@ -1330,7 +1300,8 @@ void Compiler::compileCall(const CallExpr* node) {
         auto idx = findNativeFunction("share");
         if (!idx) throw std::runtime_error("Compiler: missing native func share");
         for (const auto& arg : node->arguments) compileExpression(arg.get());
-        emit(OpCode::CallNative, *idx, node->line);
+        emit(OpCode::CallNative, *idx, node->line,
+             node->nativeFactoryTypeName.empty() ? 0 : chunk_.addName(node->nativeFactoryTypeName) + 1);
         return;
     }
     if (!node->namespaceName.empty()) {
@@ -1357,7 +1328,8 @@ void Compiler::compileCall(const CallExpr* node) {
                 " argument(s), got " + std::to_string(node->arguments.size()));
         }
         for (const auto& arg : node->arguments) compileExpression(arg.get());
-        emit(OpCode::CallNative, *idx, node->line);
+        emit(OpCode::CallNative, *idx, node->line,
+             node->nativeFactoryTypeName.empty() ? 0 : chunk_.addName(node->nativeFactoryTypeName) + 1);
         return;
     }
 
@@ -1368,7 +1340,7 @@ void Compiler::compileCall(const CallExpr* node) {
     // own comment for the exact stack layout it expects.
     if (node->isValueCall) {
         for (const auto& arg : node->arguments) compileExpression(arg.get());
-        std::size_t nameIdx = chunk_.addName(node->calleeName);
+        std::size_t nameIdx = chunk_.addName(node->calleeStorageName);
         emit(OpCode::LoadVar, nameIdx, node->line);
         emit(OpCode::CallValue, 0, node->line, node->arguments.size());
         return;
@@ -1387,20 +1359,20 @@ void Compiler::compileCall(const CallExpr* node) {
     emit(OpCode::Call, functionIndex, node->line);
 }
 
-// name = value. DefineVar doubles as "declare OR reassign in the current
-// scope" since there's no block-level scoping yet (a func's locals are
-// one flat map) - so reusing it here for reassignment is correct for now.
-// Dup keeps a second copy on the stack so the assignment still evaluates to
-// the assigned value, since DefineVar itself consumes (pops) one copy to store.
+// Assignment targets the lexical binding resolved by the checker. Validate
+// before duplicating/storing so a failed write preserves both the old value
+// and the surrounding expression's stack shape.
 void Compiler::compileAssign(const AssignExpr* node) {
     compileExpression(node->value.get());
+    if (!node->assertedTypeName.empty() && node->assertedTypeName != "unknown")
+        emit(OpCode::AssertType, chunk_.addName(node->assertedTypeName), node->line);
     emit(OpCode::Dup, 0, node->line);
-    std::size_t nameIdx = chunk_.addName(node->name);
+    std::size_t nameIdx = chunk_.addName(node->storageName);
     emit(OpCode::DefineVar, nameIdx, node->line);
 }
 
 void Compiler::compileMove(const MoveExpr* node) {
-    const std::size_t nameIdx = chunk_.addName(node->name);
+    const std::size_t nameIdx = chunk_.addName(node->storageName);
     emit(OpCode::MoveVar, nameIdx, node->line);
 }
 
@@ -1429,7 +1401,17 @@ void Compiler::compileCollectionLiteral(const CollectionLiteral* node) {
         const std::string& className = node->targetCollectionKind;
         std::size_t classIdx = chunk_.addName(className);
         const std::size_t ctorSlot = methodSlot(DispatchSignature{className, {}});
-        emit(OpCode::NewObject, classIdx, node->line);
+        // Tag the new object with its concrete generic instantiation (e.g.
+        // "List<int>") so runtime method calls substitute the element type -
+        // exactly what `new List<int>()` records via NewObject's operand3.
+        // Without this a typed literal produced an erased bare `List` whose
+        // element type was unknowable at runtime (and failed a List<int>
+        // assignment assertion).
+        Instruction litNewObject{OpCode::NewObject, classIdx, node->line};
+        if (!node->targetCollectionClassName.empty()) {
+            litNewObject.operand3 = chunk_.addName(node->targetCollectionClassName) + 1;
+        }
+        chunk_.code.push_back(litNewObject);
         emit(OpCode::Dup, 0, node->line);
         emit(OpCode::InvokeMethod, ctorSlot, node->line, 0);
         emit(OpCode::Pop, 0, node->line);
@@ -1494,34 +1476,12 @@ void Compiler::compileCollectionLiteral(const CollectionLiteral* node) {
 }
 
 void Compiler::compileNewExpr(const NewExpr* node) {
-    // A constructor call doesn't know its target constructor index at AST build time
-    // because func resolution happens in pass 1 of the compiler.
-    // We emit a NewObject instruction with the class name. At runtime, NewObject
-    // will allocate the object, look up the constructor by name/arity, call it, and
-    // leave the new object reference on the stack.
-    // Wait, the VM needs to call the constructor. That means NewObject needs to pass
-    // arguments! If it's just `NewObject` alone, how does it know how many args?
-    // It's easier if NewObject just allocates the object, and then we emit a normal Call!
-    // But constructors are tied to the class. Let's let NewObject allocate it,
-    // and we also need to call the constructor. Since the plan says NewObject opcode,
-    // we push arguments, then NewObject (which takes arg count? No, plan doesn't specify).
-    // Let's implement NewObject to just allocate, and then we push it and call the method?
-    // Actually, ZL methods live in the Chunk's func table. A constructor is just a func.
-    // We can emit:
-    // 1. NewObject (pushes new object ref)
-    // 2. Dup (keep a copy to return)
-    // 3. Compile args
-    // 4. InvokeMethod (calls constructor, consuming one object ref and args)
-    // 5. Pop (discard constructor return value, which is void)
-    // Wait, InvokeMethod takes a name index. The constructor's name is the class name!
-    
-    // So the sequence:
-    // emit NewObject (operand = className idx) -> leaves ObjectRef on stack
+    // Allocate and tag the object, then invoke its constructor through the
+    // ordinary typed dispatch path. Keep a duplicate as the expression value.
     std::size_t classIdx = chunk_.addName(node->className);
     Instruction newObject{OpCode::NewObject, classIdx, node->line};
-    newObject.operand3 = Chunk::INVALID_FUNCTION_INDEX;
     if (!node->resolvedClassName.empty() && node->resolvedClassName != node->className) {
-        newObject.operand3 = chunk_.addName(node->resolvedClassName);
+        newObject.operand3 = chunk_.addName(node->resolvedClassName) + 1;
     }
     chunk_.code.push_back(newObject);
 
