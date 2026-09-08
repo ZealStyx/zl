@@ -16,3 +16,7 @@ Makefile
 # IDE/editor files
 .vscode/
 .cache/
+
+# Python bytecode from the zl-lsp / zl-test tooling
+__pycache__/
+*.pyc
