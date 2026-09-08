@@ -1,3 +1,23 @@
-// Scoped reader/writer lock synchronization primitive.
+// zl.lang.RwLock - scoped reader/writer lock.
+//
+// Create one with `new RwLock()`. The natives RwLock.withRead and
+// RwLock.withWrite take a zero-argument func and hold the corresponding lock
+// for its duration, so the lock is always released - including when the body
+// throws. There is deliberately no bare lock/unlock pair to leak.
+//
+// Many readers may hold the read lock concurrently; a writer excludes both.
 class RwLock {
+    public static func create(): RwLock {
+        return new RwLock()
+    }
+
+    // Reads a value under the read lock.
+    public static func read(RwLock lock, func body): unknown {
+        return RwLock.withRead(lock, body)
+    }
+
+    // Mutates under the exclusive write lock.
+    public static func write(RwLock lock, func body): unknown {
+        return RwLock.withWrite(lock, body)
+    }
 }

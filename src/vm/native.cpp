@@ -1340,6 +1340,54 @@ Value semaphoreAvailable(const std::vector<Value>& args) {
     return state->permits;
 }
 
+// Sets the permit count outright. A Semaphore starts at zero permits, so
+// without this every acquire() would block forever and the primitive would be
+// unusable as a resource counter.
+Value semaphoreSetPermits(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Semaphore")
+        throw std::runtime_error("Semaphore.setPermits: expected a Semaphore");
+    const std::int64_t permits = toInt64Strict(args[1]);
+    if (permits < 0) throw std::runtime_error("Semaphore.setPermits: permit count cannot be negative");
+    auto state = ensureObjectState(*(*obj), &ObjectBox::semaphoreState, [] { return std::make_shared<ObjectBox::SemaphoreState>(); });
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->permits = permits;
+    }
+    // Raising the count can satisfy several waiters at once.
+    state->cv.notify_all();
+    return Value{};
+}
+
+// Non-blocking acquire: takes a permit and returns true, or returns false
+// immediately when none is available.
+Value semaphoreTryAcquire(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Semaphore")
+        throw std::runtime_error("Semaphore.tryAcquire: expected a Semaphore");
+    auto state = ensureObjectState(*(*obj), &ObjectBox::semaphoreState, [] { return std::make_shared<ObjectBox::SemaphoreState>(); });
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (state->permits <= 0) return false;
+    --state->permits;
+    return true;
+}
+
+Value semaphoreReleaseMany(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Semaphore")
+        throw std::runtime_error("Semaphore.releaseMany: expected a Semaphore");
+    const std::int64_t count = toInt64Strict(args[1]);
+    if (count < 0) throw std::runtime_error("Semaphore.releaseMany: count cannot be negative");
+    if (count == 0) return Value{};
+    auto state = ensureObjectState(*(*obj), &ObjectBox::semaphoreState, [] { return std::make_shared<ObjectBox::SemaphoreState>(); });
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->permits += count;
+    }
+    state->cv.notify_all();
+    return Value{};
+}
+
 Value conditionWait(const std::vector<Value>& args) {
     auto obj = std::get_if<ObjectRef>(&args[0]);
     if (!obj || !*obj || (*obj)->className != "Condition")
@@ -1349,6 +1397,24 @@ Value conditionWait(const std::vector<Value>& args) {
     std::unique_lock<std::mutex> lock(state->mutex);
     state->cv.wait(lock);
     return Value{};
+}
+
+// Bounded wait. Returns true when notified within `seconds`, false on
+// timeout. Condition.wait() has no timeout and no predicate, so a notify that
+// arrives before the wait begins is missed and the waiter hangs; this gives
+// callers a way to bound that exposure.
+Value conditionWaitFor(const std::vector<Value>& args) {
+    auto obj = std::get_if<ObjectRef>(&args[0]);
+    if (!obj || !*obj || (*obj)->className != "Condition")
+        throw std::runtime_error("Condition.waitFor: expected a Condition");
+    const double seconds = toDouble(args[1]);
+    if (seconds < 0) throw std::runtime_error("Condition.waitFor: timeout cannot be negative");
+    auto state = ensureObjectState(*(*obj), &ObjectBox::conditionState, [] { return std::make_shared<ObjectBox::ConditionState>(); });
+    VM::BlockingNativeCall blocked(g_currentNativeVm);
+    std::unique_lock<std::mutex> lock(state->mutex);
+    const auto duration = std::chrono::duration<double>(seconds);
+    return state->cv.wait_for(lock, std::chrono::duration_cast<std::chrono::nanoseconds>(duration)) ==
+           std::cv_status::no_timeout;
 }
 
 Value conditionNotifyOne(const std::vector<Value>& args) {
@@ -2862,7 +2928,11 @@ std::vector<NativeFunction> buildTable() {
         std::pair{NativeId::SEMAPHORE_ACQUIRE, semaphoreAcquire},
         std::pair{NativeId::SEMAPHORE_RELEASE, semaphoreRelease},
         std::pair{NativeId::SEMAPHORE_AVAILABLE, semaphoreAvailable},
+        std::pair{NativeId::SEMAPHORE_SETPERMITS, semaphoreSetPermits},
+        std::pair{NativeId::SEMAPHORE_TRYACQUIRE, semaphoreTryAcquire},
+        std::pair{NativeId::SEMAPHORE_RELEASEMANY, semaphoreReleaseMany},
         std::pair{NativeId::CONDITION_WAIT, conditionWait},
+        std::pair{NativeId::CONDITION_WAITFOR, conditionWaitFor},
         std::pair{NativeId::CONDITION_NOTIFYONE, conditionNotifyOne},
         std::pair{NativeId::CONDITION_NOTIFYALL, conditionNotifyAll},
         std::pair{NativeId::CHANNEL_CREATE, channelCreate},

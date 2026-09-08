@@ -2,6 +2,37 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-08 — Concurrency primitives made usable
+
+Adversarial probing of the synchronization primitives found two that could not
+be used correctly from ZL at all.
+
+**Semaphore was unusable.** A `Semaphore` starts with zero permits and nothing
+exposed a way to set them, so any `acquire()` blocked forever by construction.
+Added `Semaphore.setPermits`, a non-blocking `Semaphore.tryAcquire`, and
+`Semaphore.releaseMany`. The facade adds `withPermits(n)` construction and
+`withPermit`/`tryWithPermit` scope helpers that release the permit through a
+`finally`, so an exception in the body cannot leak it. Verified with six
+threads contending over two permits: observed concurrency never exceeded two.
+
+**Condition could hang indefinitely.** `Condition.wait` has neither a predicate
+nor a timeout, so a notification delivered before a waiter blocks is lost and
+that waiter sleeps forever. Added `Condition.waitFor(seconds)`, which returns
+whether it was notified before the deadline, and facade helpers `waitUntil` /
+`waitUntilTimeout` that re-test a predicate around bounded waits and therefore
+cannot miss a wakeup permanently. The lost-wakeup hazard of the bare `wait` is
+now documented at the primitive rather than left to be discovered.
+
+The previously empty `Atomic`, `Mutex`, `RwLock`, `Condition` and `Semaphore`
+facade classes now carry real content: construction with an initial value
+(`Atomic.ofInt/ofBool/ofDouble`, `Semaphore.withPermits`), counter helpers, and
+scope helpers. `Atomic.toggle` is explicitly documented as not atomic as a
+whole. Atomics were verified genuinely thread-safe: eight threads each adding
+1000 produced exactly 8000.
+
+**Validation:** fresh build; 49/49 examples pass; `tests/type_boundaries.py`
+passes; catalog and runtime bindings remain in exact correspondence (246 each).
+
 ## 2026-09-08 — Lambda return-type annotations
 
 Lambdas may now declare a return type: `func(int x): int => x * 2`. Previously

@@ -9,8 +9,8 @@
     "docs/reference/STDLIB_REFERENCE.md"
   ],
   "invariants": {
-    "native_catalog_entries": 242,
-    "native_runtime_bindings": 242,
+    "native_catalog_entries": 246,
+    "native_runtime_bindings": 246,
     "native_catalog_runtime_ids_match": true,
     "builtin_class_count": 32,
     "stdlib_zl_file_count": 25
@@ -30,13 +30,13 @@
     "Text": 7,
     "Channel": 6,
     "Queue": 6,
+    "Semaphore": 6,
     "Serialize": 6,
     "Stack": 6,
     "Test": 6,
+    "Condition": 4,
     "IO": 4,
     "Network": 4,
-    "Condition": 3,
-    "Semaphore": 3,
     "Shared": 3,
     "Thread": 3,
     "RwLock": 2,
@@ -231,7 +231,15 @@
         "Atomic"
       ],
       "imports": [],
-      "methods": []
+      "methods": [
+        "ofInt",
+        "ofBool",
+        "ofDouble",
+        "increment",
+        "decrement",
+        "reset",
+        "toggle"
+      ]
     },
     {
       "path": "stdlib/zl/lang/Channel.zl",
@@ -252,7 +260,13 @@
         "Condition"
       ],
       "imports": [],
-      "methods": []
+      "methods": [
+        "create",
+        "waitUntil",
+        "waitUntilTimeout",
+        "signal",
+        "broadcast"
+      ]
     },
     {
       "path": "stdlib/zl/lang/Mutex.zl",
@@ -260,7 +274,10 @@
         "Mutex"
       ],
       "imports": [],
-      "methods": []
+      "methods": [
+        "create",
+        "guard"
+      ]
     },
     {
       "path": "stdlib/zl/lang/RwLock.zl",
@@ -268,7 +285,11 @@
         "RwLock"
       ],
       "imports": [],
-      "methods": []
+      "methods": [
+        "create",
+        "read",
+        "write"
+      ]
     },
     {
       "path": "stdlib/zl/lang/Semaphore.zl",
@@ -276,7 +297,12 @@
         "Semaphore"
       ],
       "imports": [],
-      "methods": []
+      "methods": [
+        "withPermits",
+        "withPermit",
+        "tryWithPermit",
+        "isExhausted"
+      ]
     },
     {
       "path": "stdlib/zl/lang/Task.zl",
@@ -2370,6 +2396,33 @@
       "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
     },
     {
+      "native_id": "SEMAPHORE_SETPERMITS",
+      "qualified_name": "Semaphore.setPermits",
+      "domain": "Semaphore",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Semaphore",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SEMAPHORE_TRYACQUIRE",
+      "qualified_name": "Semaphore.tryAcquire",
+      "domain": "Semaphore",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Semaphore",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SEMAPHORE_RELEASEMANY",
+      "qualified_name": "Semaphore.releaseMany",
+      "domain": "Semaphore",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Semaphore",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
       "native_id": "CONDITION_WAIT",
       "qualified_name": "Condition.wait",
       "domain": "Condition",
@@ -2390,6 +2443,15 @@
     {
       "native_id": "CONDITION_NOTIFYALL",
       "qualified_name": "Condition.notifyAll",
+      "domain": "Condition",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Condition",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CONDITION_WAITFOR",
+      "qualified_name": "Condition.waitFor",
       "domain": "Condition",
       "source_layer": "native catalog + VM native runtime",
       "public_surface": "stdlib: zl.lang.Condition",

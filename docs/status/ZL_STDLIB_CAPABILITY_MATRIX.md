@@ -6,8 +6,8 @@ This matrix is generated from the repository's compiler builtin library, native 
 
 ## Source invariants
 
-- Native catalog entries: **242**
-- VM native bindings: **242**
+- Native catalog entries: **246**
+- VM native bindings: **246**
 - Compiler embedded builtin classes: **32**
 - Visible stdlib `.zl` files: **25**
 - Native catalog IDs and VM binding IDs: **exact match**
@@ -34,13 +34,13 @@ The native catalog type supports parameter and return ownership metadata, and th
 | `Text` | 7 | stdlib: zl.text.Text | implemented |
 | `Channel` | 6 | stdlib: zl.lang.Channel | implemented |
 | `Queue` | 6 | stdlib: zl.util.Queue | implemented |
+| `Semaphore` | 6 | stdlib: zl.lang.Semaphore | implemented |
 | `Serialize` | 6 | stdlib: zl.serialize.Serialize | implemented |
 | `Stack` | 6 | stdlib: zl.util.Stack | implemented |
 | `Test` | 6 | stdlib: zl.test.Test | implemented |
+| `Condition` | 4 | stdlib: zl.lang.Condition | implemented |
 | `IO` | 4 | compiler/runtime IO boundary | implemented |
 | `Network` | 4 | stdlib: zl.net.Network | implemented |
-| `Condition` | 3 | stdlib: zl.lang.Condition | implemented |
-| `Semaphore` | 3 | stdlib: zl.lang.Semaphore | implemented |
 | `Shared` | 3 | compiler builtin: Shared | implemented |
 | `Thread` | 3 | stdlib: zl.lang.Thread | implemented |
 | `RwLock` | 2 | stdlib: zl.lang.RwLock | implemented |
@@ -95,12 +95,12 @@ The native catalog type supports parameter and return ownership metadata, and th
 |---|---|---|---|
 | `stdlib/zl/crypto/Crypto.zl` | `Crypto` | `digest256, digest256Hex, hash32, hash64, toHex, fromHex, toBase64, fromBase64, fromHexOr, fromBase64Or, digestsEqual, verifySha256` | `—` |
 | `stdlib/zl/fs/FileSystem.zl` | `FileSystem` | `readOr, sizeOr, modifiedTimeOr, removeIfExists, removeDirIfExists, ensureFile, ensureParentDir, readLines, writeLines, appendLine, entries, files, directories, isEmptyDir, withExtension, hasExtension` | `—` |
-| `stdlib/zl/lang/Atomic.zl` | `Atomic` | `—` | `—` |
+| `stdlib/zl/lang/Atomic.zl` | `Atomic` | `ofInt, ofBool, ofDouble, increment, decrement, reset, toggle` | `—` |
 | `stdlib/zl/lang/Channel.zl` | `Channel` | `bounded, sendBlocking, receiveBlocking, count` | `—` |
-| `stdlib/zl/lang/Condition.zl` | `Condition` | `—` | `—` |
-| `stdlib/zl/lang/Mutex.zl` | `Mutex` | `—` | `—` |
-| `stdlib/zl/lang/RwLock.zl` | `RwLock` | `—` | `—` |
-| `stdlib/zl/lang/Semaphore.zl` | `Semaphore` | `—` | `—` |
+| `stdlib/zl/lang/Condition.zl` | `Condition` | `create, waitUntil, waitUntilTimeout, signal, broadcast` | `—` |
+| `stdlib/zl/lang/Mutex.zl` | `Mutex` | `create, guard` | `—` |
+| `stdlib/zl/lang/RwLock.zl` | `RwLock` | `create, read, write` | `—` |
+| `stdlib/zl/lang/Semaphore.zl` | `Semaphore` | `withPermits, withPermit, tryWithPermit, isExhausted` | `—` |
 | `stdlib/zl/lang/Task.zl` | `Task` | `—` | `—` |
 | `stdlib/zl/lang/Thread.zl` | `Thread` | `startThread, wait, running` | `—` |
 | `stdlib/zl/logging/Log.zl` | `Log` | `infoLine, warnLine, errorLine, tagged, infoTagged, warnTagged, errorTagged, when, exception, fields` | `zl.serialize.Serialize` |
@@ -309,9 +309,13 @@ The native catalog type supports parameter and return ownership metadata, and th
 | `SEMAPHORE_ACQUIRE` | `Semaphore.acquire` | `Semaphore` | stdlib: zl.lang.Semaphore | implemented | not explicitly declared in native catalog entry; default NONE |
 | `SEMAPHORE_RELEASE` | `Semaphore.release` | `Semaphore` | stdlib: zl.lang.Semaphore | implemented | not explicitly declared in native catalog entry; default NONE |
 | `SEMAPHORE_AVAILABLE` | `Semaphore.available` | `Semaphore` | stdlib: zl.lang.Semaphore | implemented | not explicitly declared in native catalog entry; default NONE |
+| `SEMAPHORE_SETPERMITS` | `Semaphore.setPermits` | `Semaphore` | stdlib: zl.lang.Semaphore | implemented | not explicitly declared in native catalog entry; default NONE |
+| `SEMAPHORE_TRYACQUIRE` | `Semaphore.tryAcquire` | `Semaphore` | stdlib: zl.lang.Semaphore | implemented | not explicitly declared in native catalog entry; default NONE |
+| `SEMAPHORE_RELEASEMANY` | `Semaphore.releaseMany` | `Semaphore` | stdlib: zl.lang.Semaphore | implemented | not explicitly declared in native catalog entry; default NONE |
 | `CONDITION_WAIT` | `Condition.wait` | `Condition` | stdlib: zl.lang.Condition | implemented | not explicitly declared in native catalog entry; default NONE |
 | `CONDITION_NOTIFYONE` | `Condition.notifyOne` | `Condition` | stdlib: zl.lang.Condition | implemented | not explicitly declared in native catalog entry; default NONE |
 | `CONDITION_NOTIFYALL` | `Condition.notifyAll` | `Condition` | stdlib: zl.lang.Condition | implemented | not explicitly declared in native catalog entry; default NONE |
+| `CONDITION_WAITFOR` | `Condition.waitFor` | `Condition` | stdlib: zl.lang.Condition | implemented | not explicitly declared in native catalog entry; default NONE |
 | `CHANNEL_CREATE` | `Channel.create` | `Channel` | stdlib: zl.lang.Channel | implemented | not explicitly declared in native catalog entry; default NONE |
 | `CHANNEL_SEND` | `Channel.send` | `Channel` | stdlib: zl.lang.Channel | implemented | not explicitly declared in native catalog entry; default NONE |
 | `CHANNEL_RECEIVE` | `Channel.receive` | `Channel` | stdlib: zl.lang.Channel | implemented | not explicitly declared in native catalog entry; default NONE |

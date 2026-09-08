@@ -224,9 +224,13 @@ std::vector<NativeSignature> buildSignatureTable() {
     sigs.push_back({NativeId::SEMAPHORE_ACQUIRE, "Semaphore.acquire", {ZlType::OBJECT}, ZlType::VOID_TYPE});
     sigs.push_back({NativeId::SEMAPHORE_RELEASE, "Semaphore.release", {ZlType::OBJECT}, ZlType::VOID_TYPE});
     sigs.push_back({NativeId::SEMAPHORE_AVAILABLE, "Semaphore.available", {ZlType::OBJECT}, ZlType::INT});
+    sigs.push_back({NativeId::SEMAPHORE_SETPERMITS, "Semaphore.setPermits", {ZlType::OBJECT, ZlType::INT}, ZlType::VOID_TYPE});
+    sigs.push_back({NativeId::SEMAPHORE_TRYACQUIRE, "Semaphore.tryAcquire", {ZlType::OBJECT}, ZlType::BOOL});
+    sigs.push_back({NativeId::SEMAPHORE_RELEASEMANY, "Semaphore.releaseMany", {ZlType::OBJECT, ZlType::INT}, ZlType::VOID_TYPE});
     sigs.push_back({NativeId::CONDITION_WAIT, "Condition.wait", {ZlType::OBJECT}, ZlType::VOID_TYPE});
     sigs.push_back({NativeId::CONDITION_NOTIFYONE, "Condition.notifyOne", {ZlType::OBJECT}, ZlType::VOID_TYPE});
     sigs.push_back({NativeId::CONDITION_NOTIFYALL, "Condition.notifyAll", {ZlType::OBJECT}, ZlType::VOID_TYPE});
+    sigs.push_back({NativeId::CONDITION_WAITFOR, "Condition.waitFor", {ZlType::OBJECT, ZlType::DOUBLE}, ZlType::BOOL});
     sigs.push_back({NativeId::CHANNEL_CREATE, "Channel.create", {ZlType::INT}, ZlType::OBJECT, "zl.lang", {}, NativeReturnTypeRule::NONE, ZlType::UNKNOWN, "Channel"});
     sigs.push_back({NativeId::CHANNEL_SEND, "Channel.send", {ZlType::OBJECT, ZlType::UNKNOWN}, ZlType::VOID_TYPE});
     sigs.push_back({NativeId::CHANNEL_RECEIVE, "Channel.receive", {ZlType::OBJECT}, ZlType::UNKNOWN});
