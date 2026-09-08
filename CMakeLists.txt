@@ -103,12 +103,28 @@ if(TARGET zl-gc-lifetime-tests)
 endif()
 
 zl_add_optional_test(zl-gc-tests tests/gc_tests.cpp
+# Controlled collector seam: exercises GC parking/reactivation and collector
+# election without depending on allocation volume or thread scheduling luck.
+find_package(Threads REQUIRED)
+add_executable(zl-gc-safepoint-tests tests/gc_safepoint_tests.cpp src/vm/gc_safepoint.cpp)
+target_link_libraries(zl-gc-safepoint-tests PRIVATE Threads::Threads)
+
+# Program graph roots and blocking reclamation across consecutive collections.
+add_executable(zl-gc-lifetime-tests tests/gc_lifetime_tests.cpp
+    src/vm/gc.cpp src/vm/gc_safepoint.cpp src/vm/value.cpp
+    src/vm/runtime_task.cpp src/vm/runtime_exception.cpp src/vm/runtime_thread.cpp)
+target_link_libraries(zl-gc-lifetime-tests PRIVATE Threads::Threads)
+
+add_executable(zl-gc-tests tests/gc_tests.cpp
     src/vm/value.cpp
     src/vm/gc.cpp
     src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
 
 zl_add_optional_test(zl-runtime-task-executor-tests tests/runtime_task_executor_tests.cpp
+target_include_directories(zl-gc-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(zl-runtime-type-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_executable(zl-runtime-task-executor-tests tests/runtime_task_executor_tests.cpp
     src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp
     src/vm/runtime_task_executor.cpp
