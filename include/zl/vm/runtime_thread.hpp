@@ -69,8 +69,11 @@ public:
                 // Capture rather than propagate: an exception escaping a
                 // std::thread's entry point calls std::terminate. join()
                 // rethrows this in the joining thread instead.
+                // The collector does not trace threads, so this failure pins
+                // its own payload until join() consumes it.
                 std::lock_guard<std::mutex> lock(*failureMutex);
-                *failure = StoredException(std::current_exception());
+                *failure = StoredException(std::current_exception(),
+                                           StoredException::Retention::Untraced);
             }
             done->store(true, std::memory_order_release);
         });
