@@ -413,6 +413,37 @@ Type.base(object)      // direct base class name, or nil for a root class
 Reflection metadata is intentionally small. Generic type arguments, method signatures,
 annotations, and writable reflection are reserved for future phases.
 
+## Runtime lifetimes and GC roots
+
+Active executions, queued/suspended async invocations and reachable closures keep
+their programs reachable. The collector follows program constants, current
+static values and cached initialization failures at trace time. A parked VM does
+not keep a stale copy of a static slot, and an unreachable static/closure cycle
+is collectible rather than permanently pinned.
+
+A thrown ZL exception retains its payload while C++ unwinds. A failure cached in
+a Task or static field instead stores a traced edge and an owned diagnostic;
+rethrowing it establishes a new in-flight root. Destructors do not read reclaimed
+exception objects. Failures of an async `main` propagate to the entry point.
+
+Collection separates tracing from destruction. Unreachable allocations leave the
+registry while mutators are stopped, but their native owners are destroyed after
+reactivation. Implicit `Thread` joins also wait at a stable VM instruction
+boundary, not inside a vector/map update or frame unwind. Explicit `Thread.join`
+remains synchronous. Values being returned or caught stay rooted while these
+waits run. Pending native channel tasks retain their operation owner until a
+terminal transition.
+
+C++ embedders participate explicitly: `GCRoots` contains value snapshots and
+borrowed program roots whose owners must outlive the root lease. `TracingGC::collect`
+returns a move-only `Collection`; reclaim it only after the stop-the-world phase
+has ended. The coordinator performs this ordering for VM collections.
+
+The focused `gc_lifetime_tests.cpp` target checks program/static/closure cycles,
+exception lifetimes, pending operation roots and blocking reclamation across
+consecutive collections. `StaticMembers.zl` exercises the corresponding language
+paths under allocation pressure.
+
 ## Memory-model direction
 
 The planned memory model combines ownership with tracing GC. Unannotated managed and

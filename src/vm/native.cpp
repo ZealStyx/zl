@@ -1149,7 +1149,7 @@ Value channelSendAsync(const std::vector<Value>& args) {
     auto obj = std::get_if<ObjectRef>(&args[0]);
     if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
         throw std::runtime_error("Channel.sendAsync: expected a Channel");
-    auto task = std::make_shared<RuntimeTaskState>("void");
+    auto task = std::make_shared<RuntimeTaskState>("void", std::vector<Value>{args[0]});
     const Value value = args[1];
     std::shared_ptr<ObjectBox::ChannelState> state = (*obj)->channelState;
 
@@ -1207,7 +1207,7 @@ Value channelReceiveAsync(const std::vector<Value>& args) {
     auto obj = std::get_if<ObjectRef>(&args[0]);
     if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
         throw std::runtime_error("Channel.receiveAsync: expected a Channel");
-    auto task = std::make_shared<RuntimeTaskState>();
+    auto task = std::make_shared<RuntimeTaskState>("", std::vector<Value>{args[0]});
     std::shared_ptr<ObjectBox::ChannelState> state = (*obj)->channelState;
     std::optional<Value> immediate;
     TaskRef senderTask;
@@ -1279,10 +1279,11 @@ Value taskSpawn(const std::vector<Value>& args) {
     const auto closureCopy = *closure;
     auto root = std::make_shared<ProtectedGCRoot>(closureCopy.get());
     RuntimeTaskExecutor::instance().enqueue([task, closureCopy, root]() mutable {
+        std::unique_ptr<VM> workerVm;
         try {
+            workerVm = std::make_unique<VM>();
             task->start();
-            VM workerVm;
-            Value result = workerVm.invokeTaskClosure(closureCopy);
+            Value result = workerVm->invokeTaskClosure(closureCopy);
             task->succeed(std::move(result));
         } catch (...) {
             try { task->fail(std::current_exception()); } catch (const std::logic_error&) {}

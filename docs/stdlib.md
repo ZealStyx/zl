@@ -266,8 +266,13 @@ from worker threads. The reference operation is `Time.sleepAsync(milliseconds)`,
 can be awaited from an `async func` without blocking the VM scheduler.
 
 `Shared<T>` is an explicit generic wrapper. Construct it with `new Shared<T>(value)` and
-access it with `get()` / `setValue()`. CPU-worker and raw-thread closures may carry only
-`Shared`-wrapped object captures; ordinary captures are rejected.
+access it with `get()` / `setValue()`, or construct a cell with `share(value)`.
+CPU-worker and raw-thread captures must use `Shared` or the supported synchronization
+handles; ordinary mutable captures are rejected. Individual cell operations are
+synchronized, but read-modify-write sequences need `withLock` or an atomic operation.
 
-`Shared<T>` does **not** imply thread safety. The top-level `share()` helper and
-compile-time confinement checks remain pending.
+Explicit `Thread.join` blocks cooperatively. Dropping the last thread handle retains
+its implicit-join behavior, with the native wait deferred to a stable VM boundary so
+GC can continue. Cached task failures keep their managed exception as a traced edge;
+an in-flight rethrow roots the payload during unwinding. Async entry-point failures
+are reported rather than silently returning success.

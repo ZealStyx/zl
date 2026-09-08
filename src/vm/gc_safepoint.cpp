@@ -12,7 +12,7 @@ namespace {
 struct CoordinatorState {
     struct Participant {
         bool parked{false};
-        std::vector<Value> roots;
+        GCRoots roots;
     };
 
     std::mutex mutex;
@@ -55,13 +55,19 @@ void GCSafepointCoordinator::unregisterParticipant(ParticipantId id) {
     auto& s = state();
     std::unique_lock<std::mutex> lock(s.mutex);
     s.cv.wait(lock, [&] { return !s.collectionRunning; });
-    s.participants.erase(id);
+    GCRoots released;
+    const auto it = s.participants.find(id);
+    if (it != s.participants.end()) {
+        released = std::move(it->second.roots);
+        s.participants.erase(it);
+    }
     // The last running participant may exit rather than poll. Waiting pollers
     // must re-evaluate the rendezvous and elect a collector in that case too.
     s.cv.notify_all();
+    lock.unlock();
 }
 
-void GCSafepointCoordinator::poll(ParticipantId id, std::vector<Value> roots) {
+void GCSafepointCoordinator::poll(ParticipantId id, GCRoots roots) {
     auto& s = state();
     std::unique_lock<std::mutex> lock(s.mutex);
     if (!s.participants.count(id)) return;
@@ -80,15 +86,15 @@ void GCSafepointCoordinator::poll(ParticipantId id, std::vector<Value> roots) {
             continue;
         }
         std::exception_ptr failure;
+        TracingGC::Collection collection;
         try {
-            std::vector<Value> allRoots;
+            GCRoots allRoots;
             for (const auto& entry : s.participants) {
-                const auto& snapshot = entry.second.roots;
-                allRoots.insert(allRoots.end(), snapshot.begin(), snapshot.end());
+                allRoots.append(entry.second.roots);
             }
             s.collectionRunning = true;
             lock.unlock();
-            (void)TracingGC::instance().collect(allRoots);
+            collection = TracingGC::instance().collect(allRoots);
         } catch (...) {
             failure = std::current_exception();
         }
@@ -97,26 +103,38 @@ void GCSafepointCoordinator::poll(ParticipantId id, std::vector<Value> roots) {
         s.collectionRequested = false;
         s.cv.notify_all();
         if (failure) {
+            // collect allocates before detaching entries, so a failed trace
+            // has no retirement work. Reactivate atomically before another
+            // participant can start a new trace in the unlocked interval.
             participant.parked = false;
-            participant.roots.clear();
+            auto released = std::move(participant.roots);
+            lock.unlock();
             std::rethrow_exception(failure);
         }
+        // Native owners may block during destruction. Peers are runnable and
+        // this collector stays parked with its roots until reclamation ends.
+        lock.unlock();
+        collection.reclaim();
+        lock.lock();
     }
     // A collector never clears another participant's snapshot or parked flag.
     // Until that participant actually resumes, its roots must also survive a
     // second collection started by a faster participant.
     participant.parked = false;
-    participant.roots.clear();
+    auto released = std::move(participant.roots);
+    lock.unlock();
 }
 
-void GCSafepointCoordinator::beginBlockingNative(ParticipantId id, std::vector<Value> roots) {
+void GCSafepointCoordinator::beginBlockingNative(ParticipantId id, GCRoots roots) {
     auto& s = state();
-    std::lock_guard<std::mutex> lock(s.mutex);
+    std::unique_lock<std::mutex> lock(s.mutex);
     auto it = s.participants.find(id);
     if (it == s.participants.end()) return;
+    auto released = std::move(it->second.roots);
     it->second.roots = std::move(roots);
     it->second.parked = true;
     s.cv.notify_all();
+    lock.unlock();
 }
 
 void GCSafepointCoordinator::endBlockingNative(ParticipantId id) {
@@ -130,8 +148,9 @@ void GCSafepointCoordinator::endBlockingNative(ParticipantId id) {
     auto it = s.participants.find(id);
     if (it == s.participants.end()) return;
     it->second.parked = false;
-    it->second.roots.clear();
+    auto released = std::move(it->second.roots);
     s.cv.notify_all();
+    lock.unlock();
 }
 
 } // namespace zl

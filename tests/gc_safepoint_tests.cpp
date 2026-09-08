@@ -23,6 +23,7 @@ bool sampled = false;
 bool collecting = false;
 bool holdCollection = true;
 bool finished = false;
+bool failCollection = false;
 std::vector<zl::Value> collectedRoots;
 std::atomic<const char*> stage{"starting"};
 
@@ -58,15 +59,19 @@ bool TracingGC::shouldCollect() const {
     cv.notify_all();
     return pressure;
 }
-TracingGC::Stats TracingGC::collect(const std::vector<Value>& roots) {
+TracingGC::Collection TracingGC::collect(const GCRoots& roots) {
     std::unique_lock<std::mutex> lock(mutex);
     require(!collecting, "two collectors elected for one rendezvous");
     collecting = true;
-    collectedRoots = roots;
+    collectedRoots = roots.values;
     cv.notify_all();
     cv.wait(lock, [] { return !holdCollection; });
     collecting = false;
     pressure = false;
+    if (failCollection) {
+        failCollection = false;
+        throw std::runtime_error("controlled collection failure");
+    }
     return {};
 }
 } // namespace zl
@@ -131,6 +136,19 @@ int main() {
     nextPoller.join();
     require(containsRoot(33) && containsRoot(44),
             "idle participant lost its roots across collections");
+    stage = "collection failure must release the rendezvous";
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        failCollection = true;
+    }
+    requestCollection();
+    bool caught = false;
+    try { coordinator.poll(runner, {std::int64_t{55}}); }
+    catch (const std::runtime_error&) { caught = true; }
+    require(caught, "controlled collection failure was swallowed");
+    requestCollection();
+    coordinator.poll(runner, {std::int64_t{66}});
+    require(containsRoot(33) && containsRoot(66), "failure damaged the next rendezvous/root snapshot");
     coordinator.endBlockingNative(idle);
     coordinator.unregisterParticipant(idle);
     coordinator.unregisterParticipant(runner);

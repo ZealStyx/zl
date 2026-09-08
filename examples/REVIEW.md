@@ -47,13 +47,25 @@ substitution bug, and inherited field-name collisions. Native signatures now
 describe element/key/value relationships; `String.split` returns `list<string>`
 and native reads/projections retain their arguments.
 
-`tests/type_boundaries.py` covers two end-to-end workflows plus semantic rejection
-of unsafe variants. The remaining stabilization work still precedes library
-expansion: static-storage GC ownership, external asynchronous callback ownership,
-blocking native-resource destruction, and the remaining exception/Shared audit.
-Static initialization condition waits now park, but that is not a claim that the
-static-storage root/lifetime audit is complete. The large type-checker split and
-native lowering remain deferred.
+The lifetime batch closes the static-root gap with program graph tracing: constants,
+current static values and cached failures survive collection through active/suspended
+VMs and reachable closures. It does not globally pin static stores, so unreachable
+static/closure/failure cycles are reclaimed. A direct ASan reproduction previously
+freed a static list still in use; the strengthened `StaticMembers.zl` now preserves
+both values and cached failures across pressure.
+
+Reclamation occurs after tracing, outside collector/coordinator locks. Implicit thread
+joins run at stable VM boundaries instead of inside container/frame destruction.
+In-flight exceptions root their object; cached failures use traced storage and native
+diagnostics instead of permanent exception pins. Async entry failures propagate, and
+pending channel tasks retain their operation owner. `gc_lifetime_tests.cpp` controls
+retirement so another collection must complete while a retired thread is joined;
+`type_boundaries.py` also checks async failure propagation.
+
+The remaining stabilization gate includes external FFI callback quiescence/ownership,
+channel cancellation/progress interactions, other blocking native-resource finalizers
+and the remaining exception/Shared audit. Library expansion, the large type-checker
+split and native lowering remain deferred.
 
 ## Fixed in this branch
 

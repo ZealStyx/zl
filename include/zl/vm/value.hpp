@@ -64,13 +64,16 @@ using MapRef = GcRef<MapBox>;
 using ObjectRef = GcRef<ObjectBox>;
 using ClosureRef = GcRef<ClosureBox>;
 
+class ProtectedGCRoot;
 class ZlThrownException : public std::exception {
 public:
-    explicit ZlThrownException(ObjectRef value) : value_(std::move(value)) {}
+    explicit ZlThrownException(ObjectRef value);
+    ~ZlThrownException() override;
     const char* what() const noexcept override { return "ZL exception"; }
     [[nodiscard]] const ObjectRef& value() const noexcept { return value_; }
 private:
     ObjectRef value_;
+    std::shared_ptr<ProtectedGCRoot> root_;
 };
 
 // std::variant<A, B, C, ...> is a type-safe union: a Value IS EXACTLY ONE of

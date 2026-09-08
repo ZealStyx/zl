@@ -9,7 +9,9 @@
 
 #include "zl/compiler/bytecode.hpp"
 #include "execution_state.hpp"
+#include "gc_roots.hpp"
 #include "runtime_scheduler.hpp"
+#include "runtime_thread.hpp"
 
 namespace zl {
 
@@ -47,6 +49,17 @@ public:
 
 
 private:
+    class ProgramScope {
+    public:
+        ProgramScope(VM& vm, const Chunk& chunk);
+        ~ProgramScope();
+        ProgramScope(const ProgramScope&) = delete;
+        ProgramScope& operator=(const ProgramScope&) = delete;
+    private:
+        VM& vm_;
+        const Chunk* previous_;
+        DeferredThreadJoins* previousJoins_;
+    };
     enum class ExecuteStatus { Completed, Suspended };
     [[nodiscard]] ExecuteStatus execute(const Chunk& chunk, std::size_t startIp, bool stopAtReturn,
                               const std::vector<std::string>& programArgs, Value* returnValue);
@@ -64,7 +77,8 @@ private:
     void pushNativeRoots(const std::vector<Value>& roots);
     void popNativeRoots();
     void appendNativeRoots(std::vector<Value>& roots) const;
-    std::vector<Value> gcRoots() const;
+    void drainThreadJoins();
+    GCRoots gcRoots() const;
     void beginBlockingNativeCall();
     void endBlockingNativeCall() const;
 
@@ -106,6 +120,8 @@ private:
     std::exception_ptr pendingResumeException_;
     std::vector<std::vector<Value>> nativeRootFrames_;
     const Chunk* activeChunk_{nullptr};
+    std::vector<const Chunk*> activePrograms_;
+    DeferredThreadJoins threadJoins_;
     std::uint64_t gcParticipantId_{0};
 
 };

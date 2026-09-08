@@ -71,6 +71,7 @@ target_include_directories(zl-bind PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_executable(zl-runtime-type-tests tests/runtime_type_tests.cpp
     src/vm/value.cpp
     src/vm/gc.cpp
+    src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
 # Controlled collector seam: exercises GC parking/reactivation and collector
 # election without depending on allocation volume or thread scheduling luck.
@@ -78,13 +79,21 @@ find_package(Threads REQUIRED)
 add_executable(zl-gc-safepoint-tests tests/gc_safepoint_tests.cpp src/vm/gc_safepoint.cpp)
 target_link_libraries(zl-gc-safepoint-tests PRIVATE Threads::Threads)
 
+# Program graph roots and blocking reclamation across consecutive collections.
+add_executable(zl-gc-lifetime-tests tests/gc_lifetime_tests.cpp
+    src/vm/gc.cpp src/vm/gc_safepoint.cpp src/vm/value.cpp
+    src/vm/runtime_task.cpp src/vm/runtime_exception.cpp src/vm/runtime_thread.cpp)
+target_link_libraries(zl-gc-lifetime-tests PRIVATE Threads::Threads)
+
 add_executable(zl-gc-tests tests/gc_tests.cpp
     src/vm/value.cpp
     src/vm/gc.cpp
+    src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
 target_include_directories(zl-gc-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(zl-runtime-type-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_executable(zl-runtime-task-executor-tests tests/runtime_task_executor_tests.cpp
+    src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp
     src/vm/runtime_task_executor.cpp
     src/vm/runtime_thread.cpp
@@ -106,6 +115,7 @@ target_include_directories(zl-regex-unicode-tests PRIVATE ${CMAKE_SOURCE_DIR}/in
 
 add_executable(zl-runtime-scheduler-tests tests/runtime_scheduler_tests.cpp
     src/vm/runtime_scheduler.cpp
+    src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp
     src/vm/runtime_task_executor.cpp
     src/vm/value.cpp
@@ -226,6 +236,7 @@ add_executable(zl-native-boundary-tests tests/native_boundary_tests.cpp
     src/vm/value.cpp
     src/vm/execution_state.cpp
     src/vm/gc.cpp
+    src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
 target_include_directories(zl-native-boundary-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
@@ -235,6 +246,7 @@ add_executable(zl-native-runtime-registry-tests tests/native_runtime_registry_te
     src/vm/value.cpp
     src/vm/execution_state.cpp
     src/vm/gc.cpp
+    src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
 target_include_directories(zl-native-runtime-registry-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
@@ -244,6 +256,7 @@ add_executable(zl-native-ffi-transport-tests tests/native_ffi_transport_tests.cp
     src/vm/value.cpp
     src/vm/execution_state.cpp
     src/vm/gc.cpp
+    src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
 target_include_directories(zl-native-ffi-transport-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
@@ -253,6 +266,7 @@ add_executable(zl-native-ffi-lifetime-tests tests/native_ffi_lifetime_adapter_te
     src/vm/value.cpp
     src/vm/execution_state.cpp
     src/vm/gc.cpp
+    src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
 target_include_directories(zl-native-ffi-lifetime-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
@@ -268,6 +282,7 @@ add_executable(zl-native-struct-tests tests/native_struct_tests.cpp
     src/vm/value.cpp
     src/vm/execution_state.cpp
     src/vm/gc.cpp
+    src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
 target_include_directories(zl-native-struct-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 

@@ -7,7 +7,7 @@
 #include <memory>
 #include <unordered_map>
 
-#include "value.hpp"
+#include "gc_roots.hpp"
 
 namespace zl {
 
@@ -28,6 +28,15 @@ namespace zl {
 // current tracing sweep. Physical storage is collector-owned and released from
 // the registry when an allocation is unreachable.
 class TracingGC {
+    struct Entry {
+        enum class Kind : std::uint8_t { List, Map, Object, Closure };
+        Kind kind;
+        std::unique_ptr<ListBox> list;
+        std::unique_ptr<MapBox> map;
+        std::unique_ptr<ObjectBox> object;
+        std::unique_ptr<ClosureBox> closure;
+    };
+
 public:
     struct Stats {
         std::size_t tracked{0};
@@ -35,6 +44,23 @@ public:
         std::size_t unreachable{0};
         std::size_t reclaimed{0};
         std::size_t deferred{0};
+    };
+
+    // Trace/sweep only detaches garbage. Keep this result until mutators have
+    // resumed, then reclaim: C++ ownership inside an unreachable box can join
+    // threads, unregister VMs, or destroy a program's static storage.
+    class Collection {
+    public:
+        Collection() = default;
+        Collection(Collection&&) noexcept = default;
+        Collection& operator=(Collection&&) noexcept = default;
+        Collection(const Collection&) = delete;
+        Collection& operator=(const Collection&) = delete;
+        Stats stats;
+        void reclaim() noexcept { retired_.clear(); }
+    private:
+        friend class TracingGC;
+        std::vector<Entry> retired_;
     };
 
     static TracingGC& instance();
@@ -45,7 +71,7 @@ public:
     void track(const ClosureRef& value);
     void track(const Value& value);
 
-    [[nodiscard]] Stats collect(const std::vector<Value>& roots);
+    [[nodiscard]] Collection collect(const GCRoots& roots);
     [[nodiscard]] std::size_t trackedCount() const;
     [[nodiscard]] bool shouldCollect() const;
 
@@ -61,14 +87,6 @@ private:
     friend ObjectRef makeGCObject();
     friend ClosureRef makeGCClosure();
 
-    struct Entry {
-        enum class Kind : std::uint8_t { List, Map, Object, Closure };
-        Kind kind;
-        std::unique_ptr<ListBox> list;
-        std::unique_ptr<MapBox> map;
-        std::unique_ptr<ObjectBox> object;
-        std::unique_ptr<ClosureBox> closure;
-    };
 
     mutable std::mutex mutex_;
     mutable std::mutex collectMutex_;

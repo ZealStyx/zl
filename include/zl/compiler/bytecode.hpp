@@ -1,5 +1,6 @@
 #pragma once
 
+#include "zl/vm/runtime_exception.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -183,7 +184,7 @@ struct StaticFieldState {
     std::condition_variable cv;
     Status status{Status::Uninitialized};
     Value value{};
-    std::exception_ptr failure;
+    StoredException failure;
     std::thread::id ownerThread{};
     std::size_t initializerFunction{static_cast<std::size_t>(-1)};
 };

@@ -174,26 +174,38 @@ ExecutionState::CallFrame VM::makeCallFrame(const Chunk& chunk, const FunctionIn
     return frame;
 }
 
-std::vector<Value> VM::gcRoots() const {
-    std::vector<Value> roots;
-    state_.appendGCRoots(roots);
-    appendNativeRoots(roots);
-    if (entryTask_) roots.emplace_back(entryTask_);
+VM::ProgramScope::ProgramScope(VM& vm, const Chunk& chunk) : vm_(vm), previous_(vm.activeChunk_) {
+    vm_.activePrograms_.push_back(&chunk);
+    vm_.activeChunk_ = &chunk;
+    previousJoins_ = DeferredThreadJoins::bind(&vm_.threadJoins_);
+}
+
+VM::ProgramScope::~ProgramScope() {
+    DeferredThreadJoins::bind(previousJoins_);
+    vm_.activeChunk_ = previous_;
+    vm_.activePrograms_.pop_back();
+}
+
+GCRoots VM::gcRoots() const {
+    GCRoots roots;
+    state_.appendGCRoots(roots.values);
+    appendNativeRoots(roots.values);
+    roots.programs = activePrograms_;
+    if (entryTask_) roots.values.emplace_back(entryTask_);
     if (asyncInvocation_) {
-        asyncInvocation_->frame.appendGCRoots(roots);
-        if (asyncInvocation_->task) roots.emplace_back(asyncInvocation_->task);
-        if (asyncInvocation_->awaitedTask) roots.emplace_back(asyncInvocation_->awaitedTask);
+        asyncInvocation_->frame.appendGCRoots(roots.values);
+        if (asyncInvocation_->chunk) roots.programs.push_back(asyncInvocation_->chunk.get());
+        if (asyncInvocation_->task) roots.values.emplace_back(asyncInvocation_->task);
+        if (asyncInvocation_->awaitedTask) roots.values.emplace_back(asyncInvocation_->awaitedTask);
     }
-    if (pendingResumeException_) {
-        try {
-            std::rethrow_exception(pendingResumeException_);
-        } catch (const ZlThrownException& e) {
-            if (e.value()) roots.emplace_back(e.value());
-        } catch (...) {
-            // Native/runtime exceptions do not retain managed values.
-        }
-    }
+    appendExceptionRoots(pendingResumeException_, roots.values);
     return roots;
+}
+
+void VM::drainThreadJoins() {
+    if (threadJoins_.empty()) return;
+    BlockingNativeCall blocked(this);
+    threadJoins_.drain();
 }
 
 void VM::beginBlockingNativeCall() {
@@ -475,6 +487,7 @@ void VM::pumpSchedulerUntilTerminal(const TaskRef& task) {
 }
 
 int VM::run(const Chunk& chunk, const std::vector<std::string>& programArgs) {
+    ProgramScope program(*this, chunk);
     const ExecuteStatus result = execute(chunk, 0, false, programArgs, nullptr);
     if (result == ExecuteStatus::Suspended) {
         throw std::runtime_error("VM: top-level execution unexpectedly suspended");
@@ -494,30 +507,25 @@ int VM::run(const Chunk& chunk, const std::vector<std::string>& programArgs) {
     // The process-wide heap must never be collected from just this VM's roots
     // while other VMs/threads are still running.
     GCSafepointCoordinator::instance().poll(gcParticipantId_, gcRoots());
+    drainThreadJoins();
+    // An async entry task is an entry-point result, not an ignored background
+    // task. Propagate failure/cancellation with a freshly pinned exception.
+    if (entryTask_) (void)entryTask_->observe();
     return 0;
 }
 
 VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stopAtReturn,
                 const std::vector<std::string>& programArgs, Value* returnValue) {
-    const Chunk* previousChunk = activeChunk_;
-    activeChunk_ = &chunk;
-    // execute() is re-entrant (a native can drive a nested execute() for a
-    // closure: Mutex.withLock, reflection invoke, thread/task entries). Every
-    // exit - normal completion OR an uncaught exception leaving the nested
-    // run - must hand the caller's chunk back, otherwise the outer loop resumes
-    // the caller's ip against the nested chunk and re-runs code (the
-    // exception-in-withLock "continuation runs twice" bug).
-    struct ActiveChunkGuard {
-        VM* vm;
-        const Chunk* previous;
-        ~ActiveChunkGuard() { vm->activeChunk_ = previous; }
-    } activeChunkGuard{this, previousChunk};
+    // Re-entrant native callbacks must retain both the callee's program and
+    // their caller's program; neither is an independent global GC pin.
+    ProgramScope program(*this, chunk);
     const std::size_t initialCallDepth = state_.callDepth();
     std::size_t ip = startIp;
 
     std::size_t instructionsSinceSafePoint = 0;
     while (true) {
       try {
+        drainThreadJoins();
         if (++instructionsSinceSafePoint >= 128 || TracingGC::instance().shouldCollect()) {
             GCSafepointCoordinator::instance().poll(gcParticipantId_, gcRoots());
             instructionsSinceSafePoint = 0;
@@ -969,7 +977,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                         break;
                     }
                     if (state->status == StaticFieldState::Status::Failed) {
-                        std::rethrow_exception(state->failure);
+                        state->failure.rethrow();
                     }
                     if (state->status == StaticFieldState::Status::Initializing) {
                         if (state->ownerThread == std::this_thread::get_id()) {
@@ -996,7 +1004,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     } catch (...) {
                         auto failure = std::current_exception();
                         lock.lock();
-                        state->failure = failure;
+                        state->failure = StoredException(failure);
                         state->status = StaticFieldState::Status::Failed;
                         state->ownerThread = {};
                         lock.unlock();
@@ -1036,7 +1044,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     types.commit();
                 }
                 state->status = StaticFieldState::Status::Initialized;
-                state->failure = nullptr;
+                state->failure = {};
                 state->ownerThread = {};
                 lock.unlock();
                 state->cv.notify_all();

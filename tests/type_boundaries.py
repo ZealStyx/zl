@@ -397,6 +397,20 @@ class TypeBoundaries extends HeapParent {
 """
 
 
+ASYNC_FAILURE_PROGRAM = r"""
+class TypeBoundaries {
+    static func pressure(): void {
+        for i in 0..1200 { var garbage = [i, i + 1] }
+    }
+    async func main(): void {
+        await Time.sleepAsync(1)
+        var child = Thread.start(func() { TypeBoundaries.pressure() })
+        throw new Exception("async entry failed safely")
+    }
+}
+"""
+
+
 def run(binary, source, path, check=False):
     path.write_text(source)
     command = [str(binary)] + (["--check"] if check else [])
@@ -424,7 +438,10 @@ def main():
         result = run(binary, INVALID_HEAP_PROGRAM, source, check=True)
         if result.returncode != 1 or "cannot redeclare inherited field" not in result.stderr:
             raise AssertionError("inherited field contract collision was not rejected: " + result.stderr)
-        print(f"type boundaries: PASS (two end-to-end workflows + {len(INVALID) + 1} semantic rejections)")
+        result = run(binary, ASYNC_FAILURE_PROGRAM, source)
+        if result.returncode != 1 or "async entry failed safely" not in result.stderr or "AddressSanitizer" in result.stderr:
+            raise AssertionError("async entry failure/unwind lost its result: " + result.stdout + result.stderr)
+        print(f"type boundaries: PASS (two end-to-end workflows + {len(INVALID) + 1} semantic rejections + async failure propagation)")
 
 
 if __name__ == "__main__":
