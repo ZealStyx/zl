@@ -2,6 +2,46 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-08 — Thread failures are catchable; `shared` usable as an identifier
+
+Adversarial probing of the runtime found three defects.
+
+**An uncaught exception on a thread killed the process.** `Thread.start`'s
+worker wrapper caught everything and called `std::terminate()`, on the premise
+that "an exception escaping a Thread is process-fatal by definition". A ZL
+program could therefore be aborted by a worker with no way to observe or handle
+the failure - the output was a bare `terminate called after throwing an
+instance of 'zl::ZlThrownException'`. Threads now capture the failure in a
+`StoredException`, exactly as tasks already did, and `Thread.join` rethrows it
+in the joining thread. Worker failures are catchable by their real type,
+including runtime faults such as an out-of-range index, and a program that
+never joins gets an ordinary diagnostic and a nonzero exit instead of an abort.
+
+**Stored exception payloads could be collected.** `StoredException` reported
+its managed payload through `appendGCRoots`, which works for holders the
+collector traces (tasks, static fields) but not for threads, which it does not
+trace. Under allocation pressure a worker's exception object was collected
+before the join and the message degraded to `ZL exception`. `StoredException`
+now pins its payload with a `ProtectedGCRoot` for its own lifetime, so the
+payload survives regardless of who holds it. Verified with twenty concurrently
+failing workers and heavy churn between throw and join: all twenty messages
+arrive intact.
+
+**`shared` was unusable as a variable name.** It is an ownership modifier, but
+the parser already accepted it as an identifier in declarations
+(`var shared = ...`). Any later use failed: `shared.push(1)` reported
+`Expected a type name`. The statement parser now treats `shared` as a modifier
+only when a type actually follows it, and the expression parser accepts it as
+an identifier, so `shared int x` and `var shared = ...; shared.push(1)` both
+work.
+
+**Validation:** fresh build; 49/49 examples pass; `tests/type_boundaries.py`
+passes. Also verified during this pass: GC churn over 140,000 objects, 5,000-
+deep recursion, typed exceptions propagating through 500 frames with intact
+stack traces, recoverable `StackOverflowError`, typed failures surviving task
+and awaited-chain boundaries, and 8 threads x 1000 atomic increments summing
+exactly.
+
 ## 2026-09-08 — Correct calendar arithmetic; Date/DateTime/TimeOfDay rebuilt
 
 Probing the time facades across a daylight-saving boundary exposed two real

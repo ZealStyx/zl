@@ -1,5 +1,6 @@
 #pragma once
 
+#include "zl/vm/runtime_exception.hpp"
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -41,8 +42,16 @@ public:
     RuntimeThreadState(const RuntimeThreadState&) = delete;
     RuntimeThreadState& operator=(const RuntimeThreadState&) = delete;
 
+    // Joins the thread. If its entry func terminated with an uncaught
+    // exception, that exception is rethrown here in the joining thread, so a
+    // worker failure surfaces as a normal catchable ZL exception instead of
+    // killing the process.
     void join();
     [[nodiscard]] bool isAlive() const noexcept;
+
+    // The failure captured from the worker, if any. Valid once the thread has
+    // finished; used to keep the stored exception's payload GC-reachable.
+    [[nodiscard]] std::shared_ptr<StoredException> failure() const;
 
     template <typename Fn>
     void startWith(Fn&& fn) {
@@ -50,9 +59,19 @@ public:
         if (started_) throw std::logic_error("thread has already been started");
         auto worker = std::make_unique<ThreadJoinNode>();
         auto done = done_;
+        auto failure = failure_;
+        auto failureMutex = failureMutex_;
         done->store(false, std::memory_order_release);
-        worker->thread = std::thread([done, fn = std::forward<Fn>(fn)]() mutable {
-            try { fn(); } catch (...) { done->store(true, std::memory_order_release); throw; }
+        worker->thread = std::thread([done, failure, failureMutex, fn = std::forward<Fn>(fn)]() mutable {
+            try {
+                fn();
+            } catch (...) {
+                // Capture rather than propagate: an exception escaping a
+                // std::thread's entry point calls std::terminate. join()
+                // rethrows this in the joining thread instead.
+                std::lock_guard<std::mutex> lock(*failureMutex);
+                *failure = StoredException(std::current_exception());
+            }
             done->store(true, std::memory_order_release);
         });
         worker_ = std::move(worker);
@@ -63,6 +82,8 @@ private:
     mutable std::mutex mutex_;
     std::unique_ptr<ThreadJoinNode> worker_;
     std::shared_ptr<std::atomic<bool>> done_{std::make_shared<std::atomic<bool>>(true)};
+    std::shared_ptr<std::mutex> failureMutex_{std::make_shared<std::mutex>()};
+    std::shared_ptr<StoredException> failure_{std::make_shared<StoredException>()};
     bool started_{false};
 };
 } // namespace zl

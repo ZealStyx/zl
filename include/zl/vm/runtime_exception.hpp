@@ -5,6 +5,9 @@
 #include <vector>
 
 #include "value.hpp"
+#include <memory>
+
+namespace zl { class ProtectedGCRoot; }
 
 namespace zl {
 // In-flight ZL exceptions pin their object while native C++ unwinds. A cached
@@ -20,6 +23,11 @@ public:
     const std::string& message() const noexcept { return message_; }
 private:
     ObjectRef managed_;
+    // Keeps a managed payload alive for as long as this failure is stored.
+    // Holders that the collector traces (tasks, static fields) also report it
+    // through appendGCRoots; holders it does not trace - notably threads -
+    // rely solely on this pin. Shared so the class stays copyable.
+    std::shared_ptr<ProtectedGCRoot> root_;
     std::exception_ptr native_;
     std::string message_;
 };

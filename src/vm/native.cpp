@@ -1654,13 +1654,11 @@ Value threadStart(const std::vector<Value>& args) {
     const auto closureCopy = *closure;
     auto root = std::make_shared<ProtectedGCRoot>(closureCopy.get());
     state->startWith([closureCopy, root]() mutable {
-        try {
-            VM workerVm;
-            (void)workerVm.invokeTaskClosure(closureCopy);
-        } catch (...) {
-            // An exception escaping a Thread is process-fatal by definition.
-            std::terminate();
-        }
+        VM workerVm;
+        // An exception escaping here is captured by startWith and rethrown by
+        // Thread.join, so a worker failure is reported to whoever joins rather
+        // than terminating the process.
+        (void)workerVm.invokeTaskClosure(closureCopy);
     });
     return Value{std::move(state)};
 }
