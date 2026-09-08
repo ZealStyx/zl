@@ -6,6 +6,7 @@
 #include "zl/vm/vm.hpp"
 #include "zl/vm/value.hpp"
 #include "zl/vm/gc.hpp"
+#include "zl/vm/runtime_type_checks.hpp"
 #include "zl/regex/regex.hpp"
 
 #include <algorithm>
@@ -49,6 +50,8 @@ VM* setCurrentNativeVm(VM* vm) {
 }
 
 namespace {
+
+const Chunk* nativeChunk() { return g_currentNativeVm ? g_currentNativeVm->activeChunk() : nullptr; }
 
 // --- Math ---
 
@@ -221,12 +224,12 @@ Value ioClear(const std::vector<Value>& /*args*/) {
 // --- Collection (lists, arrays, sets share ListRef; maps use MapRef) ---
 
 ListRef requireList(const Value& v, const char* fnName) {
-    if (auto p = std::get_if<ListRef>(&v)) return *p;
+    if (const auto* p = std::get_if<ListRef>(&v); p && *p) return *p;
     throw std::runtime_error(std::string(fnName) + " expects a list/array/set as its first argument");
 }
 
 MapRef requireMap(const Value& v, const char* fnName) {
-    if (auto p = std::get_if<MapRef>(&v)) return *p;
+    if (const auto* p = std::get_if<MapRef>(&v); p && *p) return *p;
     throw std::runtime_error(std::string(fnName) + " expects a map as its first argument");
 }
 
@@ -261,6 +264,8 @@ Value collNewList(const std::vector<Value>&) { return makeEmptyList(); }
 
 Value collPush(const std::vector<Value>& args) {
     auto list = requireList(args[0], "Collection.push");
+    RuntimeTypeCheck types(nativeChunk());
+    types.listWrite(list, &args[1], listLogicalSize(list) + 1);
     if (list->frontIndex != 0) {
         // A list with a queue front offset is still a valid ListRef, but
         // Collection.push should preserve normal list semantics. Compact the
@@ -270,19 +275,24 @@ Value collPush(const std::vector<Value>& args) {
         list->frontIndex = 0;
     }
     list->items.push_back(args[1]);
+    types.commit();
     return Value{};
 }
 
 Value collPop(const std::vector<Value>& args) {
     auto list = requireList(args[0], "Collection.pop");
+    RuntimeTypeCheck types(nativeChunk());
     if (listLogicalSize(list) == 0) throw std::runtime_error("Collection.pop: cannot pop from an empty list");
-    Value back = list->items.back();
+    types.listWrite(list, nullptr, listLogicalSize(list) - 1);
+    Value back = std::move(list->items.back());
     list->items.pop_back();
     normalizeListFront(list);
+    types.commit();
     return back;
 }
 
 Value collGet(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto list = requireList(args[0], "Collection.get");
     const std::size_t size = listLogicalSize(list);
     const std::size_t index = requireIndex(args[1], size, "Collection.get");
@@ -291,15 +301,20 @@ Value collGet(const std::vector<Value>& args) {
 
 Value collSet(const std::vector<Value>& args) {
     auto list = requireList(args[0], "Collection.set");
+    Value replacement = args[2];
+    RuntimeTypeCheck types(nativeChunk());
     const std::size_t size = listLogicalSize(list);
     const std::size_t index = requireIndex(args[1], size, "Collection.set");
-    list->items[list->frontIndex + index] = args[2];
+    types.listWrite(list, &replacement, size);
+    std::swap(list->items[list->frontIndex + index], replacement);
+    types.commit();
     return Value{};
 }
 
 Value collLength(const std::vector<Value>& args) {
-    if (auto p = std::get_if<ListRef>(&args[0])) return static_cast<std::int64_t>(listLogicalSize(*p));
-    if (auto p = std::get_if<MapRef>(&args[0])) return static_cast<std::int64_t>((*p)->entries.size());
+    RuntimeTypeCheck access(nativeChunk());
+    if (const auto* p = std::get_if<ListRef>(&args[0]); p && *p) return static_cast<std::int64_t>(listLogicalSize(*p));
+    if (const auto* p = std::get_if<MapRef>(&args[0]); p && *p) return static_cast<std::int64_t>((*p)->entries.size());
     if (auto p = std::get_if<std::string>(&args[0])) return static_cast<std::int64_t>(p->size());
     throw std::runtime_error("Collection.length expects a list/array/set, map, or string");
 }
@@ -315,29 +330,38 @@ Value queueNew(const std::vector<Value>&) { return makeEmptyList(); }
 
 Value queueEnqueue(const std::vector<Value>& args) {
     auto list = requireList(args[0], "Queue.enqueue");
+    RuntimeTypeCheck types(nativeChunk());
+    types.listWrite(list, &args[1], listLogicalSize(list) + 1);
     list->items.push_back(args[1]);
+    types.commit();
     return Value{};
 }
 
 Value queueDequeue(const std::vector<Value>& args) {
     auto list = requireList(args[0], "Queue.dequeue");
+    RuntimeTypeCheck types(nativeChunk());
     if (listLogicalSize(list) == 0) throw std::runtime_error("Queue.dequeue: cannot dequeue from an empty queue");
-    Value front = list->items[list->frontIndex++];
+    types.listWrite(list, nullptr, listLogicalSize(list) - 1);
+    Value front = std::move(list->items[list->frontIndex++]);
     normalizeListFront(list);
+    types.commit();
     return front;
 }
 
 Value queuePeek(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto list = requireList(args[0], "Queue.peek");
     if (listLogicalSize(list) == 0) throw std::runtime_error("Queue.peek: cannot peek an empty queue");
     return list->items[list->frontIndex];
 }
 
 Value queueIsEmpty(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     return listLogicalSize(requireList(args[0], "Queue.isEmpty")) == 0;
 }
 
 Value queueSize(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     return static_cast<std::int64_t>(listLogicalSize(requireList(args[0], "Queue.size")));
 }
 
@@ -345,31 +369,40 @@ Value stackNew(const std::vector<Value>&) { return makeEmptyList(); }
 
 Value stackPush(const std::vector<Value>& args) {
     auto list = requireList(args[0], "Stack.push");
+    RuntimeTypeCheck types(nativeChunk());
+    types.listWrite(list, &args[1], listLogicalSize(list) + 1);
     normalizeListFront(list);
     list->items.push_back(args[1]);
+    types.commit();
     return Value{};
 }
 
 Value stackPop(const std::vector<Value>& args) {
     auto list = requireList(args[0], "Stack.pop");
+    RuntimeTypeCheck types(nativeChunk());
     if (listLogicalSize(list) == 0) throw std::runtime_error("Stack.pop: cannot pop from an empty stack");
-    Value back = list->items.back();
+    types.listWrite(list, nullptr, listLogicalSize(list) - 1);
+    Value back = std::move(list->items.back());
     list->items.pop_back();
     normalizeListFront(list);
+    types.commit();
     return back;
 }
 
 Value stackPeek(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto list = requireList(args[0], "Stack.peek");
     if (listLogicalSize(list) == 0) throw std::runtime_error("Stack.peek: cannot peek an empty stack");
     return list->items.back();
 }
 
 Value stackIsEmpty(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     return listLogicalSize(requireList(args[0], "Stack.isEmpty")) == 0;
 }
 
 Value stackSize(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     return static_cast<std::int64_t>(listLogicalSize(requireList(args[0], "Stack.size")));
 }
 
@@ -377,14 +410,23 @@ Value collNewMap(const std::vector<Value>&) { return makeEmptyMap(); }
 
 Value collMapSet(const std::vector<Value>& args) {
     auto map = requireMap(args[0], "Collection.mapSet");
+    Value replacement = args[2];
+    RuntimeTypeCheck types(nativeChunk());
+    types.mapWrite(map, args[1], replacement);
     for (auto& entry : map->entries) {
-        if (valuesEqual(entry.first, args[1])) { entry.second = args[2]; return Value{}; }
+        if (valuesEqual(entry.first, args[1])) {
+            std::swap(entry.second, replacement);
+            types.commit();
+            return Value{};
+        }
     }
-    map->entries.emplace_back(args[1], args[2]);
+    map->entries.emplace_back(args[1], std::move(replacement));
+    types.commit();
     return Value{};
 }
 
 Value collMapGet(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto map = requireMap(args[0], "Collection.mapGet");
     for (auto& entry : map->entries) {
         if (valuesEqual(entry.first, args[1])) return entry.second;
@@ -393,6 +435,7 @@ Value collMapGet(const std::vector<Value>& args) {
 }
 
 Value collMapHas(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto map = requireMap(args[0], "Collection.mapHas");
     for (auto& entry : map->entries) {
         if (valuesEqual(entry.first, args[1])) return true;
@@ -402,25 +445,35 @@ Value collMapHas(const std::vector<Value>& args) {
 
 Value collMapRemove(const std::vector<Value>& args) {
     auto map = requireMap(args[0], "Collection.mapRemove");
+    std::pair<Value, Value> removed;
+    RuntimeTypeCheck access(nativeChunk());
     for (auto it = map->entries.begin(); it != map->entries.end(); ++it) {
-        if (valuesEqual(it->first, args[1])) { map->entries.erase(it); break; }
+        if (valuesEqual(it->first, args[1])) {
+            removed = std::move(*it);
+            map->entries.erase(it);
+            break;
+        }
     }
     return Value{};
 }
 
 Value collMapKeys(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto map = requireMap(args[0], "Collection.mapKeys");
     auto out = std::get<ListRef>(makeEmptyList());
     out->items.reserve(map->entries.size());
     for (const auto& entry : map->entries) out->items.push_back(entry.first);
+    if (map->storageType) out->storageType = std::make_shared<const NativeContainerType>(NativeContainerType{{map->storageType->arguments[0]}, {}});
     return out;
 }
 
 Value collMapValues(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto map = requireMap(args[0], "Collection.mapValues");
     auto out = std::get<ListRef>(makeEmptyList());
     out->items.reserve(map->entries.size());
     for (const auto& entry : map->entries) out->items.push_back(entry.second);
+    if (map->storageType) out->storageType = std::make_shared<const NativeContainerType>(NativeContainerType{{map->storageType->arguments[1]}, {}});
     return out;
 }
 
@@ -428,34 +481,49 @@ Value collNewSet(const std::vector<Value>&) { return makeEmptyList(); } // sets 
 
 Value collSetAdd(const std::vector<Value>& args) {
     auto set = requireList(args[0], "Collection.setAdd");
-    for (auto& item : set->items) {
-        if (valuesEqual(item, args[1])) return Value{}; // already present - sets don't allow duplicates
+    RuntimeTypeCheck types(nativeChunk());
+    types.listWrite(set, &args[1], listLogicalSize(set));
+    for (std::size_t i = set->frontIndex; i < set->items.size(); ++i) {
+        if (valuesEqual(set->items[i], args[1])) { types.commit(); return Value{}; }
     }
+    types.listWrite(set, nullptr, listLogicalSize(set) + 1);
     set->items.push_back(args[1]);
+    types.commit();
     return Value{};
 }
 
 Value collSetHas(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto set = requireList(args[0], "Collection.setHas");
-    for (auto& item : set->items) {
-        if (valuesEqual(item, args[1])) return true;
+    for (std::size_t i = set->frontIndex; i < set->items.size(); ++i) {
+        if (valuesEqual(set->items[i], args[1])) return true;
     }
     return false;
 }
 
 Value collSetRemove(const std::vector<Value>& args) {
     auto set = requireList(args[0], "Collection.setRemove");
-    for (auto it = set->items.begin(); it != set->items.end(); ++it) {
-        if (valuesEqual(*it, args[1])) { set->items.erase(it); break; }
+    Value removed;
+    RuntimeTypeCheck types(nativeChunk());
+    for (std::size_t i = set->frontIndex; i < set->items.size(); ++i) {
+        if (valuesEqual(set->items[i], args[1])) {
+            types.listWrite(set, nullptr, listLogicalSize(set) - 1);
+            removed = std::move(set->items[i]);
+            set->items.erase(set->items.begin() + static_cast<std::ptrdiff_t>(i));
+            break;
+        }
     }
+    types.commit();
     return Value{};
 }
 
 Value collSetItems(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto set = requireList(args[0], "Collection.setItems");
     auto out = std::get<ListRef>(makeEmptyList());
     out->items.reserve(set->items.size());
-    for (const auto& item : set->items) out->items.push_back(item);
+    for (std::size_t i = set->frontIndex; i < set->items.size(); ++i) out->items.push_back(set->items[i]);
+    if (set->storageType) out->storageType = std::make_shared<const NativeContainerType>(NativeContainerType{set->storageType->arguments, {}});
     return out;
 }
 
@@ -1466,7 +1534,15 @@ Value sharedSet(const std::vector<Value>& args) {
         VM::BlockingNativeCall blocked(g_currentNativeVm);
         lock.lock();
     }
-    (*obj)->fields["__value"] = args[1];
+    if (!nativeChunk()) throw std::runtime_error("Shared.__set: no active VM");
+    Value replacement = args[1];
+    {
+        RuntimeTypeCheck types(nativeChunk());
+        types.require(replacement, runtimeFieldType(*nativeChunk(), (*obj)->className, "__value", obj->get()));
+        std::swap((*obj)->fields["__value"], replacement);
+        types.commit();
+    }
+    lock.unlock();
     return Value{};
 }
 

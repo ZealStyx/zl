@@ -55,7 +55,8 @@ bool RuntimeTaskState::failureObserved() const noexcept {
 }
 
 std::string RuntimeTaskState::valueTypeName() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Signature metadata is immutable; type validation must not wait for task
+    // completion/destruction while holding a container contract transaction.
     return valueTypeName_;
 }
 

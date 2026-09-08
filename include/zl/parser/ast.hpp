@@ -324,6 +324,7 @@ struct VarDecl : AstNode {
     TypeAnnotation type;       // only meaningful when hasExplicitType is true
     std::string name;
     mutable std::string storageName;
+    mutable std::string assertedTypeName;
     NodePtr initializer;       // nullptr if no `= expr` given
     AccessModifier access{AccessModifier::DEFAULT};
     bool isStatic{false};

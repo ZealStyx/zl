@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 #include "semantic_types.hpp"
 
@@ -217,6 +218,7 @@ enum class NativeId : std::uint16_t {
 enum class NativeReturnTypeRule {
     NONE,
     SAME_NUMERIC_KIND,
+    FIRST_ARGUMENT_TYPES,
 };
 
 enum class NativeOwnershipKind : std::uint8_t { NONE, BORROWED, OWNED, CONSUMED };
@@ -237,8 +239,13 @@ struct NativeSignature {
     std::string returnClassName;
     std::vector<NativeOwnershipKind> paramOwnership;
     NativeOwnershipKind returnOwnership{NativeOwnershipKind::NONE};
+    // Generic native signatures bind the names in the first parameter's
+    // type arguments, e.g. map<K,V>. Later parameters/results reuse K and V.
+    std::vector<std::string> parameterTypeNames;
 };
 
+[[nodiscard]] std::unordered_map<std::string, std::string> nativeTypeBindings(
+    const NativeSignature& signature, const std::string& firstArgumentType);
 [[nodiscard]] const std::vector<NativeSignature>& nativeSignatureTable();
 [[nodiscard]] std::optional<const NativeSignature*> findNativeSignature(const std::string& qualifiedName);
 

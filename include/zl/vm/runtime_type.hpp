@@ -6,6 +6,7 @@
 #include <vector>
 #include <unordered_map>
 #include "zl/common/ownership.hpp"
+#include "zl/common/type_name.hpp"
 
 namespace zl {
 
@@ -15,8 +16,18 @@ using RuntimeTypeBindings = std::unordered_map<std::string, std::string>;
 // Durable runtime metadata for a user-defined type. The object graph owns a
 // shared instance rather than copying reflection strings into each object.
 // Richer field/method signatures can be added here as reflection grows.
+// A raw native container acquires an immutable contract at a typed boundary.
+// Lists/sets/arrays share an element contract; fixed arrays additionally freeze
+// the logical length. Wildcard arguments do not erase an existing contract.
+struct NativeContainerType {
+    std::vector<TypeName> arguments;
+    std::optional<std::size_t> fixedSize;
+};
+using NativeContainerTypeRef = std::shared_ptr<const NativeContainerType>;
+
 struct RuntimeFieldInfo {
     std::string name;
+    std::string ownerClassName;
     std::string typeName;
     std::string access;
     bool isStatic{false};

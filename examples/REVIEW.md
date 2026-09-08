@@ -37,11 +37,23 @@ mistaking them for outer thread captures. `match` also no longer leaks its subje
 onto the surrounding value stack. Compiler and VM share type-name parsing and
 substitution rather than decoding different grammars.
 
-`tests/type_boundaries.py` verifies the end-to-end workflow and semantic rejection
+The heap-contract batch now checks stock native list/map/set/queue/stack writes
+against storage-owned contracts, including aliases, nested children and fixed
+array lengths. Type checks plan their changes and commit only after the whole
+boundary succeeds. Field writes use complete declaration metadata and the
+receiver's inherited generic bindings. This exposed and corrected the built-in
+containers' former hard-coded `int` backing declarations, a template-parent field
+substitution bug, and inherited field-name collisions. Native signatures now
+describe element/key/value relationships; `String.split` returns `list<string>`
+and native reads/projections retain their arguments.
+
+`tests/type_boundaries.py` covers two end-to-end workflows plus semantic rejection
 of unsafe variants. The remaining stabilization work still precedes library
-expansion: typed native-storage/field writes, native-return inference (including
-`String.split`), and the exception/resource audit. The large type-checker split
-and native lowering remain deferred.
+expansion: static-storage GC ownership, external asynchronous callback ownership,
+blocking native-resource destruction, and the remaining exception/Shared audit.
+Static initialization condition waits now park, but that is not a claim that the
+static-storage root/lifetime audit is complete. The large type-checker split and
+native lowering remain deferred.
 
 ## Fixed in this branch
 

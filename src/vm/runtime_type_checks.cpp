@@ -50,6 +50,15 @@ void initializeObjectType(Value& value, const std::string& typeName, const Chunk
     (*object)->genericTypeName = spec.args.empty() ? std::string{} : describeTypeName(spec);
     const auto meta = chunk.classReflection.find(spec.name);
     if (meta != chunk.classReflection.end()) (*object)->runtimeType = meta->second.runtimeType;
+    if (meta != chunk.classReflection.end()) {
+        RuntimeTypeCheck fields(&chunk);
+        for (const auto& field : meta->second.fields) {
+            const auto value = (*object)->fields.find(field.name);
+            if (!field.isStatic && value != (*object)->fields.end())
+                fields.require(value->second, runtimeFieldType(chunk, spec.name, field.name, object->get()));
+        }
+        fields.commit();
+    }
 }
 
 bool reflectiveObjectMatches(const ObjectRef& object, const std::string& expectedName, const Chunk* chunk) {
@@ -151,27 +160,10 @@ bool reflectiveMatchesSpec(const Value& value, const TypeName& spec, const Chunk
         const auto actual = parseTypeName(actualName);
         return typeNamesEqual(actual, spec.args.front());
     }
-    if (name == "list" || name == "array" || name == "set") {
-        const auto list = std::get_if<ListRef>(&value);
-        if (!list || !*list) return false;
-        const std::size_t begin = std::min((*list)->frontIndex, (*list)->items.size());
-        const std::size_t size = (*list)->items.size() - begin;
-        if (name == "array" && spec.fixedSize && size != *spec.fixedSize) return false;
-        if (spec.args.empty()) return true;
-        for (std::size_t i = begin; i < (*list)->items.size(); ++i) {
-            if (!reflectiveMatchesSpec((*list)->items[i], spec.args.front(), chunk)) return false;
-        }
-        return true;
-    }
-    if (name == "map") {
-        const auto map = std::get_if<MapRef>(&value);
-        if (!map || !*map) return false;
-        if (spec.args.empty()) return true;
-        if (spec.args.size() != 2) return false;
-        for (const auto& entry : (*map)->entries) {
-            if (!reflectiveMatchesSpec(entry.first, spec.args[0], chunk) || !reflectiveMatchesSpec(entry.second, spec.args[1], chunk)) return false;
-        }
-        return true;
+    if (name == "list" || name == "array" || name == "set" || name == "map") {
+        if (name == "map" ? !std::holds_alternative<MapRef>(value) : !std::holds_alternative<ListRef>(value)) return false;
+        RuntimeTypeCheck types(chunk);
+        return types.check(value, describeTypeName(spec)); // observation never commits a contract
     }
     const std::string expectedObjectName = describeTypeName(spec);
     return reflectiveObjectMatches(std::get_if<ObjectRef>(&value) ? *std::get_if<ObjectRef>(&value) : ObjectRef{}, expectedObjectName, chunk);
@@ -188,8 +180,16 @@ std::string runtimeValueTypeName(const Value& value) {
     if (std::holds_alternative<double>(value)) return "double";
     if (std::holds_alternative<std::string>(value)) return "string";
     if (std::holds_alternative<bool>(value)) return "bool";
-    if (std::holds_alternative<ListRef>(value)) return "list";
-    if (std::holds_alternative<MapRef>(value)) return "map";
+    if (const auto* list = std::get_if<ListRef>(&value)) {
+        RuntimeTypeCheck read;
+        if (!*list || !(*list)->storageType) return "list";
+        const auto& type = *(*list)->storageType;
+        return describeTypeName(TypeName{type.fixedSize ? "array" : "list", type.arguments, {}, type.fixedSize});
+    }
+    if (const auto* map = std::get_if<MapRef>(&value)) {
+        RuntimeTypeCheck read;
+        return !*map || !(*map)->storageType ? "map" : describeTypeName(TypeName{"map", (*map)->storageType->arguments, {}, {}});
+    }
     if (auto obj = std::get_if<ObjectRef>(&value); obj && *obj)
         return (*obj)->genericTypeName.empty() ? (*obj)->className : (*obj)->genericTypeName;
     if (std::holds_alternative<ClosureRef>(value)) return "func";

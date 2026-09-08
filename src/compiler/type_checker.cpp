@@ -1084,6 +1084,21 @@ void TypeChecker::check(const Program& program, bool requireMain) {
         }
     }
 
+    // Object storage is keyed by field name, not by (declaring class, name).
+    // Check after all shapes/parents exist so declaration order cannot hide
+    // a second contract for the same inherited slot.
+    for (const auto& decl : program.declarations) {
+        if (decl->kind != NodeKind::ClassDecl && decl->kind != NodeKind::DataDecl) continue;
+        const auto name = decl->kind == NodeKind::ClassDecl ? static_cast<const ClassDecl*>(decl.get())->name
+                                                          : static_cast<const DataDecl*>(decl.get())->name;
+        const auto* shape = semanticModel_.findClass(name);
+        if (shape->parentName.empty()) continue;
+        for (const auto& field : shape->fields) {
+            if (semanticModel_.findFieldInHierarchy(shape->parentName, field.first))
+                typeError("type '" + name + "' cannot redeclare inherited field '" + field.first + "'", decl->line);
+        }
+    }
+
     // Index all named static functions before any body is checked so interprocedural
     // confinement analysis is independent of declaration order.
     indexNamedFunctions(program);
@@ -1322,12 +1337,6 @@ void TypeChecker::registerDataShape(const DataDecl* node) {
             if (field.type.functionReturnType) {
                 fieldInfo.functionReturnType = resolveType(*field.type.functionReturnType,
                                                            &fieldInfo.functionReturnClassName);
-            }
-        }
-        if (!node->extendsName.empty()) {
-            const auto* parentField = semanticModel_.findFieldInHierarchy(node->extendsName, field.name);
-            if (parentField) {
-                typeError("data type '" + node->name + "' cannot redeclare inherited field '" + field.name + "'", field.type.line);
             }
         }
         info.fields[field.name] = std::move(fieldInfo);
@@ -2247,6 +2256,7 @@ void TypeChecker::checkVarDecl(const VarDecl* node) {
     }
     node->storageName = symbols_.lookupVar(node->name)->storageName;
     if (node->hasExplicitType) symbols_.binding(node->name).annotation = node->type;
+    node->assertedTypeName = symbols_.lookupVar(node->name)->runtimeTypeName();
     if (node->initializer) {
         if (auto owner = sharedPayloadOwnerForExpr(node->initializer.get(), sharedPayloadOwners_, sharedCellAliases_))
             sharedPayloadOwners_[node->name] = *owner;
@@ -3810,6 +3820,8 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
             }
 
             const auto args = inferArguments(node->arguments);
+            const auto nativeBindings = nativeTypeBindings(*sig, args.types.empty() ? "unknown" :
+                (args.classNames.front().empty() ? zlTypeName(args.types.front()) : args.classNames.front()));
 
             for (std::size_t i = 0; i < args.types.size(); ++i) {
                 const ZlType argType = args.types[i];
@@ -3828,6 +3840,12 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                     accepted = isAssignable(argType, allowed.type, argClass, allowed.className);
                 } else {
                     accepted = isAssignable(argType, sig->paramTypes[i], argClass) || genericNumericAccepted;
+                }
+
+                if (accepted && i > 0 && i < sig->parameterTypeNames.size()) {
+                    const auto expectedName = substituteTypeParams(sig->parameterTypeNames[i], nativeBindings);
+                    const auto expected = variableInfo(typeAnnotationFromName(parseTypeName(expectedName)));
+                    accepted = isAssignable(argType, expected.type, argClass, expected.className);
                 }
 
                 if (!accepted) {
@@ -3867,6 +3885,19 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                 task.taskValueType = sig->taskValueType;
                 task.className = canonicalTaskTypeName(task.taskValueType, "");
                 return task;
+            }
+            if (!sig->returnClassName.empty()) {
+                const auto resultName = substituteTypeParams(sig->returnClassName, nativeBindings);
+                const auto info = variableInfo(typeAnnotationFromName(parseTypeName(resultName)));
+                InferredType result(info.type, info.className);
+                result.functionParamTypes = info.functionParamTypes;
+                result.functionParamClassNames = info.functionParamClassNames;
+                result.functionReturnType = info.functionReturnType;
+                result.functionReturnClassName = info.functionReturnClassName;
+                result.functionHasSignature = info.functionHasSignature;
+                result.taskValueType = info.taskValueType;
+                result.taskValueClassName = info.taskValueClassName;
+                return result;
             }
             return InferredType(sig->returnType, sig->returnClassName);
         }
@@ -4669,6 +4700,8 @@ TypeChecker::InferredType TypeChecker::inferFieldAccess(const FieldAccessExpr* n
     if (!field) {
         typeError("class '" + objClassName + "' has no field '" + node->fieldName + "'", node->line);
     }
+    const auto fieldType = typeResolver_.fieldInContext(*field, objClassName, owner, currentClassName_, currentClassTypeParams_);
+    field = &fieldType;
     if (field->isStatic) {
         typeError("static field '" + objClassName + "." + node->fieldName + "' must be accessed through its class", node->line);
     }
@@ -4750,6 +4783,8 @@ TypeChecker::InferredType TypeChecker::inferFieldAssign(const FieldAssignExpr* n
     }
 
     std::string valueClassName = valueResult.className;
+    const auto fieldType = typeResolver_.fieldInContext(*field, objClassName, owner, currentClassName_, currentClassTypeParams_);
+    field = &fieldType;
     if (!isAssignable(valueType, field->type, valueClassName, field->className)) {
         typeError(
             "cannot assign " + zlTypeName(valueType) + " to field '" + node->fieldName +

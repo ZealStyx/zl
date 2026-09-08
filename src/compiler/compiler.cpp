@@ -329,8 +329,8 @@ void Compiler::compileVarDecl(const VarDecl* node) {
     // generic annotations using the current invocation's lexical type bindings.
     if (node->initializer) {
         compileExpression(node->initializer.get());
-        if (node->hasExplicitType) {
-            emit(OpCode::AssertType, chunk_.addName(describeTypeAnnotation(node->type)), node->line);
+        if (!node->assertedTypeName.empty() && node->assertedTypeName != "unknown") {
+            emit(OpCode::AssertType, chunk_.addName(node->assertedTypeName), node->line);
         }
     } else {
         std::size_t nilIdx = chunk_.addConstant(Value{});

@@ -20,6 +20,9 @@ public:
     explicit TypeResolver(SemanticModel& semanticModel) : semanticModel_(semanticModel) {}
 
     void reset();
+    [[nodiscard]] ClassFieldInfo fieldInContext(const ClassFieldInfo& field,
+        const std::string& receiverClass, const std::string& declaringClass,
+        const std::string& currentClass, const std::vector<std::string>& currentTypeParams);
     [[nodiscard]] const std::vector<ResolvedTypeArg>& unionMembers(const std::string& name) const;
     [[nodiscard]] ResolvedTypeArg makeUnion(std::vector<ResolvedTypeArg> members);
 

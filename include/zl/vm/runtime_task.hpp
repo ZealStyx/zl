@@ -64,7 +64,7 @@ private:
     std::exception_ptr error_;
     bool cancellationRequested_{false};
     bool failureObserved_{false};
-    std::string valueTypeName_;
+    const std::string valueTypeName_;
     std::vector<std::function<void()>> continuations_;
     std::vector<std::function<void()>> cancellationContinuations_;
 };

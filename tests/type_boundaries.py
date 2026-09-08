@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Focused assignment/union regression: python3 tests/type_boundaries.py /path/to/zl.
 
-One end-to-end program verifies stores, flow and lexical binding identity. Negative
+Two end-to-end programs verify stores, heap contracts and lexical flow. Negative
 variants must fail in --check, not merely trip a VM assertion later. Generated
 sources live in one temporary directory, not in the examples corpus.
 """
@@ -175,7 +175,200 @@ pattern copy 12/6
 local loop 3/90
 '''
 
+HEAP_PROGRAM = r'''
+import zl.util.Queue
+import zl.util.Stack
+
+data HeapEntry { count: int }
+class HeapHolder {
+    public int count
+    public list<int> values
+    func HeapHolder(): void {
+        this.count = 7
+        this.values = [1]
+    }
+}
+class HeapBase<T> { public T payload }
+class HeapChild<A,B> extends HeapBase<B> {
+    func HeapChild(B value): void { this.payload = value }
+}
+class TypeBoundaries {
+    static int total = 4
+    static func dynamic(unknown value): unknown { return value }
+    static func append(unknown target, unknown value): void { Collection.push(target, value) }
+    static func setAt(unknown target, int index, unknown value): void { Collection.set(target, index, value) }
+    static func put(unknown target, unknown key, unknown value): void { Collection.mapSet(target, key, value) }
+    static func add(unknown target, unknown value): void { Collection.setAdd(target, value) }
+    static func accept(list<int> values, int count): void {}
+    func main(): void {
+        list<int> numbers = [1]
+        try { TypeBoundaries.append(numbers, "bad") } catch error { log("alias push rejected") }
+        try { TypeBoundaries.setAt(numbers, 0, "bad") } catch error { log("alias set rejected") }
+        log("preserved " + numbers)
+        var inferred = [2]
+        try { TypeBoundaries.append(inferred, "bad") } catch error { log("inferred heap rejected") }
+        list<double> wide = [1]
+        TypeBoundaries.append(wide, 2.5)
+        log("wide " + wide)
+        try { list<double> wrongView = TypeBoundaries.dynamic(numbers) }
+        catch error { log("invariant view rejected") }
+
+        var child = Collection.newList()
+        TypeBoundaries.append(child, 1)
+        list<list<int>> nested = [child]
+        try { TypeBoundaries.append(child, "bad") } catch error { log("old child alias rejected") }
+        var inserted = Collection.newList()
+        Collection.push(nested, inserted)
+        try { TypeBoundaries.append(inserted, "bad") } catch error { log("new child alias rejected") }
+        Collection.push(inserted, 3)
+        log("nested " + nested)
+
+        var first = Collection.newList()
+        try { TypeBoundaries.accept(first, TypeBoundaries.dynamic("bad")) }
+        catch error { log("argument batch rejected") }
+        TypeBoundaries.append(first, "free")
+        log("unbound after failure " + first)
+        var okayChild = Collection.newList()
+        var badChild = Collection.newList()
+        TypeBoundaries.append(okayChild, 1)
+        TypeBoundaries.append(badChild, "bad")
+        var rawParent = Collection.newList()
+        TypeBoundaries.append(rawParent, okayChild)
+        TypeBoundaries.append(rawParent, badChild)
+        try { list<list<int>> failed = TypeBoundaries.dynamic(rawParent) }
+        catch error { log("nested batch rejected") }
+        TypeBoundaries.append(okayChild, "free")
+        log("nested rollback " + okayChild)
+
+        map<string,int> scores = Collection.newMap()
+        Collection.mapSet(scores, "one", 1)
+        try { TypeBoundaries.put(scores, "one", "bad") } catch error { log("map value rejected") }
+        try { TypeBoundaries.put(scores, 2, 2) } catch error { log("map key rejected") }
+        log("map " + scores)
+        var keys = Collection.mapKeys(scores)
+        try { TypeBoundaries.append(keys, 3) } catch error { log("projected keys rejected") }
+        log("key " + String.upper(Collection.get(keys, 0)))
+        map<list<int>,int> index = Collection.newMap()
+        var rawKey = Collection.newList()
+        try { TypeBoundaries.put(index, rawKey, "bad") } catch error { log("map batch rejected") }
+        TypeBoundaries.append(rawKey, "free")
+        log("key rollback " + rawKey)
+
+        set<string> names = ["a"]
+        try { TypeBoundaries.add(names, 7) } catch error { log("set rejected") }
+        var copiedNames = Collection.setItems(names)
+        try { TypeBoundaries.append(copiedNames, 7) } catch error { log("copied set rejected") }
+        array[2]<int> fixed = [4, 5]
+        var arrayAlias = TypeBoundaries.dynamic(fixed)
+        try { TypeBoundaries.append(arrayAlias, 6) } catch error { log("array grow rejected") }
+        try { Queue.dequeue(arrayAlias) } catch error { log("array shrink rejected") }
+        TypeBoundaries.setAt(arrayAlias, 0, 9)
+        log("array " + fixed)
+        list<int> queue = Queue.newQueue()
+        Queue.enqueue(queue, 1)
+        log("dequeue " + Queue.dequeue(queue))
+        var queueAlias = TypeBoundaries.dynamic(queue)
+        try { Queue.enqueue(queueAlias, "bad") } catch error { log("queue rejected") }
+        try { Stack.push(queueAlias, "bad") } catch error { log("stack rejected") }
+        Stack.push(queueAlias, 2)
+        log("stack " + Stack.pop(queueAlias))
+
+        var holder = new HeapHolder()
+        try { holder.count = TypeBoundaries.dynamic("bad") } catch error { log("field rejected") }
+        try { holder.values = TypeBoundaries.dynamic(["bad"]) } catch error { log("field container rejected") }
+        log("holder " + holder.count + "/" + holder.values)
+        var inherited = new HeapChild<string,int>(8)
+        try { inherited.payload = TypeBoundaries.dynamic("bad") } catch error { log("inherited field rejected") }
+        log("inherited " + inherited.payload)
+        try { var invalid = HeapEntry { count: TypeBoundaries.dynamic("bad") } }
+        catch error { log("record rejected") }
+        var record = HeapEntry { count: 9 }
+        try { var invalidCopy = record with { count: TypeBoundaries.dynamic("bad") } }
+        catch error { log("record update rejected") }
+        log("record " + record.count)
+        log("static initial " + TypeBoundaries.total)
+        try { TypeBoundaries.total = TypeBoundaries.dynamic("bad") } catch error { log("static rejected") }
+        log("static preserved " + TypeBoundaries.total)
+        var cell = new Shared<int>(10)
+        try { Shared.__set(cell, TypeBoundaries.dynamic("bad")) } catch error { log("native field rejected") }
+        log("cell " + cell.get())
+
+        var words = String.split("one,two", ",")
+        log("split " + String.upper(Collection.get(words, 1)))
+        try { TypeBoundaries.append(words, 3) } catch error { log("native result rejected") }
+        var cycle = Collection.newList()
+        TypeBoundaries.append(cycle, cycle)
+        try { list<list<int>> invalidCycle = TypeBoundaries.dynamic(cycle) }
+        catch error { log("cycle rejected") }
+        TypeBoundaries.append(cycle, "still unbound")
+        log("cycle length " + Collection.length(cycle))
+        var untyped = Collection.newList()
+        var matched = match untyped {
+            list<int> items => true
+            _ => false
+        }
+        try { TypeBoundaries.append(untyped, "bad") } catch error { log("pattern alias rejected") }
+        log("matched " + matched)
+    }
+}
+'''
+
+HEAP_EXPECTED = '''alias push rejected
+alias set rejected
+preserved [1]
+inferred heap rejected
+wide [1, 2.5]
+invariant view rejected
+old child alias rejected
+new child alias rejected
+nested [[1], [3]]
+argument batch rejected
+unbound after failure ["free"]
+nested batch rejected
+nested rollback [1, "free"]
+map value rejected
+map key rejected
+map {"one": 1}
+projected keys rejected
+key ONE
+map batch rejected
+key rollback ["free"]
+set rejected
+copied set rejected
+array grow rejected
+array shrink rejected
+array [9, 5]
+dequeue 1
+queue rejected
+stack rejected
+stack 2
+field rejected
+field container rejected
+holder 7/[1]
+inherited field rejected
+inherited 8
+record rejected
+record update rejected
+record 9
+static initial 4
+static rejected
+static preserved 4
+native field rejected
+cell 10
+split TWO
+native result rejected
+cycle rejected
+cycle length 2
+pattern alias rejected
+matched true
+'''
+
 INVALID = {
+    "split keeps native element type": 'list<int> wrong = String.split("a,b", ",")',
+    "native get keeps element type": 'var words = String.split("a,b", ",")\nint wrong = Collection.get(words, 0)',
+    "native write checks element": 'list<int> xs = [1]\nCollection.push(xs, "wrong")',
+    "native map write checks value": 'map<string,int> xs = Collection.newMap()\nCollection.mapSet(xs, "key", false)',
+    "native projection keeps key type": 'map<string,int> xs = Collection.newMap()\nlist<int> wrong = Collection.mapKeys(xs)',
     "union local needs narrowing": 'int|string u = 1\nint result = u',
     "union alias retains alternatives": 'int|string u = 1\nvar alias = u\nlog(String.length(alias))',
     "native alternatives check every union member": 'int|string u = 1\nlog(Collection.length(u))',
@@ -195,6 +388,15 @@ INVALID = {
 }
 
 
+INVALID_HEAP_PROGRAM = r"""
+class HeapParent { public int value }
+class TypeBoundaries extends HeapParent {
+    public string value
+    func main(): void {}
+}
+"""
+
+
 def run(binary, source, path, check=False):
     path.write_text(source)
     command = [str(binary)] + (["--check"] if check else [])
@@ -211,14 +413,18 @@ def main():
     binary = pathlib.Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="zl-type-boundaries-") as directory:
         source = pathlib.Path(directory) / "TypeBoundaries.zl"
-        result = run(binary, PROGRAM, source)
-        if result.returncode or result.stdout != EXPECTED or result.stderr:
-            raise AssertionError(f"end-to-end contract regression ({result.returncode})\n{result.stdout}\n{result.stderr}")
+        for program, expected in [(PROGRAM, EXPECTED), (HEAP_PROGRAM, HEAP_EXPECTED)]:
+            result = run(binary, program, source)
+            if result.returncode or result.stdout != expected or result.stderr:
+                raise AssertionError(f"end-to-end contract regression ({result.returncode})\n{result.stdout}\n{result.stderr}")
         for name, body in INVALID.items():
             result = run(binary, "class TypeBoundaries { func main(): void {\n" + body + "\n} }\n", source, check=True)
             if result.returncode != 1 or "type error" not in result.stderr:
                 raise AssertionError(f"{name}: expected a semantic rejection, got {result.returncode}\n{result.stdout}\n{result.stderr}")
-        print(f"type boundaries: PASS (end-to-end + {len(INVALID)} semantic rejections)")
+        result = run(binary, INVALID_HEAP_PROGRAM, source, check=True)
+        if result.returncode != 1 or "cannot redeclare inherited field" not in result.stderr:
+            raise AssertionError("inherited field contract collision was not rejected: " + result.stderr)
+        print(f"type boundaries: PASS (two end-to-end workflows + {len(INVALID) + 1} semantic rejections)")
 
 
 if __name__ == "__main__":

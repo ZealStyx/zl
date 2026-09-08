@@ -211,6 +211,41 @@ ZlType TypeResolver::resolveType(const TypeAnnotation& annotation,
     return ZlType::UNKNOWN;
 }
 
+ClassFieldInfo TypeResolver::fieldInContext(const ClassFieldInfo& field,
+        const std::string& receiverClass, const std::string& declaringClass,
+        const std::string& currentClass, const std::vector<std::string>& currentTypeParams) {
+    // A template body still has a raw `this` class. Walk declared parent
+    // arguments without instantiating a fictitious concrete receiver (which
+    // would incorrectly validate symbolic parameters as concrete arguments).
+    std::unordered_map<std::string, std::string> bindings;
+    std::string owner = receiverClass;
+    while (owner != declaringClass) {
+        const auto* shape = semanticModel_.findClass(owner);
+        if (!shape || shape->parentName.empty()) break;
+        const auto* parent = semanticModel_.findClass(shape->parentName);
+        if (!parent) break;
+        std::unordered_map<std::string, std::string> next;
+        for (std::size_t i = 0; i < shape->parentTypeArgs.size() && i < parent->typeParams.size(); ++i)
+            next.emplace(parent->typeParams[i], substituteTypeParams(describeTypeAnnotation(shape->parentTypeArgs[i]), bindings));
+        bindings = std::move(next);
+        owner = shape->parentName;
+    }
+    if (bindings.empty()) return field;
+    auto result = field;
+    const auto substitute = [&](ZlType& type, std::string& name) {
+        const auto original = name.empty() ? zlTypeName(type) : name;
+        const auto resolved = substituteTypeParams(original, bindings);
+        if (resolved == original) return;
+        name.clear();
+        type = resolveType(typeAnnotationFromName(parseTypeName(resolved)), currentClass, currentTypeParams, &name);
+    };
+    substitute(result.type, result.className);
+    for (std::size_t i = 0; i < result.functionParamTypes.size(); ++i)
+        substitute(result.functionParamTypes[i], result.functionParamClassNames[i]);
+    substitute(result.functionReturnType, result.functionReturnClassName);
+    return result;
+}
+
 std::string TypeResolver::instantiateGenericClass(const std::string& genericName,
                                                    const std::vector<ResolvedTypeArg>& typeArgs,
                                                    std::size_t line) {

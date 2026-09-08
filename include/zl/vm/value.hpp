@@ -87,12 +87,14 @@ using Value = std::variant<std::monostate, std::int64_t, double, std::string,
 
 // Value is complete now, so these can finally hold real containers of it.
 struct ListBox {
+    NativeContainerTypeRef storageType;
     std::vector<Value> items;
     // Queue operations use this logical front offset so dequeue is O(1)
     // amortized instead of erasing from the front of a vector.
     std::size_t frontIndex{0};
 };
 struct MapBox {
+    NativeContainerTypeRef storageType;
     // A simple association list (linear scan on lookup) rather than a hash
     // map - this avoids needing a std::hash<Value> specialization, and is
     // more than fast enough for the sizes a language this young will see.

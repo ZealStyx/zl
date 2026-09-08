@@ -160,15 +160,17 @@ ExecutionState::CallFrame VM::makeCallFrame(const Chunk& chunk, const FunctionIn
         frame.typeBindings = state_.typeBindings();
     }
     frame.returnTypeName = substituteTypeParams(fn.returnTypeName, frame.typeBindings);
+    RuntimeTypeCheck types(&chunk);
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string expected = i < fn.parameterTypeNames.size()
             ? substituteTypeParams(fn.parameterTypeNames[i], frame.typeBindings) : "unknown";
-        if (!expected.empty() && !runtimeAssignableToType(args[i], expected, &chunk)) {
+        if (!expected.empty() && !types.check(args[i], expected)) {
             throw std::runtime_error("type assertion failed for argument " + std::to_string(i + 1) +
                                      ": expected " + expected + ", got " + runtimeValueTypeName(args[i]));
         }
         frame.locals[fn.paramNames[i]] = args[i];
     }
+    types.commit();
     return frame;
 }
 
@@ -682,6 +684,13 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                         initializeObjectType(result,
                             substituteTypeParams(chunk.names[instr.operand2 - 1], state_.typeBindings()), chunk);
                     }
+                    const auto signature = findNativeSignature(native.qualifiedName);
+                    if (signature && !(*signature)->returnClassName.empty()) {
+                        const auto bindings = nativeTypeBindings(**signature, args.empty() ? "unknown" : runtimeValueTypeName(args.front()));
+                        RuntimeTypeCheck types(&chunk);
+                        types.require(result, substituteTypeParams((*signature)->returnClassName, bindings));
+                        types.commit();
+                    }
                     state_.push(result);
                 } catch (const ZlThrownException&) {
                     throw;
@@ -730,8 +739,9 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 Value expectedValue = state_.pop();
                 Value value = state_.pop();
                 auto name = std::get_if<std::string>(&expectedValue);
-                const bool matches = name && reflectiveTypeMatchesName(
-                    value, substituteTypeParams(*name, state_.typeBindings()), &chunk);
+                RuntimeTypeCheck types(&chunk);
+                const bool matches = name && types.check(value, substituteTypeParams(*name, state_.typeBindings()), RuntimeTypeCheck::Mode::Pattern);
+                if (matches) types.commit();
                 state_.push(matches);
                 ++ip;
                 break;
@@ -743,9 +753,11 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     throw std::runtime_error("VM: AssertType name index out of bounds");
                 }
                 const std::string expected = substituteTypeParams(chunk.names[instr.operand], state_.typeBindings());
-                if (!runtimeAssignableToType(value, expected, &chunk)) {
+                RuntimeTypeCheck types(&chunk);
+                if (!types.check(value, expected)) {
                     throw std::runtime_error("type assertion failed: expected " + expected + ", got " + runtimeValueTypeName(value));
                 }
+                types.commit();
                 state_.push(value);
                 ++ip;
                 break;
@@ -963,7 +975,10 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                         if (state->ownerThread == std::this_thread::get_id()) {
                             throw std::runtime_error("StaticInitializationError: re-entrant initialization of '" + key + "'");
                         }
-                        state->cv.wait(lock, [&] { return state->status != StaticFieldState::Status::Initializing; });
+                        {
+                            BlockingNativeCall blocked(this);
+                            state->cv.wait(lock, [&] { return state->status != StaticFieldState::Status::Initializing; });
+                        }
                         continue;
                     }
                     state->status = StaticFieldState::Status::Initializing;
@@ -998,7 +1013,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 if (instr.operand >= chunk.names.size() || instr.operand2 >= chunk.names.size())
                     throw std::runtime_error("VM: invalid static field metadata index");
                 const std::string key = chunk.names[instr.operand] + "." + chunk.names[instr.operand2];
-                auto value = state_.pop();
+                auto value = state_.top(); // retain the pending write in roots across native waits
                 auto metaIt = chunk.staticFields.find(key);
                 if (metaIt == chunk.staticFields.end()) throw std::runtime_error("VM: unknown static field '" + key + "'");
                 std::shared_ptr<StaticFieldState> state;
@@ -1009,20 +1024,30 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     state = slot;
                 }
                 std::unique_lock<std::mutex> lock(state->mutex);
-                if (state->status == StaticFieldState::Status::Initializing && state->ownerThread != std::this_thread::get_id())
+                if (state->status == StaticFieldState::Status::Initializing && state->ownerThread != std::this_thread::get_id()) {
+                    BlockingNativeCall blocked(this);
                     state->cv.wait(lock, [&] { return state->status != StaticFieldState::Status::Initializing; });
-                state->value = value;
+                }
+                Value replacement = value;
+                {
+                    RuntimeTypeCheck types(&chunk);
+                    types.require(value, runtimeFieldType(chunk, chunk.names[instr.operand], chunk.names[instr.operand2]));
+                    std::swap(state->value, replacement);
+                    types.commit();
+                }
                 state->status = StaticFieldState::Status::Initialized;
                 state->failure = nullptr;
                 state->ownerThread = {};
                 lock.unlock();
                 state->cv.notify_all();
+                state_.pop();
                 state_.push(std::move(value));
                 ip++;
                 break;
             }
 
             case OpCode::GetIndex: {
+                RuntimeTypeCheck access(&chunk);
                 Value indexValue = state_.pop();
                 Value object = state_.pop();
                 ListRef list;
@@ -1047,6 +1072,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
             }
 
             case OpCode::GetField: {
+                RuntimeTypeCheck access(&chunk);
                 if (instr.operand >= chunk.names.size())
                     throw std::runtime_error("VM: field-name index out of bounds");
                 const std::string& fieldName = chunk.names[instr.operand];
@@ -1079,7 +1105,13 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     throw std::runtime_error("VM: cannot write field '" + fieldName + "' of non-object (or nil)");
                 }
                 
-                (*objRef)->fields[fieldName] = value;
+                Value replacement = value; // displaced resources die after the leaf type lock
+                {
+                    RuntimeTypeCheck types(&chunk);
+                    types.require(value, runtimeFieldType(chunk, (*objRef)->className, fieldName, objRef->get()));
+                    std::swap((*objRef)->fields[fieldName], replacement);
+                    types.commit();
+                }
                 state_.push(value); // assignment leaves the value on the stack
                 ip++;
                 break;
@@ -1172,9 +1204,13 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     throw std::runtime_error("'return' used outside of a func");
                 }
                 const auto& expected = state_.currentFrame().returnTypeName;
-                if (!expected.empty() && !runtimeAssignableToType(resultValue, expected, &chunk)) {
-                    throw std::runtime_error("type assertion failed for return: expected " + expected +
-                                             ", got " + runtimeValueTypeName(resultValue));
+                {
+                    RuntimeTypeCheck types(&chunk);
+                    if (!expected.empty() && !types.check(resultValue, expected)) {
+                        throw std::runtime_error("type assertion failed for return: expected " + expected +
+                                                 ", got " + runtimeValueTypeName(resultValue));
+                    }
+                    types.commit();
                 }
                 ExecutionState::CallFrame finishedFrame = state_.leaveFrame();
                 if (stopAtReturn && state_.callDepth() < initialCallDepth) {

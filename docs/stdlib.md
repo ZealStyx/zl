@@ -51,8 +51,14 @@ across async suspension. A scalar `int` may still widen to `double`; different
 mutable collection instantiations are not interchangeable.
 
 The lowercase native `list`/`map` storage values are distinct from these generic
-class instances. See `examples/intermediate/GenericRuntimeChecks.zl` for typed
-factories and rejected dynamic writes/returns.
+class instances. Their heap contracts also survive erased aliases and protect
+nested writes; fixed-array views prevent resizing through native aliases.
+`String.split` returns `list<string>`, and native element reads and key/value
+projections retain their type arguments. See `examples/intermediate/GenericRuntimeChecks.zl`
+and `tests/type_boundaries.py` for typed factories and rejected dynamic writes.
+
+The generic wrappers declare their backing storage as `list<T>`, `map<K,V>` and
+`set<T>`; backing primitives do not bypass the public element contract.
 
 ## Math
 

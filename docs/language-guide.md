@@ -153,6 +153,39 @@ The focused regression can be run with:
 python3 tests/type_boundaries.py /path/to/zl
 ```
 
+## Heap write contracts
+
+Native `list<T>`, `map<K,V>`, `set<T>` and `array[N]<T>` values carry contracts
+on their shared storage, not just on the variable that first names them. Typed
+initialization (including inferred locals), calls, returns, fields and successful
+type patterns establish those contracts. An erased alias cannot bypass them:
+
+```zl
+list<int> numbers = [1, 2]
+unknown alias = numbers
+Collection.push(alias, "wrong")   // runtime error; numbers is unchanged
+```
+
+Nested containers are checked and constrained as one transaction. If a type
+check fails, it does not leave partially constrained children behind. New children
+inserted later acquire the required contract too. Containers are invariant:
+`list<int>` cannot become `list<double>` through an erased alias, while an `int`
+can still be stored in a fresh `list<double>`. Bare/`unknown` views do not erase an
+existing contract. A native container's first successful typed view establishes
+its storage contract; use a fresh container when a different contract is needed.
+Fixed-array aliases cannot grow or shrink the array through list, queue, stack
+or set operations. These checks do not replace the explicit synchronization
+required for shared mutable program state.
+
+Instance/data/static field writes enforce their complete declarations, including
+inherited generic parameters. Class and data fields cannot redeclare an inherited
+name: the object layout has one storage slot per field name.
+
+Native return inference also preserves element types: `String.split` returns
+`list<string>`, `Collection.get/pop` return the source element type, and map
+keys/values and set copies preserve the relevant type argument. The rules live in
+the native signature catalog rather than in library-specific compiler branches.
+
 ## Generic collections
 
 `List<T>`, `Map<K,V>`, and `Set<T>` are real generic classes, not native tags.

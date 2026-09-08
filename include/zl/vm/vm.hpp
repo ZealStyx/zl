@@ -29,6 +29,7 @@ public:
     Value invokeReflectiveConstructor(const Value& constructorValue, const Value& argsList);
     Value invokeReflectiveFunction(const Value& functionValue, const Value& argsList);
     Value invokeTaskClosure(const ClosureRef& closure);
+    const Chunk* activeChunk() const noexcept { return activeChunk_; }
 
     // Only the wait itself belongs in this scope: callbacks and managed-data
     // access must happen after reactivation, even if the native acquired a lock.
