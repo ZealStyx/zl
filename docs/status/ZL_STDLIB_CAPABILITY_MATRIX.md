@@ -6,8 +6,8 @@ This matrix is generated from the repository's compiler builtin library, native 
 
 ## Source invariants
 
-- Native catalog entries: **246**
-- VM native bindings: **246**
+- Native catalog entries: **242**
+- VM native bindings: **242**
 - Compiler embedded builtin classes: **32**
 - Visible stdlib `.zl` files: **25**
 - Native catalog IDs and VM binding IDs: **exact match**
@@ -21,9 +21,9 @@ The native catalog type supports parameter and return ownership metadata, and th
 | Domain | Count | Source/facade | Status |
 |---|---:|---|---|
 | `Reflection` | 33 | compiler builtin: Reflection | implemented |
-| `String` | 26 | stdlib: zl.text.Text + primitive String surface | implemented |
 | `Math` | 23 | compiler builtin: Math | implemented |
 | `FileSystem` | 22 | stdlib: zl.fs.FileSystem | implemented |
+| `String` | 20 | stdlib: zl.text.Text + primitive String surface | implemented |
 | `Collection` | 18 | compiler builtin: List/Map/Set | implemented |
 | `Time` | 17 | stdlib: zl.time.* | implemented |
 | `Type` | 10 | compiler builtin: Type | implemented |
@@ -31,12 +31,12 @@ The native catalog type supports parameter and return ownership metadata, and th
 | `Crypto` | 9 | stdlib: zl.crypto.Crypto | implemented |
 | `System` | 8 | compiler/runtime system boundary | implemented |
 | `Log` | 7 | stdlib: zl.logging.Log | implemented |
+| `Text` | 7 | stdlib: zl.text.Text | implemented |
 | `Channel` | 6 | stdlib: zl.lang.Channel | implemented |
 | `Queue` | 6 | stdlib: zl.util.Queue | implemented |
 | `Serialize` | 6 | stdlib: zl.serialize.Serialize | implemented |
 | `Stack` | 6 | stdlib: zl.util.Stack | implemented |
 | `Test` | 6 | stdlib: zl.test.Test | implemented |
-| `Text` | 5 | stdlib: zl.text.Text | implemented |
 | `IO` | 4 | compiler/runtime IO boundary | implemented |
 | `Network` | 4 | stdlib: zl.net.Network | implemented |
 | `Condition` | 3 | stdlib: zl.lang.Condition | implemented |
@@ -116,8 +116,8 @@ The native catalog type supports parameter and return ownership metadata, and th
 | `stdlib/zl/time/Duration.zl` | `Duration` | `Duration, seconds, minutes, hours, milliseconds, add, subtract, negate, abs, isZero, isNegative, isPositive, compare` | `—` |
 | `stdlib/zl/time/Time.zl` | `Time` | `nowDateTime, today, clock, dateTimeAt, dateAt, durationMillis, durationSeconds, durationMinutes, durationHours, durationDays, between, sleepMillis, sleepDuration, elapsedMillisSince, addSeconds, addMinutes, addHours, addDays, addWeeks, addMonths, addYears, diffSeconds, diffMinutes, diffHours, diffDays, compare, isBefore, isAfter, isBetween, min, max, daysInMonth, isWeekend, weekdayName, monthName, startOfDay, endOfDay, isSameDay, isoDate, isoTime, isoDateTime, isoUtc` | `zl.time.DateTime, zl.time.Date, zl.time.TimeOfDay, zl.time.Duration` |
 | `stdlib/zl/time/TimeOfDay.zl` | `TimeOfDay` | `TimeOfDay, hour, minute, second, format, totalSeconds, compare, isBefore, isAfter, equals` | `—` |
-| `stdlib/zl/util/Queue.zl` | `Queue` | `—` | `—` |
-| `stdlib/zl/util/Stack.zl` | `Stack` | `—` | `—` |
+| `stdlib/zl/util/Queue.zl` | `Queue` | `Queue, enqueue, dequeue, peek, length, isEmpty, isNotEmpty, dequeueOr, peekOr, enqueueAll, clear, drain, items, contains, forEach` | `—` |
+| `stdlib/zl/util/Stack.zl` | `Stack` | `Stack, push, pop, peek, length, isEmpty, isNotEmpty, popOr, peekOr, pushAll, clear, drain, items, contains, forEach` | `—` |
 
 ## Native capability detail
 
@@ -332,16 +332,12 @@ The native catalog type supports parameter and return ownership metadata, and th
 | `LOG_FATAL` | `Log.fatal` | `Log` | stdlib: zl.logging.Log | implemented | not explicitly declared in native catalog entry; default NONE |
 | `LOG_AT` | `Log.at` | `Log` | stdlib: zl.logging.Log | implemented | not explicitly declared in native catalog entry; default NONE |
 | `TEXT_FORMAT` | `Text.format` | `Text` | stdlib: zl.text.Text | implemented | not explicitly declared in native catalog entry; default NONE |
-| `STRING_REGEXMATCHES` | `String.regexMatches` | `String` | stdlib: zl.text.Text + primitive String surface | implemented | not explicitly declared in native catalog entry; default NONE |
-| `STRING_REGEXFULLMATCHES` | `String.regexFullMatches` | `String` | stdlib: zl.text.Text + primitive String surface | implemented | not explicitly declared in native catalog entry; default NONE |
-| `STRING_REGEXFINDALL` | `String.regexFindAll` | `String` | stdlib: zl.text.Text + primitive String surface | implemented | not explicitly declared in native catalog entry; default NONE |
-| `STRING_REGEXREPLACE` | `String.regexReplace` | `String` | stdlib: zl.text.Text + primitive String surface | implemented | not explicitly declared in native catalog entry; default NONE |
-| `STRING_REGEXFIND` | `String.regexFind` | `String` | stdlib: zl.text.Text + primitive String surface | implemented | not explicitly declared in native catalog entry; default NONE |
-| `STRING_REGEXFINDMATCHES` | `String.regexFindMatches` | `String` | stdlib: zl.text.Text + primitive String surface | implemented | not explicitly declared in native catalog entry; default NONE |
 | `TEXT_REGEXMATCHES` | `Text.regexMatches` | `Text` | stdlib: zl.text.Text | implemented | not explicitly declared in native catalog entry; default NONE |
 | `TEXT_REGEXFULLMATCHES` | `Text.regexFullMatches` | `Text` | stdlib: zl.text.Text | implemented | not explicitly declared in native catalog entry; default NONE |
 | `TEXT_REGEXFINDALL` | `Text.regexFindAll` | `Text` | stdlib: zl.text.Text | implemented | not explicitly declared in native catalog entry; default NONE |
 | `TEXT_REGEXREPLACE` | `Text.regexReplace` | `Text` | stdlib: zl.text.Text | implemented | not explicitly declared in native catalog entry; default NONE |
+| `TEXT_REGEXFIND` | `Text.regexFind` | `Text` | stdlib: zl.text.Text | implemented | not explicitly declared in native catalog entry; default NONE |
+| `TEXT_REGEXFINDMATCHES` | `Text.regexFindMatches` | `Text` | stdlib: zl.text.Text | implemented | not explicitly declared in native catalog entry; default NONE |
 | `SERIALIZE_ENCODE` | `Serialize.encode` | `Serialize` | stdlib: zl.serialize.Serialize | implemented | not explicitly declared in native catalog entry; default NONE |
 | `SERIALIZE_DECODE` | `Serialize.decode` | `Serialize` | stdlib: zl.serialize.Serialize | implemented | not explicitly declared in native catalog entry; default NONE |
 | `SERIALIZE_ASSTRING` | `Serialize.asString` | `Serialize` | stdlib: zl.serialize.Serialize | implemented | not explicitly declared in native catalog entry; default NONE |

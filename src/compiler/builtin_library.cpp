@@ -1219,6 +1219,8 @@ class RegexMatch {
 )ZL";
 
 constexpr std::string_view kBuiltinRegexSource = R"ZL(
+import zl.text.Text
+
 class Regex {
     public string pattern
     public string last
@@ -1477,23 +1479,23 @@ class Regex {
     }
 
     public func matches(string value): bool {
-        return String.regexFullMatches(value, this.pattern)
+        return Text.regexFullMatches(value, this.pattern)
     }
 
     public func findAll(string value): list<string> {
-        return String.regexFindAll(value, this.pattern)
+        return Text.regexFindAll(value, this.pattern)
     }
 
     public func replace(string value, string replacement): string {
-        return String.regexReplace(value, this.pattern, replacement)
+        return Text.regexReplace(value, this.pattern, replacement)
     }
 
     public func find(string value): RegexMatch {
-        return String.regexFind(value, this.pattern)
+        return Text.regexFind(value, this.pattern)
     }
 
     public func findMatches(string value): list<RegexMatch> {
-        return String.regexFindMatches(value, this.pattern)
+        return Text.regexFindMatches(value, this.pattern)
     }
 
     public func named(string name): Regex {
@@ -1620,6 +1622,7 @@ class Function {
     public func invoke(list<unknown> args): object { return Reflection.functionInvoke(this, args) }
 }
 )ZL";
+
 
 const std::vector<std::string_view> kBuiltinSources = {
     kBuiltinOptionSource,

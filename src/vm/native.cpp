@@ -796,6 +796,16 @@ Value fsDeleteFile(const std::vector<Value>& args) {
     return Value{};
 }
 
+namespace {
+// Pins a freshly built list as list<string>. Natives whose catalog signature
+// declares an element type must pin the same type at runtime, so the static
+// declaration and the actual storage contract cannot drift apart.
+void pinStringList(const Value& list) {
+    std::get<ListRef>(list)->storageType = std::make_shared<const NativeContainerType>(
+        NativeContainerType{{TypeName{"string", {}, {}, {}}}, {}});
+}
+} // namespace
+
 Value fsListDir(const std::vector<Value>& args) {
     const std::string& path = requireString(args[0], "FileSystem.listDir");
     std::error_code ec;
@@ -807,6 +817,7 @@ Value fsListDir(const std::vector<Value>& args) {
     for (const auto& entry : std::filesystem::directory_iterator(path)) {
         items.emplace_back(entry.path().filename().string());
     }
+    pinStringList(result);
     return result;
 }
 
@@ -1026,8 +1037,7 @@ ListRef resolveHostAddresses(const std::string& host, const char* fnName) {
     freeaddrinfo(result);
     if (list->items.empty())
         throw std::runtime_error(std::string(fnName) + ": host resolved without a numeric address: " + host);
-    list->storageType = std::make_shared<const NativeContainerType>(
-        NativeContainerType{{TypeName{"string", {}, {}, {}}}, {}});
+    pinStringList(out);
     return list;
 }
 } // namespace
@@ -2815,12 +2825,6 @@ std::vector<NativeFunction> buildTable() {
         std::pair{NativeId::STRING_SPLIT, strSplit},
         std::pair{NativeId::STRING_TOINT, strToInt},
         std::pair{NativeId::STRING_TOFLOAT, strToFloat},
-        std::pair{NativeId::STRING_REGEXMATCHES, textRegexMatches},
-        std::pair{NativeId::STRING_REGEXFULLMATCHES, textRegexFullMatches},
-        std::pair{NativeId::STRING_REGEXFINDALL, textRegexFindAll},
-        std::pair{NativeId::STRING_REGEXREPLACE, textRegexReplace},
-        std::pair{NativeId::STRING_REGEXFIND, textRegexFind},
-        std::pair{NativeId::STRING_REGEXFINDMATCHES, textRegexFindMatches},
         std::pair{NativeId::FILESYSTEM_READFILE, fsReadFile},
         std::pair{NativeId::FILESYSTEM_WRITEFILE, fsWriteFile},
         std::pair{NativeId::FILESYSTEM_APPENDFILE, fsAppendFile},
@@ -2881,6 +2885,8 @@ std::vector<NativeFunction> buildTable() {
         std::pair{NativeId::TEXT_REGEXFULLMATCHES, textRegexFullMatches},
         std::pair{NativeId::TEXT_REGEXFINDALL, textRegexFindAll},
         std::pair{NativeId::TEXT_REGEXREPLACE, textRegexReplace},
+        std::pair{NativeId::TEXT_REGEXFIND, textRegexFind},
+        std::pair{NativeId::TEXT_REGEXFINDMATCHES, textRegexFindMatches},
         std::pair{NativeId::SERIALIZE_ENCODE, serializeEncode},
         std::pair{NativeId::SERIALIZE_DECODE, serializeDecode},
         std::pair{NativeId::SERIALIZE_ASSTRING, serializeAsString},

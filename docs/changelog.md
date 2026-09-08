@@ -2,6 +2,42 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-08 — Library layer reconciliation
+
+Follow-up to the stdlib expansion, focused on making the three library layers
+(compiler builtins, native catalog bindings, public facades) agree.
+
+**One name per operation.** `String.regexMatches`, `regexFullMatches`,
+`regexFindAll`, `regexReplace`, `regexFind` and `regexFindMatches` were aliases
+bound to exactly the same callbacks as the `Text.*` spellings, and `Text` was
+missing the last two. The `String.regex*` duplicates are removed, `Text` gained
+`regexFind` and `regexFindMatches`, and the builtin `Regex` builder now
+delegates to `Text.*`. `Text.*` was already the documented and used spelling;
+`String.regex*` had no callers.
+
+**Honest container return types.** `FileSystem.listDir` and
+`Network.resolveAll` declared a bare `list` while always returning strings.
+Both now declare `list<string>`, and the runtime pins the same element type, so
+the static declaration and the storage contract cannot drift. Wrong-typed
+writes are rejected at compile time, or at runtime when they arrive through an
+`unknown`. The remaining element-agnostic returns (`Collection.newList`,
+`newMap`, `newSet`, `Queue.newQueue`, `Stack.newStack`) are correctly untyped.
+
+**Typed Queue and Stack.** `zl.util.Queue` and `zl.util.Stack` were empty
+marker classes, leaving FIFO/LIFO as raw untyped lists while every other
+collection was a typed generic. They are now real `Queue<T>` and `Stack<T>`
+classes with the same conventions as `List`/`Map`/`Set`: element typing,
+`length`/`isEmpty`/`isNotEmpty`, safe `dequeueOr`/`popOr`/`peekOr` fallbacks,
+`enqueueAll`/`pushAll`, `clear`, `drain`, `items`, `contains` and `forEach`.
+The native `Queue.*`/`Stack.*` functions remain the storage boundary and stay
+callable directly; because qualified-namespace calls resolve against the native
+table first, the methods are genuine delegations rather than self-recursion.
+
+**Validation:** fresh build; 49/49 examples pass; `tests/type_boundaries.py`
+passes; regex, queue/stack, filesystem, text, time and serialization probes
+re-verified. Native catalog and runtime bindings remain in exact
+correspondence (242 each).
+
 ## 2026-09-08 — Typed runtime exceptions, stdlib expansion, generic-resolution fixes
 
 ### Runtime failure behaviour

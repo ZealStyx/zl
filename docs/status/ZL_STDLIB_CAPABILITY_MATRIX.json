@@ -9,17 +9,17 @@
     "docs/reference/STDLIB_REFERENCE.md"
   ],
   "invariants": {
-    "native_catalog_entries": 246,
-    "native_runtime_bindings": 246,
+    "native_catalog_entries": 242,
+    "native_runtime_bindings": 242,
     "native_catalog_runtime_ids_match": true,
     "builtin_class_count": 32,
     "stdlib_zl_file_count": 25
   },
   "native_domain_counts": {
     "Reflection": 33,
-    "String": 26,
     "Math": 23,
     "FileSystem": 22,
+    "String": 20,
     "Collection": 18,
     "Time": 17,
     "Type": 10,
@@ -27,12 +27,12 @@
     "Crypto": 9,
     "System": 8,
     "Log": 7,
+    "Text": 7,
     "Channel": 6,
     "Queue": 6,
     "Serialize": 6,
     "Stack": 6,
     "Test": 6,
-    "Text": 5,
     "IO": 4,
     "Network": 4,
     "Condition": 3,
@@ -651,7 +651,23 @@
         "Queue"
       ],
       "imports": [],
-      "methods": []
+      "methods": [
+        "Queue",
+        "enqueue",
+        "dequeue",
+        "peek",
+        "length",
+        "isEmpty",
+        "isNotEmpty",
+        "dequeueOr",
+        "peekOr",
+        "enqueueAll",
+        "clear",
+        "drain",
+        "items",
+        "contains",
+        "forEach"
+      ]
     },
     {
       "path": "stdlib/zl/util/Stack.zl",
@@ -659,7 +675,23 @@
         "Stack"
       ],
       "imports": [],
-      "methods": []
+      "methods": [
+        "Stack",
+        "push",
+        "pop",
+        "peek",
+        "length",
+        "isEmpty",
+        "isNotEmpty",
+        "popOr",
+        "peekOr",
+        "pushAll",
+        "clear",
+        "drain",
+        "items",
+        "contains",
+        "forEach"
+      ]
     }
   ],
   "native_capabilities": [
@@ -2545,60 +2577,6 @@
       "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
     },
     {
-      "native_id": "STRING_REGEXMATCHES",
-      "qualified_name": "String.regexMatches",
-      "domain": "String",
-      "source_layer": "native catalog + VM native runtime",
-      "public_surface": "stdlib: zl.text.Text + primitive String surface",
-      "status": "implemented",
-      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
-    },
-    {
-      "native_id": "STRING_REGEXFULLMATCHES",
-      "qualified_name": "String.regexFullMatches",
-      "domain": "String",
-      "source_layer": "native catalog + VM native runtime",
-      "public_surface": "stdlib: zl.text.Text + primitive String surface",
-      "status": "implemented",
-      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
-    },
-    {
-      "native_id": "STRING_REGEXFINDALL",
-      "qualified_name": "String.regexFindAll",
-      "domain": "String",
-      "source_layer": "native catalog + VM native runtime",
-      "public_surface": "stdlib: zl.text.Text + primitive String surface",
-      "status": "implemented",
-      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
-    },
-    {
-      "native_id": "STRING_REGEXREPLACE",
-      "qualified_name": "String.regexReplace",
-      "domain": "String",
-      "source_layer": "native catalog + VM native runtime",
-      "public_surface": "stdlib: zl.text.Text + primitive String surface",
-      "status": "implemented",
-      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
-    },
-    {
-      "native_id": "STRING_REGEXFIND",
-      "qualified_name": "String.regexFind",
-      "domain": "String",
-      "source_layer": "native catalog + VM native runtime",
-      "public_surface": "stdlib: zl.text.Text + primitive String surface",
-      "status": "implemented",
-      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
-    },
-    {
-      "native_id": "STRING_REGEXFINDMATCHES",
-      "qualified_name": "String.regexFindMatches",
-      "domain": "String",
-      "source_layer": "native catalog + VM native runtime",
-      "public_surface": "stdlib: zl.text.Text + primitive String surface",
-      "status": "implemented",
-      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
-    },
-    {
       "native_id": "TEXT_REGEXMATCHES",
       "qualified_name": "Text.regexMatches",
       "domain": "Text",
@@ -2628,6 +2606,24 @@
     {
       "native_id": "TEXT_REGEXREPLACE",
       "qualified_name": "Text.regexReplace",
+      "domain": "Text",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TEXT_REGEXFIND",
+      "qualified_name": "Text.regexFind",
+      "domain": "Text",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TEXT_REGEXFINDMATCHES",
+      "qualified_name": "Text.regexFindMatches",
       "domain": "Text",
       "source_layer": "native catalog + VM native runtime",
       "public_surface": "stdlib: zl.text.Text",

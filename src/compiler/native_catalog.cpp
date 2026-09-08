@@ -167,7 +167,7 @@ std::vector<NativeSignature> buildSignatureTable() {
     sigs.push_back({NativeId::FILESYSTEM_APPENDFILE, "FileSystem.appendFile", {ZlType::STRING, ZlType::STRING},      ZlType::VOID_TYPE});
     sigs.push_back({NativeId::FILESYSTEM_EXISTS, "FileSystem.exists",     {ZlType::STRING},                      ZlType::BOOL});
     sigs.push_back({NativeId::FILESYSTEM_DELETEFILE, "FileSystem.deleteFile", {ZlType::STRING},                      ZlType::VOID_TYPE});
-    sigs.push_back({NativeId::FILESYSTEM_LISTDIR, "FileSystem.listDir",    {ZlType::STRING},                      ZlType::LIST});
+    sigs.push_back({NativeId::FILESYSTEM_LISTDIR, "FileSystem.listDir", {ZlType::STRING}, ZlType::LIST, "zl.lang", {}, NativeReturnTypeRule::NONE, ZlType::UNKNOWN, "list<string>"});
     sigs.push_back({NativeId::FILESYSTEM_RENAME, "FileSystem.rename", {ZlType::STRING, ZlType::STRING}, ZlType::VOID_TYPE});
     sigs.push_back({NativeId::FILESYSTEM_COPYFILE, "FileSystem.copyFile", {ZlType::STRING, ZlType::STRING}, ZlType::VOID_TYPE});
     sigs.push_back({NativeId::FILESYSTEM_SIZE, "FileSystem.size", {ZlType::STRING}, ZlType::INT});
@@ -247,16 +247,12 @@ std::vector<NativeSignature> buildSignatureTable() {
     sigs.push_back({NativeId::LOG_FATAL, "Log.fatal", {ZlType::UNKNOWN}, ZlType::VOID_TYPE, "zl.logging.Log"});
     sigs.push_back({NativeId::LOG_AT, "Log.at", {ZlType::STRING, ZlType::UNKNOWN}, ZlType::VOID_TYPE, "zl.logging.Log"});
     sigs.push_back({NativeId::TEXT_FORMAT, "Text.format", {ZlType::STRING, ZlType::LIST}, ZlType::STRING, "zl.text.Text"});
-    sigs.push_back({NativeId::STRING_REGEXMATCHES, "String.regexMatches", {ZlType::STRING, ZlType::STRING}, ZlType::BOOL});
-    sigs.push_back({NativeId::STRING_REGEXFULLMATCHES, "String.regexFullMatches", {ZlType::STRING, ZlType::STRING}, ZlType::BOOL});
-    sigs.push_back({NativeId::STRING_REGEXFINDALL, "String.regexFindAll", {ZlType::STRING, ZlType::STRING}, ZlType::LIST});
-    sigs.push_back({NativeId::STRING_REGEXREPLACE, "String.regexReplace", {ZlType::STRING, ZlType::STRING, ZlType::STRING}, ZlType::STRING});
-    sigs.push_back({NativeId::STRING_REGEXFIND, "String.regexFind", {ZlType::STRING, ZlType::STRING}, ZlType::OBJECT, "zl.lang", {}, NativeReturnTypeRule::NONE, ZlType::UNKNOWN, "RegexMatch"});
-    sigs.push_back({NativeId::STRING_REGEXFINDMATCHES, "String.regexFindMatches", {ZlType::STRING, ZlType::STRING}, ZlType::LIST, "zl.lang", {}, NativeReturnTypeRule::NONE, ZlType::UNKNOWN, "list<RegexMatch>"});
     sigs.push_back({NativeId::TEXT_REGEXMATCHES, "Text.regexMatches", {ZlType::STRING, ZlType::STRING}, ZlType::BOOL, "zl.text.Text"});
     sigs.push_back({NativeId::TEXT_REGEXFULLMATCHES, "Text.regexFullMatches", {ZlType::STRING, ZlType::STRING}, ZlType::BOOL, "zl.text.Text"});
-    sigs.push_back({NativeId::TEXT_REGEXFINDALL, "Text.regexFindAll", {ZlType::STRING, ZlType::STRING}, ZlType::LIST, "zl.text.Text"});
+    sigs.push_back({NativeId::TEXT_REGEXFINDALL, "Text.regexFindAll", {ZlType::STRING, ZlType::STRING}, ZlType::LIST, "zl.text.Text", {}, NativeReturnTypeRule::NONE, ZlType::UNKNOWN, "list<string>"});
     sigs.push_back({NativeId::TEXT_REGEXREPLACE, "Text.regexReplace", {ZlType::STRING, ZlType::STRING, ZlType::STRING}, ZlType::STRING, "zl.text.Text"});
+    sigs.push_back({NativeId::TEXT_REGEXFIND, "Text.regexFind", {ZlType::STRING, ZlType::STRING}, ZlType::OBJECT, "zl.text.Text", {}, NativeReturnTypeRule::NONE, ZlType::UNKNOWN, "RegexMatch"});
+    sigs.push_back({NativeId::TEXT_REGEXFINDMATCHES, "Text.regexFindMatches", {ZlType::STRING, ZlType::STRING}, ZlType::LIST, "zl.text.Text", {}, NativeReturnTypeRule::NONE, ZlType::UNKNOWN, "list<RegexMatch>"});
     sigs.push_back({NativeId::SERIALIZE_ENCODE, "Serialize.encode", {ZlType::UNKNOWN}, ZlType::STRING, "zl.serialize.Serialize"});
     sigs.push_back({NativeId::SERIALIZE_DECODE, "Serialize.decode", {ZlType::STRING}, ZlType::UNKNOWN, "zl.serialize.Serialize"});
     sigs.push_back({NativeId::SERIALIZE_ASSTRING, "Serialize.asString", {ZlType::UNKNOWN}, ZlType::STRING, "zl.serialize.Serialize"});

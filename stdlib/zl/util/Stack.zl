@@ -1,8 +1,94 @@
-// zl.util.Stack - LIFO stack API (native storage primitive).
+// zl.util.Stack - typed LIFO stack.
 //
-// The native implementation provides the storage primitive; the package
-// boundary remains explicit.
-class Stack {
-    // LIFO reference package: native storage is intentionally hidden behind this API.
-    // API: newStack, push, pop, peek, isEmpty, size.
+// The native Stack.* functions (newStack, push, pop, peek, isEmpty, size) are
+// the storage primitive and resolve by qualified-name lookup against the
+// native table. This class is the typed surface over them, matching the
+// List/Map/Set conventions. The natives stay callable directly.
+//
+// As in Queue.zl, `Stack.push(...)` below resolves to the NATIVE rather than
+// to this class's method, so these are delegations rather than recursion.
+class Stack<T> {
+    list<T> __native
+
+    func Stack(): void {
+        this.__native = Stack.newStack()
+    }
+
+    public func push(T item): void {
+        Stack.push(this.__native, item)
+    }
+
+    // Removes and returns the top element; throws when empty.
+    public func pop(): T {
+        return Stack.pop(this.__native)
+    }
+
+    // Returns the top element without removing it; throws when empty.
+    public func peek(): T {
+        return Stack.peek(this.__native)
+    }
+
+    public func length(): int {
+        return Stack.size(this.__native)
+    }
+
+    public func isEmpty(): bool {
+        return Stack.isEmpty(this.__native)
+    }
+
+    public func isNotEmpty(): bool {
+        return !this.isEmpty()
+    }
+
+    // --- Safe fallbacks ----------------------------------------------------
+
+    public func popOr(T fallback): T {
+        if (this.isEmpty()) { return fallback }
+        return this.pop()
+    }
+
+    public func peekOr(T fallback): T {
+        if (this.isEmpty()) { return fallback }
+        return this.peek()
+    }
+
+    // --- Bulk operations ---------------------------------------------------
+
+    public func pushAll(List<T> values): void {
+        for i in 0..values.length() {
+            this.push(values.get(i))
+        }
+    }
+
+    public func clear(): void {
+        while (!this.isEmpty()) {
+            this.pop()
+        }
+    }
+
+    // Drains the stack into a list, top element first.
+    public func drain(): List<T> {
+        var result = new List<T>()
+        while (!this.isEmpty()) {
+            result.push(this.pop())
+        }
+        return result
+    }
+
+    // Bottom-to-top snapshot; the stack is left unchanged.
+    public func items(): List<T> {
+        var result = new List<T>()
+        for i in 0..Collection.length(this.__native) {
+            result.push(Collection.get(this.__native, i))
+        }
+        return result
+    }
+
+    public func contains(T item): bool {
+        return this.items().contains(item)
+    }
+
+    public func forEach(func action): void {
+        this.items().forEach(action)
+    }
 }
