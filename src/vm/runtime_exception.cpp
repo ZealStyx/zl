@@ -9,16 +9,18 @@ ZlThrownException::ZlThrownException(ObjectRef value) : value_(value) {
 }
 ZlThrownException::~ZlThrownException() = default;
 
-StoredException::StoredException(const std::exception_ptr& error) {
+StoredException::StoredException(const std::exception_ptr& error, Retention retention) {
     if (!error) return;
     try {
         std::rethrow_exception(error);
     } catch (const ZlThrownException& exception) {
         managed_ = exception.value();
-        // Pin immediately: not every holder of a StoredException is traced by
-        // the collector (a Thread's captured failure is not), so the payload
-        // must stay reachable on its own until this failure is destroyed.
-        if (managed_) root_ = std::make_shared<ProtectedGCRoot>(managed_.get());
+        // Only an untraced holder pins. A traced holder (Task, static field)
+        // reports the payload through appendGCRoots instead: pinning there
+        // would make any cycle running back through the failed program
+        // permanently unreclaimable.
+        if (managed_ && retention == Retention::Untraced)
+            root_ = std::make_shared<ProtectedGCRoot>(managed_.get());
         message_ = managed_ ? managed_->className : "ZL exception";
         if (managed_) {
             const auto message = managed_->fields.find("message");
