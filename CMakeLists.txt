@@ -66,108 +66,80 @@ file(GLOB ZLBIND_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tools/zl-bind/*.c
 add_executable(zl-bind ${ZLBIND_SOURCES})
 target_include_directories(zl-bind PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
+# --- Optional focused C++ regression targets ---------------------------------
+# Some lightweight/source-only checkouts do not include the full C++ regression
+# corpus. Keep ordinary runtime/tool builds configurable by registering each
+# regression target only when its primary fixture source is present.
+find_package(Threads REQUIRED)
 
-# Optional test targets: the .cpp test corpus is not present in every checkout.
-# Declare a test executable only when its primary source file exists.
-macro(zl_test_executable name first_source)
-    if(EXISTS ${CMAKE_SOURCE_DIR}/${first_source})
-        add_executable(${name} ${first_source} ${ARGN})
-        target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
+function(zl_add_optional_test target primary_source)
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/${primary_source}")
+        message(STATUS "Skipping ${target}: missing ${primary_source}")
+        return()
     endif()
-endmacro()
+    add_executable(${target} ${primary_source} ${ARGN})
+    target_include_directories(${target} PRIVATE ${CMAKE_SOURCE_DIR}/include)
+endfunction()
 
-# Focused runtime metadata regression. Kept separate from the main language
-# executable so the invariant can be exercised without a ZL source program.
-zl_test_executable(zl-runtime-type-tests tests/runtime_type_tests.cpp
+zl_add_optional_test(zl-runtime-type-tests tests/runtime_type_tests.cpp
     src/vm/value.cpp
     src/vm/gc.cpp
     src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
+
 # Controlled collector seam: exercises GC parking/reactivation and collector
 # election without depending on allocation volume or thread scheduling luck.
-find_package(Threads REQUIRED)
-zl_test_executable(zl-gc-safepoint-tests tests/gc_safepoint_tests.cpp src/vm/gc_safepoint.cpp)
+zl_add_optional_test(zl-gc-safepoint-tests tests/gc_safepoint_tests.cpp src/vm/gc_safepoint.cpp)
 if(TARGET zl-gc-safepoint-tests)
-target_link_libraries(zl-gc-safepoint-tests PRIVATE Threads::Threads)
+    target_link_libraries(zl-gc-safepoint-tests PRIVATE Threads::Threads)
 endif()
 
 # Program graph roots and blocking reclamation across consecutive collections.
-zl_test_executable(zl-gc-lifetime-tests tests/gc_lifetime_tests.cpp
+zl_add_optional_test(zl-gc-lifetime-tests tests/gc_lifetime_tests.cpp
     src/vm/gc.cpp src/vm/gc_safepoint.cpp src/vm/value.cpp
     src/vm/runtime_task.cpp src/vm/runtime_exception.cpp src/vm/runtime_thread.cpp)
 if(TARGET zl-gc-lifetime-tests)
-target_link_libraries(zl-gc-lifetime-tests PRIVATE Threads::Threads)
+    target_link_libraries(zl-gc-lifetime-tests PRIVATE Threads::Threads)
 endif()
 
-zl_test_executable(zl-gc-tests tests/gc_tests.cpp
+zl_add_optional_test(zl-gc-tests tests/gc_tests.cpp
     src/vm/value.cpp
     src/vm/gc.cpp
     src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
-if(TARGET zl-gc-tests)
-target_include_directories(zl-gc-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
-if(TARGET zl-runtime-type-tests)
-target_include_directories(zl-runtime-type-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
-zl_test_executable(zl-runtime-task-executor-tests tests/runtime_task_executor_tests.cpp
+
+zl_add_optional_test(zl-runtime-task-executor-tests tests/runtime_task_executor_tests.cpp
     src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp
     src/vm/runtime_task_executor.cpp
     src/vm/runtime_thread.cpp
     src/vm/value.cpp
     src/vm/gc.cpp)
-if(TARGET zl-runtime-task-executor-tests)
-target_include_directories(zl-runtime-task-executor-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
-zl_test_executable(zl-runtime-sync-tests tests/runtime_sync_tests.cpp)
-if(TARGET zl-runtime-sync-tests)
-target_include_directories(zl-runtime-sync-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
 
-zl_test_executable(zl-ir-tests tests/ir_tests.cpp src/compiler/ir.cpp src/compiler/ir_optimizer.cpp)
-zl_test_executable(zl-machine-code-tests tests/machine_code_tests.cpp src/compiler/machine_code.cpp src/compiler/ir.cpp)
-if(TARGET zl-machine-code-tests)
-target_include_directories(zl-machine-code-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
-if(TARGET zl-ir-tests)
-target_include_directories(zl-ir-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
+zl_add_optional_test(zl-runtime-sync-tests tests/runtime_sync_tests.cpp)
 
-zl_test_executable(zl-regex-engine-tests tests/regex_engine_tests.cpp src/regex/regex.cpp)
-if(TARGET zl-regex-engine-tests)
-target_include_directories(zl-regex-engine-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
-zl_test_executable(zl-regex-unicode-tests tests/regex_unicode_tests.cpp src/regex/regex.cpp)
-if(TARGET zl-regex-unicode-tests)
-target_include_directories(zl-regex-unicode-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
+zl_add_optional_test(zl-ir-tests tests/ir_tests.cpp src/compiler/ir.cpp src/compiler/ir_optimizer.cpp)
+zl_add_optional_test(zl-machine-code-tests tests/machine_code_tests.cpp src/compiler/machine_code.cpp src/compiler/ir.cpp)
 
-zl_test_executable(zl-runtime-scheduler-tests tests/runtime_scheduler_tests.cpp
+zl_add_optional_test(zl-regex-engine-tests tests/regex_engine_tests.cpp src/regex/regex.cpp)
+zl_add_optional_test(zl-regex-unicode-tests tests/regex_unicode_tests.cpp src/regex/regex.cpp)
+
+zl_add_optional_test(zl-runtime-scheduler-tests tests/runtime_scheduler_tests.cpp
     src/vm/runtime_scheduler.cpp
     src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp
     src/vm/runtime_task_executor.cpp
     src/vm/value.cpp
     src/vm/gc.cpp)
-if(TARGET zl-runtime-scheduler-tests)
-target_include_directories(zl-runtime-scheduler-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
 
 # VM boundary-hardening regression target. It links the interpreter sources
 # directly so malformed reflection handles can be exercised without a ZL
 # program manufacturing an impossible internal Function object.
 set(ZL_RUNTIME_VM_SOURCES ${SOURCES})
 list(FILTER ZL_RUNTIME_VM_SOURCES EXCLUDE REGEX ".*/main\\.cpp$")
-zl_test_executable(zl-runtime-hardening-vm-tests tests/runtime_hardening_vm_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
-if(TARGET zl-runtime-hardening-vm-tests)
-target_include_directories(zl-runtime-hardening-vm-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
-
-if(WIN32)
-    if(TARGET zl-runtime-hardening-vm-tests)
-target_link_libraries(zl-runtime-hardening-vm-tests PRIVATE ws2_32)
-endif()
+zl_add_optional_test(zl-runtime-hardening-vm-tests tests/runtime_hardening_vm_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+if(TARGET zl-runtime-hardening-vm-tests AND WIN32)
+    target_link_libraries(zl-runtime-hardening-vm-tests PRIVATE ws2_32)
 endif()
 
 
@@ -196,6 +168,14 @@ install(TARGETS zlpkg
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/tools/zl-lsp/zl_lsp.py
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    RENAME zl-lsp
+)
+install(PROGRAMS ${CMAKE_SOURCE_DIR}/tools/zl-test/zl_test.py
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    RENAME zl-test
+)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/stdlib/
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/zl/stdlib
     PATTERN "VERSION.in" EXCLUDE
@@ -212,6 +192,7 @@ install(FILES ${CMAKE_SOURCE_DIR}/LICENSE
 )
 install(FILES ${CMAKE_SOURCE_DIR}/README.md ${CMAKE_SOURCE_DIR}/ROADMAP.md
     DESTINATION ${CMAKE_INSTALL_DATADIR}/zl
+    OPTIONAL
 )
 
 
@@ -244,9 +225,9 @@ if(UNIX AND NOT APPLE)
 endif()
 include(CPack)
 
-# Phase 10 native backend smoke tests: validates the source emitter without invoking an
-# external native toolchain. The emitted C++ is intentionally restricted to @native simple functions.
-zl_test_executable(zl-native-compiler-tests tests/native_compiler_tests.cpp
+# Phase 10+ native/backend smoke tests. These are optional for lightweight
+# checkouts for the same reason as the focused tests above.
+zl_add_optional_test(zl-native-compiler-tests tests/native_compiler_tests.cpp
     src/compiler/native_compiler.cpp
     src/compiler/ir_lowering.cpp
     src/compiler/ir.cpp
@@ -256,79 +237,31 @@ zl_test_executable(zl-native-compiler-tests tests/native_compiler_tests.cpp
     src/parser/type_lookahead.cpp
     src/parser/ast.cpp
     src/lexer/lexer.cpp)
-if(TARGET zl-native-compiler-tests)
-target_include_directories(zl-native-compiler-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
 
-zl_test_executable(zl-native-ffi-metadata-tests tests/native_ffi_metadata_tests.cpp)
-if(TARGET zl-native-ffi-metadata-tests)
-target_include_directories(zl-native-ffi-metadata-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
+zl_add_optional_test(zl-native-ffi-metadata-tests tests/native_ffi_metadata_tests.cpp)
 
-zl_test_executable(zl-native-resource-tests tests/native_resource_tests.cpp
-    src/vm/native_resource.cpp
-)
-if(TARGET zl-native-resource-tests)
-target_include_directories(zl-native-resource-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
-
-zl_test_executable(zl-native-boundary-tests tests/native_boundary_tests.cpp
-    src/vm/native_boundary.cpp
-    src/vm/native_resource.cpp
-    src/vm/value.cpp
-    src/vm/execution_state.cpp
-    src/vm/gc.cpp
-    src/vm/runtime_exception.cpp
-    src/vm/runtime_task.cpp)
-if(TARGET zl-native-boundary-tests)
-target_include_directories(zl-native-boundary-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
-
-zl_test_executable(zl-native-runtime-registry-tests tests/native_runtime_registry_tests.cpp
-    src/vm/native_boundary.cpp
-    src/vm/native_resource.cpp
-    src/vm/value.cpp
-    src/vm/execution_state.cpp
-    src/vm/gc.cpp
-    src/vm/runtime_exception.cpp
-    src/vm/runtime_task.cpp)
-if(TARGET zl-native-runtime-registry-tests)
-target_include_directories(zl-native-runtime-registry-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
-
-zl_test_executable(zl-native-ffi-transport-tests tests/native_ffi_transport_tests.cpp
-    src/vm/native_resource.cpp
-    src/vm/native_boundary.cpp
-    src/vm/value.cpp
-    src/vm/execution_state.cpp
-    src/vm/gc.cpp
-    src/vm/runtime_exception.cpp
-    src/vm/runtime_task.cpp)
-if(TARGET zl-native-ffi-transport-tests)
-target_include_directories(zl-native-ffi-transport-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
-
-zl_test_executable(zl-native-ffi-lifetime-tests tests/native_ffi_lifetime_adapter_tests.cpp
-    src/vm/native_resource.cpp
-    src/vm/native_boundary.cpp
-    src/vm/value.cpp
-    src/vm/execution_state.cpp
-    src/vm/gc.cpp
-    src/vm/runtime_exception.cpp
-    src/vm/runtime_task.cpp)
-if(TARGET zl-native-ffi-lifetime-tests)
-target_include_directories(zl-native-ffi-lifetime-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
-
-zl_test_executable(zl-native-resource-stress-tests tests/native_resource_stress_tests.cpp
+zl_add_optional_test(zl-native-resource-tests tests/native_resource_tests.cpp
     src/vm/native_resource.cpp)
-if(TARGET zl-native-resource-stress-tests)
-target_include_directories(zl-native-resource-stress-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
 
+zl_add_optional_test(zl-native-boundary-tests tests/native_boundary_tests.cpp
+    src/vm/native_boundary.cpp
+    src/vm/native_resource.cpp
+    src/vm/value.cpp
+    src/vm/execution_state.cpp
+    src/vm/gc.cpp
+    src/vm/runtime_exception.cpp
+    src/vm/runtime_task.cpp)
 
-# Phase 16 native struct/library runtime tests
-zl_test_executable(zl-native-struct-tests tests/native_struct_tests.cpp
+zl_add_optional_test(zl-native-runtime-registry-tests tests/native_runtime_registry_tests.cpp
+    src/vm/native_boundary.cpp
+    src/vm/native_resource.cpp
+    src/vm/value.cpp
+    src/vm/execution_state.cpp
+    src/vm/gc.cpp
+    src/vm/runtime_exception.cpp
+    src/vm/runtime_task.cpp)
+
+zl_add_optional_test(zl-native-ffi-transport-tests tests/native_ffi_transport_tests.cpp
     src/vm/native_resource.cpp
     src/vm/native_boundary.cpp
     src/vm/value.cpp
@@ -336,21 +269,34 @@ zl_test_executable(zl-native-struct-tests tests/native_struct_tests.cpp
     src/vm/gc.cpp
     src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
-if(TARGET zl-native-struct-tests)
-target_include_directories(zl-native-struct-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
 
-zl_test_executable(zl-native-library-tests tests/native_library_tests.cpp
+zl_add_optional_test(zl-native-ffi-lifetime-tests tests/native_ffi_lifetime_adapter_tests.cpp
+    src/vm/native_resource.cpp
+    src/vm/native_boundary.cpp
+    src/vm/value.cpp
+    src/vm/execution_state.cpp
+    src/vm/gc.cpp
+    src/vm/runtime_exception.cpp
+    src/vm/runtime_task.cpp)
+
+zl_add_optional_test(zl-native-resource-stress-tests tests/native_resource_stress_tests.cpp
+    src/vm/native_resource.cpp)
+
+# Phase 16 native struct/library runtime tests.
+zl_add_optional_test(zl-native-struct-tests tests/native_struct_tests.cpp
+    src/vm/native_resource.cpp
+    src/vm/native_boundary.cpp
+    src/vm/value.cpp
+    src/vm/execution_state.cpp
+    src/vm/gc.cpp
+    src/vm/runtime_exception.cpp
+    src/vm/runtime_task.cpp)
+
+zl_add_optional_test(zl-native-library-tests tests/native_library_tests.cpp
     src/vm/native_library.cpp)
 if(TARGET zl-native-library-tests)
-target_include_directories(zl-native-library-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
-if(TARGET zl-native-library-tests)
-target_link_libraries(zl-native-library-tests PRIVATE ${CMAKE_DL_LIBS})
+    target_link_libraries(zl-native-library-tests PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
-zl_test_executable(zl-native-ffi-declaration-tests tests/native_ffi_declaration_tests.cpp
+zl_add_optional_test(zl-native-ffi-declaration-tests tests/native_ffi_declaration_tests.cpp
     src/compiler/native_ffi_declarations.cpp)
-if(TARGET zl-native-ffi-declaration-tests)
-target_include_directories(zl-native-ffi-declaration-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
