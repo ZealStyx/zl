@@ -1,4 +1,5 @@
 #include "zl/vm/native.hpp"
+#include "zl/vm/runtime_fault.hpp"
 #include "zl/compiler/native_catalog.hpp"
 #include "zl/vm/runtime_task.hpp"
 #include "zl/vm/runtime_thread.hpp"
@@ -225,19 +226,19 @@ Value ioClear(const std::vector<Value>& /*args*/) {
 
 ListRef requireList(const Value& v, const char* fnName) {
     if (const auto* p = std::get_if<ListRef>(&v); p && *p) return *p;
-    throw std::runtime_error(std::string(fnName) + " expects a list/array/set as its first argument");
+    throwTypeError(std::string(fnName) + " expects a list/array/set as its first argument");
 }
 
 MapRef requireMap(const Value& v, const char* fnName) {
     if (const auto* p = std::get_if<MapRef>(&v); p && *p) return *p;
-    throw std::runtime_error(std::string(fnName) + " expects a map as its first argument");
+    throwTypeError(std::string(fnName) + " expects a map as its first argument");
 }
 
 std::size_t requireIndex(const Value& v, std::size_t size, const char* fnName) {
     std::int64_t i = toInt64Strict(v);
     if (i < 0 || static_cast<std::size_t>(i) >= size) {
-        throw std::runtime_error(std::string(fnName) + ": index " + std::to_string(i) +
-                                  " out of bounds (size " + std::to_string(size) + ")");
+        throwIndexError(std::string(fnName) + ": index " + std::to_string(i) +
+                        " out of bounds (size " + std::to_string(size) + ")");
     }
     return static_cast<std::size_t>(i);
 }
@@ -316,7 +317,7 @@ Value collLength(const std::vector<Value>& args) {
     if (const auto* p = std::get_if<ListRef>(&args[0]); p && *p) return static_cast<std::int64_t>(listLogicalSize(*p));
     if (const auto* p = std::get_if<MapRef>(&args[0]); p && *p) return static_cast<std::int64_t>((*p)->entries.size());
     if (auto p = std::get_if<std::string>(&args[0])) return static_cast<std::int64_t>(p->size());
-    throw std::runtime_error("Collection.length expects a list/array/set, map, or string");
+    throwTypeError("Collection.length expects a list/array/set, map, or string");
 }
 
 // --- Queue / Stack (zl.util) - both are a plain ListRef under the hood,
@@ -431,7 +432,7 @@ Value collMapGet(const std::vector<Value>& args) {
     for (auto& entry : map->entries) {
         if (valuesEqual(entry.first, args[1])) return entry.second;
     }
-    throw std::runtime_error("Collection.mapGet: key not found");
+    throwKeyError("Collection.mapGet: key not found");
 }
 
 Value collMapHas(const std::vector<Value>& args) {
@@ -531,7 +532,7 @@ Value collSetItems(const std::vector<Value>& args) {
 
 const std::string& requireString(const Value& v, const char* fnName) {
     if (auto p = std::get_if<std::string>(&v)) return *p;
-    throw std::runtime_error(std::string(fnName) + " expects a string argument");
+    throwTypeError(std::string(fnName) + " expects a string argument");
 }
 
 Value strLength(const std::vector<Value>& args) {
@@ -687,7 +688,7 @@ Value boolParse(const std::vector<Value>& args) {
 Value fsReadFile(const std::vector<Value>& args) {
     const std::string& path = requireString(args[0], "FileSystem.readFile");
     std::ifstream file(path, std::ios::binary);
-    if (!file) throw std::runtime_error("FileSystem.readFile: could not open \"" + path + "\"");
+    if (!file) throwIOError("FileSystem.readFile: could not open \"" + path + "\"");
     std::ostringstream buffer;
     buffer << file.rdbuf();
     return buffer.str();
@@ -697,7 +698,7 @@ Value fsWriteFile(const std::vector<Value>& args) {
     const std::string& path = requireString(args[0], "FileSystem.writeFile");
     const std::string& content = requireString(args[1], "FileSystem.writeFile");
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    if (!file) throw std::runtime_error("FileSystem.writeFile: could not open \"" + path + "\" for writing");
+    if (!file) throwIOError("FileSystem.writeFile: could not open \"" + path + "\" for writing");
     file << content;
     return Value{};
 }
@@ -706,7 +707,7 @@ Value fsAppendFile(const std::vector<Value>& args) {
     const std::string& path = requireString(args[0], "FileSystem.appendFile");
     const std::string& content = requireString(args[1], "FileSystem.appendFile");
     std::ofstream file(path, std::ios::binary | std::ios::app);
-    if (!file) throw std::runtime_error("FileSystem.appendFile: could not open \"" + path + "\" for writing");
+    if (!file) throwIOError("FileSystem.appendFile: could not open \"" + path + "\" for writing");
     file << content;
     return Value{};
 }
@@ -720,7 +721,7 @@ Value fsDeleteFile(const std::vector<Value>& args) {
     const std::string& path = requireString(args[0], "FileSystem.deleteFile");
     std::error_code ec;
     bool removed = std::filesystem::remove(path, ec);
-    if (ec || !removed) throw std::runtime_error("FileSystem.deleteFile: could not delete \"" + path + "\"");
+    if (ec || !removed) throwIOError("FileSystem.deleteFile: could not delete \"" + path + "\"");
     return Value{};
 }
 
@@ -728,7 +729,7 @@ Value fsListDir(const std::vector<Value>& args) {
     const std::string& path = requireString(args[0], "FileSystem.listDir");
     std::error_code ec;
     if (!std::filesystem::is_directory(path, ec) || ec) {
-        throw std::runtime_error("FileSystem.listDir: \"" + path + "\" is not a directory");
+        throwIOError("FileSystem.listDir: \"" + path + "\" is not a directory");
     }
     Value result = makeEmptyList();
     auto& items = std::get<ListRef>(result)->items;

@@ -2,6 +2,7 @@
 #include "zl/vm/gc.hpp"
 #include "zl/vm/gc_safepoint.hpp"
 #include "zl/vm/runtime_type_checks.hpp"
+#include "zl/vm/runtime_fault.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -21,6 +22,52 @@
 namespace zl {
 namespace {
 
+std::string formatStackTrace(const ExecutionState* state, const char* fallback) {
+    std::string trace;
+    if (state) {
+        for (const auto& name : state->callStackNames()) {
+            if (!trace.empty()) trace += "\n";
+            trace += "at " + name;
+        }
+    }
+    return trace.empty() ? std::string(fallback) : trace;
+}
+
+// Build a real ZL exception object of `className`, so `catch IndexError e`
+// and friends work against failures raised inside the VM or a native.
+ObjectRef makeRuntimeExceptionObject(const std::string& className, const std::string& message,
+                                     const Chunk* chunk, const ExecutionState* state,
+                                     const char* traceFallback) {
+    // Fall back to the always-present base class when a program's chunk does
+    // not carry metadata for the specific class (older/partial chunks).
+    std::string resolved = className;
+    if (chunk && !chunk->classReflection.count(resolved)) {
+        resolved = chunk->classReflection.count("RuntimeError") ? "RuntimeError" : "Exception";
+    }
+    Value objectValue = makeEmptyObject(resolved);
+    auto object = std::get<ObjectRef>(objectValue);
+    object->fields["message"] = message;
+    object->fields["stackTrace"] = formatStackTrace(state, traceFallback);
+    if (chunk) {
+        auto it = chunk->classReflection.find(resolved);
+        if (it != chunk->classReflection.end()) object->runtimeType = it->second.runtimeType;
+    }
+    return object;
+}
+
+[[noreturn]] void throwRuntimeFault(const ZlRuntimeFault& fault, const Chunk* chunk,
+                                    const ExecutionState* state) {
+    throw ZlThrownException(makeRuntimeExceptionObject(fault.className(), fault.what(), chunk, state, "at <runtime>"));
+}
+
+// A plain std::runtime_error escaping the interpreter core is still a genuine
+// ZL-level failure; surface it as `RuntimeError` rather than losing the
+// program's ability to catch and describe it.
+[[noreturn]] void throwInterpreterError(const std::exception& e, const Chunk* chunk,
+                                        const ExecutionState* state) {
+    throw ZlThrownException(makeRuntimeExceptionObject("RuntimeError", e.what(), chunk, state, "at <runtime>"));
+}
+
 [[noreturn]] void throwNativeError(const std::exception& e,
                                    const Chunk& chunk,
                                    const ExecutionState& state) {
@@ -29,20 +76,7 @@ namespace {
     const bool isRegexError = rawMessage.rfind(regexPrefix, 0) == 0;
     const std::string className = isRegexError ? "RegexError" : "NativeError";
     const std::string message = isRegexError ? rawMessage.substr(regexPrefix.size()) : rawMessage;
-    Value objectValue = makeEmptyObject(className);
-    auto object = std::get<ObjectRef>(objectValue);
-    object->fields["message"] = message;
-    object->fields["stackTrace"] = [&state]() {
-        std::string trace;
-        for (const auto& name : state.callStackNames()) {
-            if (!trace.empty()) trace += "\n";
-            trace += "at " + name;
-        }
-        return trace.empty() ? std::string("at <native>") : trace;
-    }();
-    auto it = chunk.classReflection.find(className);
-    if (it != chunk.classReflection.end()) object->runtimeType = it->second.runtimeType;
-    throw ZlThrownException(std::move(object));
+    throw ZlThrownException(makeRuntimeExceptionObject(className, message, &chunk, &state, "at <native>"));
 }
 
 [[noreturn]] void throwReflectionException(const std::string& message,
@@ -61,22 +95,7 @@ namespace {
     } else if (clean.rfind("ReflectionError: ", 0) == 0) {
         clean.erase(0, std::string("ReflectionError: ").size());
     }
-    Value objectValue = makeEmptyObject(className);
-    auto object = std::get<ObjectRef>(objectValue);
-    object->fields["message"] = clean;
-    std::string trace;
-    if (state) {
-        for (const auto& name : state->callStackNames()) {
-            if (!trace.empty()) trace += "\n";
-            trace += "at " + name;
-        }
-    }
-    object->fields["stackTrace"] = trace.empty() ? std::string("at <reflection>") : trace;
-    if (chunk) {
-        auto it = chunk->classReflection.find(className);
-        if (it != chunk->classReflection.end()) object->runtimeType = it->second.runtimeType;
-    }
-    throw ZlThrownException(std::move(object));
+    throw ZlThrownException(makeRuntimeExceptionObject(className, clean, chunk, state, "at <reflection>"));
 }
 
 } // namespace
@@ -165,8 +184,8 @@ ExecutionState::CallFrame VM::makeCallFrame(const Chunk& chunk, const FunctionIn
         const std::string expected = i < fn.parameterTypeNames.size()
             ? substituteTypeParams(fn.parameterTypeNames[i], frame.typeBindings) : "unknown";
         if (!expected.empty() && !types.check(args[i], expected)) {
-            throw std::runtime_error("type assertion failed for argument " + std::to_string(i + 1) +
-                                     ": expected " + expected + ", got " + runtimeValueTypeName(args[i]));
+            throwTypeError("type assertion failed for argument " + std::to_string(i + 1) +
+                           ": expected " + expected + ", got " + runtimeValueTypeName(args[i]));
         }
         frame.locals[fn.paramNames[i]] = args[i];
     }
@@ -273,7 +292,7 @@ Value VM::binaryArith(OpCode op, const Value& a, const Value& b) const {
                     }
                 }
                 if (exact) return result;
-                throw std::runtime_error("integer overflow in exponentiation");
+                throwArithmeticError("integer overflow in exponentiation");
             }
             throw std::runtime_error("negative integer exponent requires floating-point result");
         }
@@ -290,11 +309,11 @@ Value VM::binaryArith(OpCode op, const Value& a, const Value& b) const {
                 std::int64_t result;
 #if defined(__GNUC__) || defined(__clang__)
                 if (__builtin_add_overflow(x, y, &result))
-                    throw std::runtime_error("integer overflow in addition");
+                    throwArithmeticError("integer overflow in addition");
 #else
                 if ((y > 0 && x > std::numeric_limits<std::int64_t>::max() - y) ||
                     (y < 0 && x < std::numeric_limits<std::int64_t>::min() - y))
-                    throw std::runtime_error("integer overflow in addition");
+                    throwArithmeticError("integer overflow in addition");
                 result = x + y;
 #endif
                 return result;
@@ -303,11 +322,11 @@ Value VM::binaryArith(OpCode op, const Value& a, const Value& b) const {
                 std::int64_t result;
 #if defined(__GNUC__) || defined(__clang__)
                 if (__builtin_sub_overflow(x, y, &result))
-                    throw std::runtime_error("integer overflow in subtraction");
+                    throwArithmeticError("integer overflow in subtraction");
 #else
                 if ((y < 0 && x > std::numeric_limits<std::int64_t>::max() + y) ||
                     (y > 0 && x < std::numeric_limits<std::int64_t>::min() + y))
-                    throw std::runtime_error("integer overflow in subtraction");
+                    throwArithmeticError("integer overflow in subtraction");
                 result = x - y;
 #endif
                 return result;
@@ -316,18 +335,18 @@ Value VM::binaryArith(OpCode op, const Value& a, const Value& b) const {
                 std::int64_t result;
 #if defined(__GNUC__) || defined(__clang__)
                 if (__builtin_mul_overflow(x, y, &result))
-                    throw std::runtime_error("integer overflow in multiplication");
+                    throwArithmeticError("integer overflow in multiplication");
 #else
                 if (x != 0 && y != 0) {
                     if ((x == -1 && y == std::numeric_limits<std::int64_t>::min()) ||
                         (y == -1 && x == std::numeric_limits<std::int64_t>::min()))
-                        throw std::runtime_error("integer overflow in multiplication");
+                        throwArithmeticError("integer overflow in multiplication");
                     if (x > 0) {
-                        if (y > 0 && x > std::numeric_limits<std::int64_t>::max() / y) throw std::runtime_error("integer overflow in multiplication");
-                        if (y < 0 && y < std::numeric_limits<std::int64_t>::min() / x) throw std::runtime_error("integer overflow in multiplication");
+                        if (y > 0 && x > std::numeric_limits<std::int64_t>::max() / y) throwArithmeticError("integer overflow in multiplication");
+                        if (y < 0 && y < std::numeric_limits<std::int64_t>::min() / x) throwArithmeticError("integer overflow in multiplication");
                     } else {
-                        if (y > 0 && x < std::numeric_limits<std::int64_t>::min() / y) throw std::runtime_error("integer overflow in multiplication");
-                        if (y < 0 && x < std::numeric_limits<std::int64_t>::max() / y) throw std::runtime_error("integer overflow in multiplication");
+                        if (y > 0 && x < std::numeric_limits<std::int64_t>::min() / y) throwArithmeticError("integer overflow in multiplication");
+                        if (y < 0 && x < std::numeric_limits<std::int64_t>::max() / y) throwArithmeticError("integer overflow in multiplication");
                     }
                 }
                 result = x * y;
@@ -335,12 +354,12 @@ Value VM::binaryArith(OpCode op, const Value& a, const Value& b) const {
                 return result;
             }
             case OpCode::Div:
-                if (y == 0) throw std::runtime_error("division by zero");
+                if (y == 0) throwArithmeticError("division by zero");
                 if (x == std::numeric_limits<std::int64_t>::min() && y == -1)
-                    throw std::runtime_error("integer overflow in division");
+                    throwArithmeticError("integer overflow in division");
                 return x / y;
             case OpCode::Mod:
-                if (y == 0) throw std::runtime_error("modulo by zero");
+                if (y == 0) throwArithmeticError("modulo by zero");
                 if (x == std::numeric_limits<std::int64_t>::min() && y == -1)
                     return std::int64_t{0};
                 return x % y;
@@ -355,10 +374,10 @@ Value VM::binaryArith(OpCode op, const Value& a, const Value& b) const {
         case OpCode::Sub: return x - y;
         case OpCode::Mul: return x * y;
         case OpCode::Div:
-            if (y == 0.0) throw std::runtime_error("division by zero");
+            if (y == 0.0) throwArithmeticError("division by zero");
             return x / y;
         case OpCode::Mod:
-            if (y == 0.0) throw std::runtime_error("modulo by zero");
+            if (y == 0.0) throwArithmeticError("modulo by zero");
             return std::fmod(x, y);
         default:
             throw std::runtime_error("VM: not an arithmetic opcode");
@@ -433,7 +452,7 @@ Value VM::unary(OpCode op, const Value& a) const {
         case OpCode::Neg:
             if (auto p = std::get_if<std::int64_t>(&a)) {
                 if (*p == std::numeric_limits<std::int64_t>::min())
-                    throw std::runtime_error("integer overflow in negation");
+                    throwArithmeticError("integer overflow in negation");
                 return -*p;
             }
             if (auto p = std::get_if<double>(&a)) return -*p;
@@ -704,6 +723,10 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     throw;
                 } catch (const SystemExitException&) {
                     throw;
+                } catch (const ZlRuntimeFault&) {
+                    // The native already chose its ZL exception class; do not
+                    // flatten it into a generic NativeError.
+                    throw;
                 } catch (const std::exception& e) {
                     const std::string message = e.what();
                     if (message.rfind("Reflection.", 0) == 0) {
@@ -763,7 +786,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 const std::string expected = substituteTypeParams(chunk.names[instr.operand], state_.typeBindings());
                 RuntimeTypeCheck types(&chunk);
                 if (!types.check(value, expected)) {
-                    throw std::runtime_error("type assertion failed: expected " + expected + ", got " + runtimeValueTypeName(value));
+                    throwTypeError("type assertion failed: expected " + expected + ", got " + runtimeValueTypeName(value));
                 }
                 types.commit();
                 state_.push(value);
@@ -1215,8 +1238,8 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 {
                     RuntimeTypeCheck types(&chunk);
                     if (!expected.empty() && !types.check(resultValue, expected)) {
-                        throw std::runtime_error("type assertion failed for return: expected " + expected +
-                                                 ", got " + runtimeValueTypeName(resultValue));
+                        throwTypeError("type assertion failed for return: expected " + expected +
+                                       ", got " + runtimeValueTypeName(resultValue));
                     }
                     types.commit();
                 }
@@ -1299,41 +1322,56 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
           // the closure's chunk and re-runs the caller (the exception-in-
           // withLock double-continuation bug). If no in-scope handler matches,
           // rethrow so the outer run handles it in its own chunk.
-          bool matched = false;
-          ExecutionState::Handler h{};
-          while (state_.hasHandler() && state_.topHandlerCallDepth() >= initialCallDepth) {
-              h = state_.popHandler();
-              if (h.catchClassName.empty() ||
-                  e.value()->className == h.catchClassName ||
-                  (chunk.classReflection.count(e.value()->className) &&
-                      isSubclass(chunk, e.value()->className, h.catchClassName))) {
-                  matched = true;
-                  break;
-              }
-          }
-          if (!matched) throw;
-          state_.unwindTo(h);
-          state_.removeHandlerGroup(h.groupId);
-          if (h.rethrowAfterHandler) {
-              state_.push(Value(e.value()));
-          } else if (h.catchClassName.empty()) {
-              state_.push(Value(e.value()->fields.count("message") ? e.value()->fields.at("message") : valueToString(Value(e.value()))));
-          } else {
-              state_.push(Value(e.value()));
-          }
-          ip = h.catchIp;
+          if (!dispatchThrownException(chunk, e.value(), initialCallDepth, ip)) throw;
+      } catch (const ZlRuntimeFault& fault) {
+          // A native/VM failure that names its own ZL exception class. It is
+          // converted here, not at the throw site, so the handler search and
+          // the reported stack trace see the frame that actually failed.
+          auto object = makeRuntimeExceptionObject(fault.className(), fault.what(), &chunk, &state_, "at <runtime>");
+          if (!dispatchThrownException(chunk, object, initialCallDepth, ip))
+              throw ZlThrownException(std::move(object));
       } catch (const std::runtime_error& e) {
-          // Same nested-run scoping as the ZlThrownException handler above:
-          // only a catch-all handler owned by this (nested) run applies.
-          if (!state_.hasHandler() || state_.topHandlerCallDepth() < initialCallDepth) throw;
-          ExecutionState::Handler h = state_.popHandler();
-          if (!h.catchClassName.empty()) throw;
-          state_.unwindTo(h);
-          state_.removeHandlerGroup(h.groupId);
-          state_.push(Value(std::string(e.what())));
-          ip = h.catchIp;
+          // Any other interpreter-level failure is still a real ZL error:
+          // expose it as `RuntimeError` so programs can catch it by type and
+          // read its message and stack trace.
+          auto object = makeRuntimeExceptionObject("RuntimeError", e.what(), &chunk, &state_, "at <runtime>");
+          if (!dispatchThrownException(chunk, object, initialCallDepth, ip))
+              throw ZlThrownException(std::move(object));
       }
     }
+}
+
+// Finds the innermost in-scope handler for `thrown`, unwinds to it and moves
+// `ip` to its catch block. Returns false when this (possibly nested) run owns
+// no matching handler, in which case the caller must propagate.
+bool VM::dispatchThrownException(const Chunk& chunk, const ObjectRef& thrown,
+                                 std::size_t initialCallDepth, std::size_t& ip) {
+    if (!thrown) return false;
+    bool matched = false;
+    ExecutionState::Handler h{};
+    while (state_.hasHandler() && state_.topHandlerCallDepth() >= initialCallDepth) {
+        h = state_.popHandler();
+        if (h.catchClassName.empty() ||
+            thrown->className == h.catchClassName ||
+            (chunk.classReflection.count(thrown->className) &&
+                isSubclass(chunk, thrown->className, h.catchClassName))) {
+            matched = true;
+            break;
+        }
+    }
+    if (!matched) return false;
+    state_.unwindTo(h);
+    state_.removeHandlerGroup(h.groupId);
+    if (h.rethrowAfterHandler || !h.catchClassName.empty()) {
+        state_.push(Value(thrown));
+    } else {
+        // An untyped `catch e` binds the failure message, preserving the
+        // historical contract for both thrown objects and runtime faults.
+        const auto message = thrown->fields.find("message");
+        state_.push(message != thrown->fields.end() ? message->second : Value(valueToString(Value(thrown))));
+    }
+    ip = h.catchIp;
+    return true;
 }
 
 TaskRef VM::scheduleAsyncInvocation(std::shared_ptr<const Chunk> chunk, std::size_t functionIndex,

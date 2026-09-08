@@ -1,4 +1,5 @@
 #include "zl/vm/execution_state.hpp"
+#include "zl/vm/runtime_fault.hpp"
 
 #include <algorithm>
 
@@ -85,7 +86,7 @@ void ExecutionState::appendGCRoots(std::vector<Value>& roots) const {
 
 void ExecutionState::enterFrame(CallFrame frame) {
     if (callStack_.size() >= maxCallDepth_) {
-        throw std::runtime_error("stack overflow: maximum call depth (" + std::to_string(maxCallDepth_) + ") exceeded");
+        throwStackOverflowError("stack overflow: maximum call depth (" + std::to_string(maxCallDepth_) + ") exceeded");
     }
     callStack_.push_back(std::move(frame));
 }

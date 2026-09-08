@@ -689,8 +689,66 @@ class CancellationException extends Exception {
 }
 )ZL";
 
+// Failures raised by the VM itself are ordinary ZL exceptions, so a program
+// can catch them by type instead of only through an untyped catch-all.
+constexpr std::string_view kBuiltinRuntimeErrorSource = R"ZL(
+class RuntimeError extends Exception {
+    func RuntimeError(string message): void {
+        super(message)
+    }
+}
+)ZL";
+
+constexpr std::string_view kBuiltinTypeErrorSource = R"ZL(
+class TypeError extends RuntimeError {
+    func TypeError(string message): void {
+        super(message)
+    }
+}
+)ZL";
+
+constexpr std::string_view kBuiltinIndexErrorSource = R"ZL(
+class IndexError extends RuntimeError {
+    func IndexError(string message): void {
+        super(message)
+    }
+}
+)ZL";
+
+constexpr std::string_view kBuiltinKeyErrorSource = R"ZL(
+class KeyError extends RuntimeError {
+    func KeyError(string message): void {
+        super(message)
+    }
+}
+)ZL";
+
+constexpr std::string_view kBuiltinArithmeticErrorSource = R"ZL(
+class ArithmeticError extends RuntimeError {
+    func ArithmeticError(string message): void {
+        super(message)
+    }
+}
+)ZL";
+
+constexpr std::string_view kBuiltinStackOverflowErrorSource = R"ZL(
+class StackOverflowError extends RuntimeError {
+    func StackOverflowError(string message): void {
+        super(message)
+    }
+}
+)ZL";
+
+constexpr std::string_view kBuiltinIOErrorSource = R"ZL(
+class IOError extends RuntimeError {
+    func IOError(string message): void {
+        super(message)
+    }
+}
+)ZL";
+
 constexpr std::string_view kBuiltinNativeErrorSource = R"ZL(
-class NativeError extends Exception {
+class NativeError extends RuntimeError {
     func NativeError(string message): void {
         super(message)
     }
@@ -699,7 +757,7 @@ class NativeError extends Exception {
 
 
 constexpr std::string_view kBuiltinRegexErrorSource = R"ZL(
-class RegexError extends Exception {
+class RegexError extends RuntimeError {
     func RegexError(string message): void {
         super(message)
     }
@@ -1184,6 +1242,13 @@ const std::vector<std::string_view> kBuiltinSources = {
     kBuiltinSharedSource,
     kBuiltinExceptionSource,
     kBuiltinCancellationExceptionSource,
+    kBuiltinRuntimeErrorSource,
+    kBuiltinTypeErrorSource,
+    kBuiltinIndexErrorSource,
+    kBuiltinKeyErrorSource,
+    kBuiltinArithmeticErrorSource,
+    kBuiltinStackOverflowErrorSource,
+    kBuiltinIOErrorSource,
     kBuiltinNativeErrorSource,
     kBuiltinRegexErrorSource,
     kBuiltinReflectionErrorSource,
