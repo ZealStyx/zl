@@ -2,108 +2,116 @@
 
 namespace zl {
 
-long TypeLookahead::scanTerm(std::size_t pos) const {
-    if (pos >= tokens_.size()) return -1;
-    const TokenType type = tokens_[pos].type;
+bool TypeLookahead::matches(const Cursor& cursor, TokenType type) const {
+    if (!cursor.atTokenBoundary()) return false;
+    return cursor.pos < tokens_.size() && tokens_[cursor.pos].type == type;
+}
+
+bool TypeLookahead::consume(Cursor& cursor, TokenType type) const {
+    if (!matches(cursor, type)) return false;
+    ++cursor.pos;
+    return true;
+}
+
+// `List<List<int>>` lexes the closing angles as one SHR token (and `>>>` as
+// USHR). The recognizer therefore tracks how many '>' remain inside the token
+// under the cursor instead of demanding a standalone GT.
+bool TypeLookahead::consumeAngleClose(Cursor& cursor) const {
+    if (cursor.pending > 0) {
+        if (--cursor.pending == 0) ++cursor.pos;
+        return true;
+    }
+    if (cursor.pos >= tokens_.size()) return false;
+    switch (tokens_[cursor.pos].type) {
+        case TokenType::GT:
+            ++cursor.pos;
+            return true;
+        case TokenType::SHR:
+            cursor.pending = 1; // one '>' consumed here, one left in the token
+            return true;
+        case TokenType::USHR:
+            cursor.pending = 2;
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool TypeLookahead::scanTermCursor(Cursor& cursor) const {
+    if (!cursor.atTokenBoundary() || cursor.pos >= tokens_.size()) return false;
+    const TokenType type = tokens_[cursor.pos].type;
 
     if (type == TokenType::KW_ARRAY || type == TokenType::KW_LIST ||
         type == TokenType::KW_SET || type == TokenType::KW_MAP) {
-        ++pos;
-        if (type == TokenType::KW_ARRAY && pos < tokens_.size() &&
-            tokens_[pos].type == TokenType::LBRACKET) {
-            ++pos;
-            if (pos >= tokens_.size() || tokens_[pos].type != TokenType::INT_LITERAL) return -1;
-            ++pos;
-            if (pos >= tokens_.size() || tokens_[pos].type != TokenType::RBRACKET) return -1;
-            ++pos;
+        ++cursor.pos;
+        if (type == TokenType::KW_ARRAY && matches(cursor, TokenType::LBRACKET)) {
+            ++cursor.pos;
+            if (!consume(cursor, TokenType::INT_LITERAL)) return false;
+            if (!consume(cursor, TokenType::RBRACKET)) return false;
         }
-        if (pos >= tokens_.size() || tokens_[pos].type != TokenType::LT) return -1;
-        ++pos;
-
-        long afterFirst = scanAnnotation(pos);
-        if (afterFirst < 0) return -1;
-        pos = static_cast<std::size_t>(afterFirst);
-
+        if (!consume(cursor, TokenType::LT)) return false;
+        if (!scanAnnotationCursor(cursor)) return false;
         if (type == TokenType::KW_MAP) {
-            if (pos >= tokens_.size() || tokens_[pos].type != TokenType::COMMA) return -1;
-            ++pos;
-            long afterSecond = scanAnnotation(pos);
-            if (afterSecond < 0) return -1;
-            pos = static_cast<std::size_t>(afterSecond);
+            if (!consume(cursor, TokenType::COMMA)) return false;
+            if (!scanAnnotationCursor(cursor)) return false;
         }
-
-        if (pos >= tokens_.size() || tokens_[pos].type != TokenType::GT) return -1;
-        return static_cast<long>(pos + 1);
+        return consumeAngleClose(cursor);
     }
 
     if (type == TokenType::KW_VOID) {
-        return static_cast<long>(pos + 1);
+        ++cursor.pos;
+        return true;
     }
 
     if (type == TokenType::KW_FUNC) {
-        ++pos;
+        ++cursor.pos;
         // Bare `func` is an untyped function slot. `func(...) : T` is a
         // complete function type; scan its nested type annotations so a
         // declaration like `func(int, int): int add = ...` is recognized as
         // a typed variable declaration.
-        if (pos >= tokens_.size() || tokens_[pos].type != TokenType::LPAREN) {
-            return static_cast<long>(pos);
-        }
-        ++pos;
-        if (pos < tokens_.size() && tokens_[pos].type != TokenType::RPAREN) {
-            long after = scanAnnotation(pos);
-            if (after < 0) return -1;
-            pos = static_cast<std::size_t>(after);
-            while (pos < tokens_.size() && tokens_[pos].type == TokenType::COMMA) {
-                ++pos;
-                after = scanAnnotation(pos);
-                if (after < 0) return -1;
-                pos = static_cast<std::size_t>(after);
+        if (!matches(cursor, TokenType::LPAREN)) return true;
+        ++cursor.pos;
+        if (!matches(cursor, TokenType::RPAREN)) {
+            if (!scanAnnotationCursor(cursor)) return false;
+            while (consume(cursor, TokenType::COMMA)) {
+                if (!scanAnnotationCursor(cursor)) return false;
             }
         }
-        if (pos >= tokens_.size() || tokens_[pos].type != TokenType::RPAREN) return -1;
-        ++pos;
-        if (pos < tokens_.size() && tokens_[pos].type == TokenType::COLON) {
-            ++pos;
-            pos = static_cast<std::size_t>(scanAnnotation(pos));
-            if (static_cast<long>(pos) < 0) return -1;
+        if (!consume(cursor, TokenType::RPAREN)) return false;
+        if (consume(cursor, TokenType::COLON)) {
+            if (!scanAnnotationCursor(cursor)) return false;
         }
-        return static_cast<long>(pos);
+        return true;
     }
 
-    if (type != TokenType::IDENTIFIER) return -1;
-
-    ++pos;
-    if (pos < tokens_.size() && tokens_[pos].type == TokenType::LT) {
-        ++pos;
-        long afterFirst = scanAnnotation(pos);
-        if (afterFirst < 0) return -1;
-        pos = static_cast<std::size_t>(afterFirst);
-        while (pos < tokens_.size() && tokens_[pos].type == TokenType::COMMA) {
-            ++pos;
-            long afterNext = scanAnnotation(pos);
-            if (afterNext < 0) return -1;
-            pos = static_cast<std::size_t>(afterNext);
+    if (type != TokenType::IDENTIFIER) return false;
+    ++cursor.pos;
+    if (matches(cursor, TokenType::LT)) {
+        ++cursor.pos;
+        if (!scanAnnotationCursor(cursor)) return false;
+        while (consume(cursor, TokenType::COMMA)) {
+            if (!scanAnnotationCursor(cursor)) return false;
         }
-        if (pos >= tokens_.size() || tokens_[pos].type != TokenType::GT) return -1;
-        ++pos;
+        return consumeAngleClose(cursor);
     }
+    return true;
+}
 
-    return static_cast<long>(pos);
+bool TypeLookahead::scanAnnotationCursor(Cursor& cursor) const {
+    if (!scanTermCursor(cursor)) return false;
+    while (consume(cursor, TokenType::BIT_OR)) {
+        if (!scanTermCursor(cursor)) return false;
+    }
+    return true;
 }
 
 long TypeLookahead::scanAnnotation(std::size_t pos) const {
-    long end = scanTerm(pos);
-    if (end < 0) return -1;
-
-    while (static_cast<std::size_t>(end) < tokens_.size() &&
-           tokens_[static_cast<std::size_t>(end)].type == TokenType::BIT_OR) {
-        long next = scanTerm(static_cast<std::size_t>(end) + 1);
-        if (next < 0) return -1;
-        end = next;
-    }
-
-    return end;
+    Cursor cursor{pos, 0};
+    if (!scanAnnotationCursor(cursor)) return -1;
+    // A boundary inside a fused shift token is not a usable token index; the
+    // parser splits such tokens itself when it really parses the annotation.
+    if (!cursor.atTokenBoundary()) return -1;
+    return static_cast<long>(cursor.pos);
 }
 
 } // namespace zl

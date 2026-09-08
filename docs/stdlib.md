@@ -24,13 +24,15 @@ that existed as a flat native before packages did: `Math`, `String`, `IO`, `Coll
 
 Everything else requires an explicit `import` — see [packages.md](packages.md).
 
-Beyond `zl.lang`, the bundled packages include reference queue and stack utilities
+Beyond `zl.lang`, the bundled packages include typed queue and stack collections
 (`zl.util.Queue`, `zl.util.Stack`), text and time helpers, task/channel/thread facades,
-serialization, filesystem access, and a small portable DNS network facade.
+serialization, filesystem access, hashing/encoding, logging, and a small portable DNS
+network facade.
 
 ## Generic collections
 
-`List<T>`, `Map<K,V>`, and `Set<T>` are ZL classes over native storage primitives.
+`List<T>`, `Map<K,V>`, `Set<T>`, `Queue<T>` and `Stack<T>` are ZL classes over native
+storage primitives.
 Their methods are compiled once; each invocation carries the receiver's concrete
 type bindings. Typed literals and collections built by methods such as `transform`,
 `filter`, `reversed`, `keys`, and `values` retain those bindings, including nested
@@ -148,6 +150,12 @@ Text.regexReplace("a1b2", "[0-9]", "X")
 
 Convenience and composition methods are ZL-owned. `String.*` remains the low-level
 native string boundary; the regex and formatting engines stay native.
+
+`Text.*` is the single spelling for the regex operations — `regexMatches`,
+`regexFullMatches`, `regexFindAll`, `regexFindMatches`, `regexFind` and
+`regexReplace`. Earlier releases also exposed four of these as `String.regex*`
+aliases bound to the very same callbacks; those duplicates have been removed so
+each operation has exactly one name.
 
 Indices and lengths are **bytes, not characters**. `Text.length("héllo")` is `6`,
 because `é` is two UTF-8 bytes, and `charAt` / `substring` / `indexOf` index on the

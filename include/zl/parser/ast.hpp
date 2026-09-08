@@ -664,6 +664,11 @@ struct LambdaExpr : AstNode {
     mutable std::vector<std::string> inferredParameterTypeNames;
     // The body result; isAsync wraps it in Task<T> at the call boundary.
     mutable std::string inferredReturnTypeName;
+    // Optional `func(params): T => ...` annotation. When present the body's
+    // inferred result must be assignable to it, so a lambda can state its
+    // contract the same way a named func does.
+    bool hasDeclaredReturnType{false};
+    TypeAnnotation declaredReturnType;
     LambdaExpr() : AstNode(NodeKind::LambdaExpr) {}
 };
 

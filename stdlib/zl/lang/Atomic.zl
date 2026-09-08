@@ -1,3 +1,45 @@
-// Atomic synchronization primitive.
+// zl.lang.Atomic - lock-free atomic cell.
+//
+// Create one with `new Atomic()`; it starts at 0 / false / 0.0 / nil depending
+// on which accessor family you use. Each cell holds ONE value; the int, bool,
+// double and ref families address the same underlying slot, so pick one family
+// per cell and stay with it.
+//
+// The natives (load, store, add, loadBool, storeBool, loadDouble, storeDouble,
+// loadRef, storeRef) are sequentially consistent and safe under contention.
 class Atomic {
+    // --- Construction with an initial value --------------------------------
+
+    public static func ofInt(int value): Atomic {
+        var cell = new Atomic()
+        Atomic.store(cell, value)
+        return cell
+    }
+
+    public static func ofBool(bool value): Atomic {
+        var cell = new Atomic()
+        Atomic.storeBool(cell, value)
+        return cell
+    }
+
+    public static func ofDouble(double value): Atomic {
+        var cell = new Atomic()
+        Atomic.storeDouble(cell, value)
+        return cell
+    }
+
+    // --- Counter conveniences -----------------------------------------------
+    // Each returns the value AFTER the update, matching Atomic.add.
+
+    public static func increment(Atomic cell): int { return Atomic.add(cell, 1) }
+    public static func decrement(Atomic cell): int { return Atomic.add(cell, -1) }
+    public static func reset(Atomic cell): void { Atomic.store(cell, 0) }
+
+    public static func toggle(Atomic cell): bool {
+        // Not atomic as a whole: two threads toggling concurrently can lose an
+        // update. Use it only when a single thread owns the flag's transitions.
+        var next = !Atomic.loadBool(cell)
+        Atomic.storeBool(cell, next)
+        return next
+    }
 }

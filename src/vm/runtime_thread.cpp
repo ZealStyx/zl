@@ -52,6 +52,17 @@ void RuntimeThreadState::join() {
         local = std::move(worker_->thread);
     }
     local.join();
+
+    // The worker captured any uncaught exception rather than letting it escape
+    // its entry point (which would call std::terminate). Rethrow it here so
+    // the joining thread sees a normal, catchable failure.
+    std::lock_guard<std::mutex> failureLock(*failureMutex_);
+    if (*failure_) failure_->rethrow();
+}
+
+std::shared_ptr<StoredException> RuntimeThreadState::failure() const {
+    std::lock_guard<std::mutex> lock(*failureMutex_);
+    return failure_;
 }
 
 bool RuntimeThreadState::isAlive() const noexcept {

@@ -1,0 +1,132 @@
+// zl.time.Calendar - pure civil-calendar arithmetic.
+//
+// This is the leaf of the zl.time package: it depends on nothing but the
+// native clock primitives, so both Time and the Date/DateTime value classes
+// can build on it without an import cycle.
+//
+// Everything here is CALENDAR arithmetic, not elapsed-time arithmetic. Adding
+// a day preserves the local wall-clock time even when that day is 23 or 25
+// hours long because of a daylight-saving transition. Code that genuinely
+// wants "24 hours later" should add seconds instead.
+class Calendar {
+    // --- Civil-day numbering ------------------------------------------------
+    // Days since 1970-01-01 in the proleptic Gregorian calendar, using
+    // Howard Hinnant's days_from_civil algorithm. Valid well outside the
+    // range any 64-bit timestamp can express, including pre-epoch dates.
+
+    public static func civilToDays(int year, int month, int day): int {
+        var y = year
+        if (month <= 2) { y = y - 1 }
+        var era = y / 400
+        if (y < 0) { era = (y - 399) / 400 }
+        var yoe = y - era * 400
+        var mp = (month + 9) % 12
+        var doy = (153 * mp + 2) / 5 + day - 1
+        var doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        return era * 146097 + doe - 719468
+    }
+
+    // Inverse of civilToDays, re-anchored to a local wall-clock time.
+    public static func fromDayNumber(int dayNumber, int hour, int minute, int second): int {
+        var z = dayNumber + 719468
+        var era = z / 146097
+        if (z < 0) { era = (z - 146096) / 146097 }
+        var doe = z - era * 146097
+        var yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+        var y = yoe + era * 400
+        var doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+        var mp = (5 * doy + 2) / 153
+        var d = doy - (153 * mp + 2) / 5 + 1
+        var m = mp + 3
+        if (mp >= 10) { m = mp - 9 }
+        if (m <= 2) { y = y + 1 }
+        return Time.fromParts(y, m, d, hour, minute, second)
+    }
+
+    public static func dayNumber(int timestamp): int {
+        return Calendar.civilToDays(Time.year(timestamp), Time.month(timestamp), Time.day(timestamp))
+    }
+
+    // --- Calendar arithmetic --------------------------------------------------
+
+    public static func addDays(int timestamp, int days): int {
+        return Calendar.fromDayNumber(Calendar.dayNumber(timestamp) + days,
+                                      Time.hour(timestamp), Time.minute(timestamp), Time.second(timestamp))
+    }
+
+    public static func addWeeks(int timestamp, int weeks): int {
+        return Calendar.addDays(timestamp, weeks * 7)
+    }
+
+    // Adds whole months, clamping the day to the target month's length, so
+    // Jan 31 + 1 month is Feb 28 (or Feb 29 in a leap year), never Mar 3.
+    public static func addMonths(int timestamp, int months): int {
+        var total = (Time.year(timestamp) * 12) + (Time.month(timestamp) - 1) + months
+        var year = total / 12
+        var month = (total % 12) + 1
+        if (month < 1) { month = month + 12 year = year - 1 }
+        var day = Time.day(timestamp)
+        var limit = Calendar.daysInMonth(year, month)
+        if (day > limit) { day = limit }
+        return Time.fromParts(year, month, day, Time.hour(timestamp), Time.minute(timestamp), Time.second(timestamp))
+    }
+
+    public static func addYears(int timestamp, int years): int {
+        return Calendar.addMonths(timestamp, years * 12)
+    }
+
+    // Whole calendar days between two local dates.
+    public static func diffDays(int a, int b): int {
+        return Calendar.dayNumber(b) - Calendar.dayNumber(a)
+    }
+
+    // --- Day boundaries -----------------------------------------------------------
+
+    public static func startOfDay(int timestamp): int {
+        return Time.fromParts(Time.year(timestamp), Time.month(timestamp), Time.day(timestamp), 0, 0, 0)
+    }
+
+    // Derived from the next day's midnight, so it stays on the correct date
+    // even when the day is 23 or 25 hours long.
+    public static func endOfDay(int timestamp): int {
+        return Calendar.startOfDay(Calendar.addDays(timestamp, 1)) - 1
+    }
+
+    public static func isSameDay(int a, int b): bool {
+        return Calendar.dayNumber(a) == Calendar.dayNumber(b)
+    }
+
+    // --- Calendar facts ---------------------------------------------------------------
+
+    public static func daysInMonth(int year, int month): int {
+        if (month == 2) {
+            if (Time.isLeapYear(year)) { return 29 }
+            return 28
+        }
+        if (month == 4 || month == 6 || month == 9 || month == 11) { return 30 }
+        return 31
+    }
+
+    public static func isWeekend(int timestamp): bool {
+        var day = Time.dayOfWeek(timestamp)
+        return day == 0 || day == 6
+    }
+
+    public static func weekdayName(int timestamp): string {
+        List<string> names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+        return names.get(Time.dayOfWeek(timestamp))
+    }
+
+    public static func monthName(int timestamp): string {
+        List<string> names = ["January", "February", "March", "April", "May", "June",
+                              "July", "August", "September", "October", "November", "December"]
+        return names.get(Time.month(timestamp) - 1)
+    }
+
+    // --- Standard renderings ------------------------------------------------------------
+
+    public static func isoDate(int timestamp): string { return Time.format(timestamp, "YYYY-MM-DD") }
+    public static func isoTime(int timestamp): string { return Time.format(timestamp, "HH:mm:ss") }
+    public static func isoDateTime(int timestamp): string { return Time.format(timestamp, "YYYY-MM-DD HH:mm:ss") }
+    public static func isoUtc(int timestamp): string { return Time.utcFormat(timestamp, "YYYY-MM-DDTHH:mm:ssZ") }
+}

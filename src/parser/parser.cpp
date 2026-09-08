@@ -775,8 +775,24 @@ TypeAnnotation Parser::parseTypeAnnotation() {
 
 bool Parser::looksLikeTypedDeclStart() const {
     if (check(TokenType::KW_GC) || check(TokenType::KW_OWNED) ||
-        check(TokenType::KW_BORROW) || check(TokenType::KW_SHARED)) {
+        check(TokenType::KW_BORROW)) {
         return true;
+    }
+    // `shared` is both an ownership modifier and a legal identifier (see
+    // parseVarDecl, which accepts it as a variable name). A declaration needs
+    // a type after the modifier, so `shared int x` is a declaration while
+    // `shared.push(1)` or `shared = 2` is ordinary use of a variable called
+    // `shared`. Requiring the following token to start a type keeps both
+    // readings working.
+    if (check(TokenType::KW_SHARED)) {
+        if (pos_ + 1 >= tokens_.size()) return false;
+        const auto next = tokens_[pos_ + 1].type;
+        if (next == TokenType::IDENTIFIER || next == TokenType::KW_ARRAY ||
+            next == TokenType::KW_LIST || next == TokenType::KW_SET ||
+            next == TokenType::KW_MAP || next == TokenType::KW_FUNC) {
+            return true;
+        }
+        return false;
     }
     if (check(TokenType::KW_ARRAY) || check(TokenType::KW_LIST) ||
         check(TokenType::KW_SET) || check(TokenType::KW_MAP)) {

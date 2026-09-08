@@ -1,3 +1,16 @@
-// Scoped mutex synchronization primitive.
+// zl.lang.Mutex - scoped mutual exclusion.
+//
+// Create one with `new Mutex()`. The native Mutex.withLock takes a
+// zero-argument func and holds the lock for its duration, releasing it even
+// when the body throws. There is deliberately no bare lock/unlock pair, so a
+// lock cannot be leaked by an early return or an exception.
 class Mutex {
+    public static func create(): Mutex {
+        return new Mutex()
+    }
+
+    // Runs `body` under the lock and returns its result.
+    public static func guard(Mutex lock, func body): unknown {
+        return Mutex.withLock(lock, body)
+    }
 }

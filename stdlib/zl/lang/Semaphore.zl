@@ -1,3 +1,45 @@
-// Counting semaphore synchronization primitive.
+// zl.lang.Semaphore - counting semaphore.
+//
+// A Semaphore object carries native state; create one with `new Semaphore()`.
+// It starts with ZERO permits, so call `Semaphore.setPermits(sem, n)` (or the
+// `withPermits` helper below) before any acquire, otherwise acquire blocks
+// forever by definition.
+//
+// The natives acquire, tryAcquire, release, releaseMany, setPermits and
+// available resolve by qualified name and are the synchronization boundary.
 class Semaphore {
+    // Constructs a semaphore already carrying `permits` permits - the form
+    // you almost always want, since the default is zero.
+    public static func withPermits(int permits): Semaphore {
+        var sem = new Semaphore()
+        Semaphore.setPermits(sem, permits)
+        return sem
+    }
+
+    // Runs `body` while holding one permit, releasing it even if `body`
+    // throws. This is the safe way to use a semaphore: a bare
+    // acquire/release pair leaks a permit on any early exit.
+    public static func withPermit(Semaphore sem, func body): unknown {
+        Semaphore.acquire(sem)
+        try {
+            return body()
+        } finally {
+            Semaphore.release(sem)
+        }
+    }
+
+    // Non-blocking variant. Returns `fallback` without running `body` when no
+    // permit is currently available.
+    public static func tryWithPermit(Semaphore sem, func body, unknown fallback): unknown {
+        if (!Semaphore.tryAcquire(sem)) { return fallback }
+        try {
+            return body()
+        } finally {
+            Semaphore.release(sem)
+        }
+    }
+
+    public static func isExhausted(Semaphore sem): bool {
+        return Semaphore.available(sem) <= 0
+    }
 }

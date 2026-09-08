@@ -1,4 +1,66 @@
+import zl.text.Text
 // zl.net.Network - portable DNS/network discovery facade.
+//
+// resolve, resolveAll, hostname and isValidIp are native primitives resolved
+// by qualified name. This facade adds only safe fallbacks and small
+// classifications on top of them; ZL does not yet own sockets or transports.
 class Network {
     public static func lookup(string host): string { return Network.resolve(host) }
+
+    public static func lookupOr(string host, string fallback): string {
+        try { return Network.resolve(host) } catch Exception e { return fallback }
+    }
+
+    // Every distinct numeric address for `host`, or an empty list on failure.
+    public static func lookupAllOrEmpty(string host): List<string> {
+        var result = new List<string>()
+        try {
+            var raw = Network.resolveAll(host)
+            for i in 0..Collection.length(raw) {
+                result.push(Collection.get(raw, i))
+            }
+        } catch Exception e {
+            return result
+        }
+        return result
+    }
+
+    public static func isResolvable(string host): bool {
+        try {
+            Network.resolve(host)
+            return true
+        } catch Exception e {
+            return false
+        }
+    }
+
+    // --- Address classification ----------------------------------------------
+    // Literal inspection only; none of these send traffic.
+
+    public static func isIpv4(string address): bool {
+        return Network.isValidIp(address) && String.contains(address, ".")
+    }
+
+    public static func isIpv6(string address): bool {
+        return Network.isValidIp(address) && String.contains(address, ":")
+    }
+
+    public static func isLoopback(string address): bool {
+        return address == "::1" || Text.startsWith(address, "127.")
+    }
+
+    // RFC1918 / link-local ranges plus the IPv6 unique-local prefix.
+    public static func isPrivate(string address): bool {
+        if (Text.startsWith(address, "10.")) { return true }
+        if (Text.startsWith(address, "192.168.")) { return true }
+        if (Text.startsWith(address, "169.254.")) { return true }
+        if (Text.startsWith(address, "fc") || Text.startsWith(address, "fd")) { return true }
+        if (Text.startsWith(address, "172.")) {
+            var parts = Text.split(address, ".")
+            if (parts.length() < 2) { return false }
+            var second = String.toInt(parts.get(1))
+            return second >= 16 && second <= 31
+        }
+        return false
+    }
 }
