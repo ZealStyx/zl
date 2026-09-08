@@ -35,6 +35,13 @@ public:
                                                         const std::vector<ResolvedTypeArg>& typeArgs,
                                                         std::size_t line);
 
+    // Rebuilds every generic instantiation created so far. Shapes are filled
+    // in declaration order, so an instantiation requested while resolving an
+    // early class's signature can be built from a template whose own members
+    // are not registered yet. Calling this once all shapes exist makes those
+    // instantiations independent of declaration order.
+    void refreshInstantiations();
+
     [[nodiscard]] bool isCurrentGenericTypeParam(const std::string& name,
                                                   const std::vector<std::string>& currentClassTypeParams) const;
 
@@ -47,6 +54,9 @@ private:
     std::unordered_map<std::string, std::vector<ResolvedTypeArg>> unions_;
     std::unordered_map<GenericInstantiation, std::string, GenericInstantiationHash> genericInstantiationCache_;
     std::unordered_map<std::string, GenericInstantiation> genericInstantiationByName_;
+    // Set only while refreshInstantiations() runs, so an already-registered
+    // instantiated shape is rebuilt rather than reused.
+    bool rebuilding_{false};
 };
 
 } // namespace zl

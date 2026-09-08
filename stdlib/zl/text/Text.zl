@@ -95,4 +95,200 @@ class Text {
         }
         return result
     }
+
+    // --- Splitting ---------------------------------------------------------
+    // String.split returns the native list<string>; these return List<string>
+    // so the result composes with the rest of the collection API.
+
+    public static func split(string value, string separator): List<string> {
+        var result = new List<string>()
+        var raw = String.split(value, separator)
+        for i in 0..Collection.length(raw) {
+            result.push(Collection.get(raw, i))
+        }
+        return result
+    }
+
+    // A trailing newline terminates the last line rather than starting an
+    // empty one, matching FileSystem.readLines.
+    public static func lines(string value): List<string> {
+        var result = Text.split(Text.replace(value, "\r\n", "\n"), "\n")
+        if (result.length() > 0 && result.last() == "") { result.pop() }
+        return result
+    }
+
+    // Splits on runs of whitespace and drops empty fragments.
+    public static func words(string value): List<string> {
+        var result = new List<string>()
+        var current = ""
+        for i in 0..String.length(value) {
+            var c = String.charAt(value, i)
+            if (c == " " || c == "\t" || c == "\n" || c == "\r") {
+                if (current != "") { result.push(current) }
+                current = ""
+            } else {
+                current = current + c
+            }
+        }
+        if (current != "") { result.push(current) }
+        return result
+    }
+
+    public static func chars(string value): List<string> {
+        var result = new List<string>()
+        for i in 0..String.length(value) {
+            result.push(String.charAt(value, i))
+        }
+        return result
+    }
+
+    // --- Trimming and affixes ----------------------------------------------
+
+    public static func trimStart(string value): string { return String.trimStart(value) }
+    public static func trimEnd(string value): string { return String.trimEnd(value) }
+
+    public static func removePrefix(string value, string prefix): string {
+        if (!Text.startsWith(value, prefix)) { return value }
+        return String.substring(value, String.length(prefix), String.length(value))
+    }
+
+    public static func removeSuffix(string value, string suffix): string {
+        if (!Text.endsWith(value, suffix)) { return value }
+        return String.substring(value, 0, String.length(value) - String.length(suffix))
+    }
+
+    public static func ensurePrefix(string value, string prefix): string {
+        if (Text.startsWith(value, prefix)) { return value }
+        return prefix + value
+    }
+
+    public static func ensureSuffix(string value, string suffix): string {
+        if (Text.endsWith(value, suffix)) { return value }
+        return value + suffix
+    }
+
+    // --- Searching ----------------------------------------------------------
+
+    public static func lastIndexOf(string value, string needle): int { return String.lastIndexOf(value, needle) }
+    public static func indexOfFrom(string value, string needle, int start): int {
+        return String.indexOfFrom(value, needle, start)
+    }
+
+    public static func indicesOf(string value, string needle): List<int> {
+        var result = new List<int>()
+        if (String.length(needle) == 0) { return result }
+        var from = 0
+        while (from <= String.length(value) - String.length(needle)) {
+            var found = String.indexOfFrom(value, needle, from)
+            if (found < 0) { return result }
+            result.push(found)
+            from = found + String.length(needle)
+        }
+        return result
+    }
+
+    public static func containsAny(string value, List<string> needles): bool {
+        for i in 0..needles.length() {
+            if (String.contains(value, needles.get(i))) { return true }
+        }
+        return false
+    }
+
+    // --- Comparison ---------------------------------------------------------
+
+    // -1 / 0 / 1, usable directly as a sort comparator input.
+    public static func compare(string a, string b): int { return String.compare(a, b) }
+    public static func compareIgnoreCase(string a, string b): int { return String.compareIgnoreCase(a, b) }
+    public static func equalsIgnoreCase(string a, string b): bool { return String.compareIgnoreCase(a, b) == 0 }
+    public static func containsIgnoreCase(string value, string needle): bool {
+        return String.contains(String.lower(value), String.lower(needle))
+    }
+    public static func startsWithIgnoreCase(string value, string prefix): bool {
+        return Text.startsWith(String.lower(value), String.lower(prefix))
+    }
+    public static func endsWithIgnoreCase(string value, string suffix): bool {
+        return Text.endsWith(String.lower(value), String.lower(suffix))
+    }
+
+    // --- Case helpers --------------------------------------------------------
+
+    public static func capitalize(string value): string {
+        if (String.length(value) == 0) { return value }
+        return String.upper(String.charAt(value, 0)) + String.substring(value, 1, String.length(value))
+    }
+
+    public static func title(string value): string {
+        var parts = Text.words(value)
+        var result = new List<string>()
+        for i in 0..parts.length() {
+            result.push(Text.capitalize(String.lower(parts.get(i))))
+        }
+        return Text.join(result, " ")
+    }
+
+    // --- Slicing and padding --------------------------------------------------
+
+    // Clamps to the string's bounds instead of throwing, unlike substring.
+    public static func slice(string value, int start, int end): string {
+        var from = start
+        var to = end
+        if (from < 0) { from = 0 }
+        if (to > String.length(value)) { to = String.length(value) }
+        if (to <= from) { return "" }
+        return String.substring(value, from, to)
+    }
+
+    public static func take(string value, int count): string { return Text.slice(value, 0, count) }
+    public static func drop(string value, int count): string { return Text.slice(value, count, String.length(value)) }
+
+    public static func padCenter(string value, int width, string fill): string {
+        var missing = width - String.length(value)
+        if (missing <= 0) { return value }
+        var left = missing / 2
+        return Text.padRight(Text.padLeft(value, String.length(value) + left, fill), width, fill)
+    }
+
+    public static func truncate(string value, int width, string ellipsis): string {
+        if (String.length(value) <= width) { return value }
+        if (width <= String.length(ellipsis)) { return Text.take(ellipsis, width) }
+        return Text.take(value, width - String.length(ellipsis)) + ellipsis
+    }
+
+    // --- Characters ------------------------------------------------------------
+
+    public static func codePointAt(string value, int index): int { return String.codePointAt(value, index) }
+    public static func fromCodePoint(int code): string { return String.fromCodePoint(code) }
+
+    public static func isDigits(string value): bool {
+        if (String.length(value) == 0) { return false }
+        for i in 0..String.length(value) {
+            var code = String.codePointAt(value, i)
+            if (code < 48 || code > 57) { return false }
+        }
+        return true
+    }
+
+    public static func isAlpha(string value): bool {
+        if (String.length(value) == 0) { return false }
+        for i in 0..String.length(value) {
+            var code = String.codePointAt(value, i)
+            var upper = code >= 65 && code <= 90
+            var lower = code >= 97 && code <= 122
+            if (!upper && !lower) { return false }
+        }
+        return true
+    }
+
+    // --- Formatting --------------------------------------------------------------
+    // Text.format(pattern, list) is the native primitive and stays as-is.
+    // This variant takes a List<string> so results of Text.split/words feed
+    // straight into it without an unwrapping step.
+
+    public static func formatAll(string pattern, List<string> values): string {
+        var raw = Collection.newList()
+        for i in 0..values.length() {
+            Collection.push(raw, values.get(i))
+        }
+        return Text.format(pattern, raw)
+    }
 }

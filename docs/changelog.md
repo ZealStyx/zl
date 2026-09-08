@@ -2,6 +2,70 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-08 — Typed runtime exceptions, stdlib expansion, generic-resolution fixes
+
+### Runtime failure behaviour
+
+Runtime failures raised inside the VM are now real ZL exception objects and are
+catchable by type. A new `ZlRuntimeFault` carries the intended class from the
+throw site; the interpreter loop converts it at the failing frame, preserving
+the message and stack trace, and rethrows it as an ordinary thrown exception.
+Plain `std::runtime_error` from VM internals becomes `RuntimeError` rather than
+escaping uncatchably.
+
+The exception hierarchy is now `Exception` → `RuntimeError` →
+`{TypeError, IndexError, KeyError, ArithmeticError, StackOverflowError,
+IOError, NativeError, RegexError}`. Arithmetic faults, index and key errors,
+type-assertion failures, filesystem failures and the call-depth limit all raise
+their specific class, and a native that chooses a class keeps it instead of
+being flattened into `NativeError`.
+
+### Compiler and type system
+
+- Nested generic declarations such as `List<List<int>> x = ...` parse; the type
+  lookahead splits fused `>>` and `>>>` closers.
+- A generic body may name its own uninstantiated form (`Map<K,V>` inside
+  `class Map<K,V>`) in parameters, returns and locals. `this` types as the
+  self-parameterized form, and access control treats the template and that form
+  as the same declaring class.
+- Fixed a declaration-order bug where a generic instantiation appearing only in
+  another class's signature (very often `List<string>` returned from an
+  imported class) resolved to a key with no registered shape and appeared to
+  have no methods. Self-reference deferral is now restricted to generic bodies,
+  and all instantiations are rebuilt once every class shape exists.
+
+### Standard library
+
+Collections gained substantial query, search, bulk-edit and set-algebra
+coverage: `List` added 25 operations including `find`, `findIndex`,
+`lastIndexOf`, `distinct`, `takeWhile`, `dropWhile`, `removeWhere`,
+`removeRange`, `sorted`, `binarySearch`, `minBy`, `maxBy`, `fold` and
+`equalsList`; `Map` added `getOrPut`, `putAll`, `copy`, `keyOf`, `filterKeys`,
+`removeWhere` and friends; `Set` added `symmetricDifference`, `retainAll`,
+`isSupersetOf`, `isDisjointFrom`, `filter` and `copy`.
+
+New native primitives back the systems-facing libraries: 17 filesystem
+operations (path decomposition, metadata, directory create/remove, copy,
+rename), process/environment access (`execStatus`, `setEnv`, `hasEnv`,
+`envOr`, `platform`), string search and comparison (`lastIndexOf`,
+`indexOfFrom`, `trimStart`, `trimEnd`, `compare`, `compareIgnoreCase`),
+calendar and monotonic time (`fromParts`, `dayOfWeek`, `isLeapYear`,
+`utcFormat`, `monotonicMillis`), hashing and encoding (`sha1`, `md5`,
+`fnv1a64`, hex and base64 codecs), DNS (`resolveAll`, `hostname`,
+`isValidIp`) and the `trace`/`debug`/`fatal`/`at` log levels.
+
+The `zl.fs`, `zl.text`, `zl.time`, `zl.serialize`, `zl.net`, `zl.crypto` and
+`zl.logging` facades were rewritten on top of those primitives. They add
+composition, safe fallbacks and honest units — calendar-correct date
+arithmetic, `List<string>`-returning text splitting, typed JSON field
+extraction — without re-wrapping any native that qualified-name resolution
+already provides. `Crypto` documents the real strength of each digest and
+still invents no cryptography.
+
+**Validation:** fresh build; 49/49 examples pass; `tests/type_boundaries.py`
+passes; typed-exception, collection, filesystem, text, time, serialization,
+crypto and network probes all verified against known-good values.
+
 ## 2026-09-04 — Phase 17: native runtime integration and optimization groundwork
 
 Completed the next two Phase 17 objectives.

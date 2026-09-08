@@ -1,6 +1,48 @@
+import zl.serialize.Serialize
 // zl.logging.Log - structured logging facade.
+//
+// trace/debug/info/warn/error/fatal and at(level, value) are native
+// primitives; error and fatal go to stderr, everything else to stdout. This
+// facade adds composition helpers rather than duplicating the levels.
 class Log {
     public static func infoLine(unknown value): void { Log.info(value) }
     public static func warnLine(unknown value): void { Log.warn(value) }
     public static func errorLine(unknown value): void { Log.error(value) }
+
+    // --- Contextual logging ---------------------------------------------------
+
+    // Prefixes the message with a component/subsystem tag.
+    public static func tagged(string level, string tag, unknown value): void {
+        Log.at(level, "[" + tag + "] " + Serialize.encode(value))
+    }
+
+    public static func infoTagged(string tag, unknown value): void { Log.tagged("info", tag, value) }
+    public static func warnTagged(string tag, unknown value): void { Log.tagged("warn", tag, value) }
+    public static func errorTagged(string tag, unknown value): void { Log.tagged("error", tag, value) }
+
+    // --- Conditional logging ----------------------------------------------------
+
+    public static func when(bool condition, string level, unknown value): void {
+        if (condition) { Log.at(level, value) }
+    }
+
+    // --- Exceptions ---------------------------------------------------------------
+
+    // Logs an exception's class-appropriate message at error level. The
+    // stack trace stays with the exception object; this only reports it.
+    public static func exception(string context, Exception error): void {
+        Log.error(context + ": " + error.message)
+    }
+
+    // --- Structured key/value lines ---------------------------------------------------
+
+    // Renders "key=value key=value" in the map's key order.
+    public static func fields(string level, string message, Map<string, string> values): void {
+        var line = message
+        var keys = values.keys()
+        for i in 0..keys.length() {
+            line = line + " " + keys.get(i) + "=" + values.get(keys.get(i))
+        }
+        Log.at(level, line)
+    }
 }

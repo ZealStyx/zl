@@ -1,13 +1,167 @@
 // zl.serialize.Serialize - ZL-owned conversion policy over the native JSON engine.
+//
+// encode/decode and the asString/asInt/asDouble/asBool accessors are native
+// primitives resolved by qualified name. This facade adds naming, safe
+// fallbacks, and typed extraction from decoded structures.
+//
+// Decoded JSON arrives as `unknown` holding native list/map/scalar values.
+// The accessors below are the supported way to narrow it; they either return
+// a typed value or take an explicit fallback. Nothing here silently coerces.
 class Serialize {
+    // --- Core naming --------------------------------------------------------
+
     public static func stringify(unknown value): string { return Serialize.encode(value) }
     public static func parse(string value): unknown { return Serialize.decode(value) }
+
+    // --- Strict scalar narrowing ---------------------------------------------
+    // These throw a TypeError when the value is not the requested type.
+
     public static func string(unknown value): string { return Serialize.asString(value) }
     public static func integer(unknown value): int { return Serialize.asInt(value) }
     public static func number(unknown value): double { return Serialize.asDouble(value) }
     public static func boolean(unknown value): bool { return Serialize.asBool(value) }
-    public static func stringOr(unknown value, string fallback): string { try { return Serialize.asString(value) } catch e { return fallback } }
-    public static func integerOr(unknown value, int fallback): int { try { return Serialize.asInt(value) } catch e { return fallback } }
-    public static func numberOr(unknown value, double fallback): double { try { return Serialize.asDouble(value) } catch e { return fallback } }
-    public static func booleanOr(unknown value, bool fallback): bool { try { return Serialize.asBool(value) } catch e { return fallback } }
+
+    // --- Scalar narrowing with fallbacks ---------------------------------------
+
+    public static func stringOr(unknown value, string fallback): string {
+        try { return Serialize.asString(value) } catch Exception e { return fallback }
+    }
+    public static func integerOr(unknown value, int fallback): int {
+        try { return Serialize.asInt(value) } catch Exception e { return fallback }
+    }
+    public static func numberOr(unknown value, double fallback): double {
+        try { return Serialize.asDouble(value) } catch Exception e { return fallback }
+    }
+    public static func booleanOr(unknown value, bool fallback): bool {
+        try { return Serialize.asBool(value) } catch Exception e { return fallback }
+    }
+
+    // --- Round-trip safety -----------------------------------------------------
+
+    public static func stringifyOr(unknown value, string fallback): string {
+        try { return Serialize.encode(value) } catch Exception e { return fallback }
+    }
+
+    public static func parseOr(string value, unknown fallback): unknown {
+        try { return Serialize.decode(value) } catch Exception e { return fallback }
+    }
+
+    public static func isValidJson(string value): bool {
+        try {
+            Serialize.decode(value)
+            return true
+        } catch Exception e {
+            return false
+        }
+    }
+
+    // --- Type inspection ---------------------------------------------------------
+
+    public static func isString(unknown value): bool {
+        try { Serialize.asString(value) return true } catch Exception e { return false }
+    }
+    public static func isInt(unknown value): bool {
+        try { Serialize.asInt(value) return true } catch Exception e { return false }
+    }
+    public static func isNumber(unknown value): bool {
+        try { Serialize.asDouble(value) return true } catch Exception e { return false }
+    }
+    public static func isBool(unknown value): bool {
+        try { Serialize.asBool(value) return true } catch Exception e { return false }
+    }
+
+    // --- Structured access -----------------------------------------------------------
+    // Decoded objects and arrays are native maps and lists, so Collection.*
+    // is the correct boundary for reaching into them.
+
+    public static func hasField(unknown object, string key): bool {
+        try { return Collection.mapHas(object, key) } catch Exception e { return false }
+    }
+
+    public static func field(unknown object, string key, unknown fallback): unknown {
+        try {
+            if (!Collection.mapHas(object, key)) { return fallback }
+            return Collection.mapGet(object, key)
+        } catch Exception e {
+            return fallback
+        }
+    }
+
+    public static func stringField(unknown object, string key, string fallback): string {
+        return Serialize.stringOr(Serialize.field(object, key, fallback), fallback)
+    }
+    public static func intField(unknown object, string key, int fallback): int {
+        return Serialize.integerOr(Serialize.field(object, key, fallback), fallback)
+    }
+    public static func numberField(unknown object, string key, double fallback): double {
+        return Serialize.numberOr(Serialize.field(object, key, fallback), fallback)
+    }
+    public static func boolField(unknown object, string key, bool fallback): bool {
+        return Serialize.booleanOr(Serialize.field(object, key, fallback), fallback)
+    }
+
+    // Element count of a decoded array or object; 0 for anything else.
+    public static func lengthOr(unknown value, int fallback): int {
+        try { return Collection.length(value) } catch Exception e { return fallback }
+    }
+
+    public static func element(unknown items, int index, unknown fallback): unknown {
+        try {
+            if (index < 0 || index >= Collection.length(items)) { return fallback }
+            return Collection.get(items, index)
+        } catch Exception e {
+            return fallback
+        }
+    }
+
+    // --- Typed list extraction --------------------------------------------------------
+    // Non-conforming elements are skipped rather than aborting the whole
+    // conversion, so a partially-valid payload still yields its good rows.
+
+    public static func stringList(unknown items): List<string> {
+        var result = new List<string>()
+        var count = Serialize.lengthOr(items, 0)
+        for i in 0..count {
+            var item = Serialize.element(items, i, "")
+            if (Serialize.isString(item)) { result.push(Serialize.asString(item)) }
+        }
+        return result
+    }
+
+    public static func intList(unknown items): List<int> {
+        var result = new List<int>()
+        var count = Serialize.lengthOr(items, 0)
+        for i in 0..count {
+            var item = Serialize.element(items, i, 0)
+            if (Serialize.isInt(item)) { result.push(Serialize.asInt(item)) }
+        }
+        return result
+    }
+
+    // --- Typed list encoding -----------------------------------------------------------
+
+    public static func encodeStringList(List<string> values): string {
+        var raw = Collection.newList()
+        for i in 0..values.length() {
+            Collection.push(raw, values.get(i))
+        }
+        return Serialize.encode(raw)
+    }
+
+    public static func encodeIntList(List<int> values): string {
+        var raw = Collection.newList()
+        for i in 0..values.length() {
+            Collection.push(raw, values.get(i))
+        }
+        return Serialize.encode(raw)
+    }
+
+    public static func encodeStringMap(Map<string, string> values): string {
+        var raw = Collection.newMap()
+        var keys = values.keys()
+        for i in 0..keys.length() {
+            Collection.mapSet(raw, keys.get(i), values.get(keys.get(i)))
+        }
+        return Serialize.encode(raw)
+    }
 }

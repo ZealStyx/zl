@@ -1,6 +1,61 @@
-// zl.crypto.Crypto - native cryptographic/hash primitives.
-// Higher-level protocols should remain in ZL and use these primitives.
+// zl.crypto.Crypto - ZL-owned naming over native hash and encoding primitives.
+//
+// The natives (crc32, sha1, sha256, md5, fnv1a64, hexEncode, hexDecode,
+// base64Encode, base64Decode) are the implementation and resolve by qualified
+// name; nothing here reimplements a primitive. ZL deliberately does not invent
+// cryptography: no ciphers, no key exchange, no signature schemes.
+//
+// Strength guidance, stated honestly:
+//   - sha256          : the only digest here suitable for integrity/security.
+//   - sha1, md5       : legacy interoperability ONLY. Both are broken against
+//                       collision attacks. Never use them for security.
+//   - crc32, fnv1a64  : non-cryptographic checksums for bucketing and change
+//                       detection. Trivially forgeable.
 class Crypto {
-    public static func hash32(string value): string { return Crypto.crc32(value) }
+    // --- Recommended digest --------------------------------------------------
+
     public static func digest256(string value): string { return Crypto.sha256(value) }
+
+    // Hex-encodes then digests, so binary-ish payloads hash unambiguously.
+    public static func digest256Hex(string value): string {
+        return Crypto.sha256(Crypto.hexEncode(value))
+    }
+
+    // --- Non-cryptographic checksums --------------------------------------------
+
+    public static func hash32(string value): string { return Crypto.crc32(value) }
+    public static func hash64(string value): string { return Crypto.fnv1a64(value) }
+
+    // --- Encoding round trips ------------------------------------------------------
+
+    public static func toHex(string value): string { return Crypto.hexEncode(value) }
+    public static func fromHex(string value): string { return Crypto.hexDecode(value) }
+    public static func toBase64(string value): string { return Crypto.base64Encode(value) }
+    public static func fromBase64(string value): string { return Crypto.base64Decode(value) }
+
+    public static func fromHexOr(string value, string fallback): string {
+        try { return Crypto.hexDecode(value) } catch Exception e { return fallback }
+    }
+
+    public static func fromBase64Or(string value, string fallback): string {
+        try { return Crypto.base64Decode(value) } catch Exception e { return fallback }
+    }
+
+    // --- Comparison ------------------------------------------------------------------
+
+    // Length-independent, data-independent comparison of two digests. Use this
+    // rather than == when comparing a computed digest against an untrusted one.
+    public static func digestsEqual(string a, string b): bool {
+        if (String.length(a) != String.length(b)) { return false }
+        var difference = 0
+        for i in 0..String.length(a) {
+            var delta = String.codePointAt(a, i) - String.codePointAt(b, i)
+            if (delta != 0) { difference = 1 }
+        }
+        return difference == 0
+    }
+
+    public static func verifySha256(string value, string expectedDigest): bool {
+        return Crypto.digestsEqual(Crypto.sha256(value), expectedDigest)
+    }
 }

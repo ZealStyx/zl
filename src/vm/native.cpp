@@ -36,6 +36,8 @@
 #include <windows.h>
 #else
 #include <netdb.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <sys/socket.h>
 #endif
 #include <cstdint>
@@ -657,6 +659,75 @@ Value strToFloat(const std::vector<Value>& args) {
     return parseDoubleStrict(requireString(args[0], "String.toFloat"), "String.toFloat");
 }
 
+Value strLastIndexOf(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.lastIndexOf");
+    const std::string& needle = requireString(args[1], "String.lastIndexOf");
+    const auto pos = s.rfind(needle);
+    return pos == std::string::npos ? std::int64_t{-1} : static_cast<std::int64_t>(pos);
+}
+
+Value strIndexOfFrom(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.indexOfFrom");
+    const std::string& needle = requireString(args[1], "String.indexOfFrom");
+    std::int64_t start = toInt64Strict(args[2]);
+    if (start < 0) start = 0;
+    if (static_cast<std::size_t>(start) > s.size()) return std::int64_t{-1};
+    const auto pos = s.find(needle, static_cast<std::size_t>(start));
+    return pos == std::string::npos ? std::int64_t{-1} : static_cast<std::int64_t>(pos);
+}
+
+Value strTrimStart(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.trimStart");
+    std::size_t begin = 0;
+    while (begin < s.size() && std::isspace(static_cast<unsigned char>(s[begin]))) ++begin;
+    return s.substr(begin);
+}
+
+Value strTrimEnd(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.trimEnd");
+    std::size_t end = s.size();
+    while (end > 0 && std::isspace(static_cast<unsigned char>(s[end - 1]))) --end;
+    return s.substr(0, end);
+}
+
+namespace {
+std::int64_t lexicalCompare(const std::string& a, const std::string& b) {
+    const int result = a.compare(b);
+    return result < 0 ? -1 : (result > 0 ? 1 : 0);
+}
+std::string asciiLower(std::string value) {
+    for (char& c : value) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return value;
+}
+} // namespace
+
+// -1 / 0 / 1, matching the ordering contract used by List.sort comparators.
+Value strCompare(const std::vector<Value>& args) {
+    return lexicalCompare(requireString(args[0], "String.compare"), requireString(args[1], "String.compare"));
+}
+
+// ASCII case folding only; ZL does not yet carry a Unicode case table.
+Value strCompareIgnoreCase(const std::vector<Value>& args) {
+    return lexicalCompare(asciiLower(requireString(args[0], "String.compareIgnoreCase")),
+                          asciiLower(requireString(args[1], "String.compareIgnoreCase")));
+}
+
+// Byte value at `index`; ZL strings are byte strings, so this is the
+// honest unit rather than a pretended Unicode code point.
+Value strCodePointAt(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.codePointAt");
+    const std::size_t index = requireIndex(args[1], s.size(), "String.codePointAt");
+    return static_cast<std::int64_t>(static_cast<unsigned char>(s[index]));
+}
+
+Value strFromCodePoint(const std::vector<Value>& args) {
+    const std::int64_t code = toInt64Strict(args[0]);
+    if (code < 0 || code > 255)
+        throwIndexError("String.fromCodePoint: value " + std::to_string(code) + " out of the 0..255 byte range");
+    return std::string(1, static_cast<char>(code));
+}
+
+
 // --- Parsing utilities ---
 // Int.parse, Double.parse, Bool.parse - the official ZL way to convert
 // strings into typed values. These deliberately throw on invalid input
@@ -740,6 +811,130 @@ Value fsListDir(const std::vector<Value>& args) {
 }
 
 
+// --- FileSystem: path, metadata and directory operations ---------------
+// std::filesystem is the portability boundary; every failure surfaces as an
+// IOError so ZL code can catch it by type.
+
+namespace {
+std::filesystem::path fsPath(const Value& value, const char* fnName) {
+    return std::filesystem::path(requireString(value, fnName));
+}
+} // namespace
+
+Value fsRename(const std::vector<Value>& args) {
+    const auto from = fsPath(args[0], "FileSystem.rename");
+    const auto to = fsPath(args[1], "FileSystem.rename");
+    std::error_code ec;
+    std::filesystem::rename(from, to, ec);
+    if (ec) throwIOError("FileSystem.rename: " + ec.message());
+    return Value{};
+}
+
+Value fsCopyFile(const std::vector<Value>& args) {
+    const auto from = fsPath(args[0], "FileSystem.copyFile");
+    const auto to = fsPath(args[1], "FileSystem.copyFile");
+    std::error_code ec;
+    std::filesystem::copy_file(from, to, std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) throwIOError("FileSystem.copyFile: " + ec.message());
+    return Value{};
+}
+
+Value fsSize(const std::vector<Value>& args) {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(fsPath(args[0], "FileSystem.size"), ec);
+    if (ec) throwIOError("FileSystem.size: " + ec.message());
+    return static_cast<std::int64_t>(size);
+}
+
+Value fsIsFile(const std::vector<Value>& args) {
+    std::error_code ec;
+    return std::filesystem::is_regular_file(fsPath(args[0], "FileSystem.isFile"), ec) && !ec;
+}
+
+Value fsIsDirectory(const std::vector<Value>& args) {
+    std::error_code ec;
+    return std::filesystem::is_directory(fsPath(args[0], "FileSystem.isDirectory"), ec) && !ec;
+}
+
+// Creates every missing parent as well; succeeding on an existing directory
+// keeps the operation idempotent.
+Value fsCreateDir(const std::vector<Value>& args) {
+    const auto path = fsPath(args[0], "FileSystem.createDir");
+    std::error_code ec;
+    std::filesystem::create_directories(path, ec);
+    if (ec) throwIOError("FileSystem.createDir: " + ec.message());
+    if (!std::filesystem::is_directory(path, ec))
+        throwIOError("FileSystem.createDir: \"" + path.string() + "\" is not a directory");
+    return Value{};
+}
+
+// Recursive removal; returns the number of entries deleted.
+Value fsRemoveDir(const std::vector<Value>& args) {
+    std::error_code ec;
+    const auto removed = std::filesystem::remove_all(fsPath(args[0], "FileSystem.removeDir"), ec);
+    if (ec) throwIOError("FileSystem.removeDir: " + ec.message());
+    return static_cast<std::int64_t>(removed);
+}
+
+// Seconds since the Unix epoch, matching Time.now()'s unit.
+Value fsModifiedTime(const std::vector<Value>& args) {
+    std::error_code ec;
+    const auto stamp = std::filesystem::last_write_time(fsPath(args[0], "FileSystem.modifiedTime"), ec);
+    if (ec) throwIOError("FileSystem.modifiedTime: " + ec.message());
+    const auto since = stamp.time_since_epoch();
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(since).count();
+    // file_clock's epoch is unspecified; normalize against the system clock.
+    const auto fileNow = std::chrono::duration_cast<std::chrono::seconds>(
+        std::filesystem::file_time_type::clock::now().time_since_epoch()).count();
+    const auto systemNow = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    return static_cast<std::int64_t>(seconds + (systemNow - fileNow));
+}
+
+Value fsAbsolutePath(const std::vector<Value>& args) {
+    std::error_code ec;
+    const auto path = std::filesystem::absolute(fsPath(args[0], "FileSystem.absolutePath"), ec);
+    if (ec) throwIOError("FileSystem.absolutePath: " + ec.message());
+    return path.lexically_normal().string();
+}
+
+Value fsParentPath(const std::vector<Value>& args) {
+    return fsPath(args[0], "FileSystem.parentPath").parent_path().string();
+}
+
+Value fsFileName(const std::vector<Value>& args) {
+    return fsPath(args[0], "FileSystem.fileName").filename().string();
+}
+
+Value fsExtension(const std::vector<Value>& args) {
+    return fsPath(args[0], "FileSystem.extension").extension().string();
+}
+
+Value fsStem(const std::vector<Value>& args) {
+    return fsPath(args[0], "FileSystem.stem").stem().string();
+}
+
+Value fsJoinPath(const std::vector<Value>& args) {
+    auto base = fsPath(args[0], "FileSystem.joinPath");
+    base /= requireString(args[1], "FileSystem.joinPath");
+    return base.lexically_normal().string();
+}
+
+Value fsCurrentDir(const std::vector<Value>&) {
+    std::error_code ec;
+    const auto path = std::filesystem::current_path(ec);
+    if (ec) throwIOError("FileSystem.currentDir: " + ec.message());
+    return path.string();
+}
+
+Value fsTempDir(const std::vector<Value>&) {
+    std::error_code ec;
+    const auto path = std::filesystem::temp_directory_path(ec);
+    if (ec) throwIOError("FileSystem.tempDir: " + ec.message());
+    return path.string();
+}
+
+
 Value networkResolve(const std::vector<Value>& args) {
     const std::string& host = requireString(args[0], "Network.resolve");
 #ifdef _WIN32
@@ -789,6 +984,81 @@ Value networkResolve(const std::vector<Value>& args) {
     freeaddrinfo(result);
     return first;
 }
+
+namespace {
+// Shared resolver core: Network.resolve returns the first address,
+// Network.resolveAll returns every distinct numeric address.
+ListRef resolveHostAddresses(const std::string& host, const char* fnName) {
+#ifdef _WIN32
+    static std::once_flag winsockOnce;
+    std::call_once(winsockOnce, [&] {
+        WSADATA data{};
+        if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
+            throw std::runtime_error(std::string(fnName) + ": WSAStartup failed");
+        }
+    });
+#endif
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_ADDRCONFIG;
+    addrinfo* result = nullptr;
+    const int rc = getaddrinfo(host.c_str(), nullptr, &hints, &result);
+    if (rc != 0) {
+#ifdef _WIN32
+        throw std::runtime_error(std::string(fnName) + ": " + host + ": " + std::to_string(WSAGetLastError()));
+#else
+        throw std::runtime_error(std::string(fnName) + ": " + host + ": " + gai_strerror(rc));
+#endif
+    }
+    Value out = makeEmptyList();
+    auto list = std::get<ListRef>(out);
+    for (addrinfo* p = result; p; p = p->ai_next) {
+        char numeric[NI_MAXHOST]{};
+        if (getnameinfo(p->ai_addr, static_cast<socklen_t>(p->ai_addrlen),
+                        numeric, sizeof(numeric), nullptr, 0, NI_NUMERICHOST) != 0) continue;
+        std::string value(numeric);
+        const bool duplicate = std::any_of(list->items.begin(), list->items.end(), [&](const Value& existing) {
+            return std::holds_alternative<std::string>(existing) && std::get<std::string>(existing) == value;
+        });
+        if (!duplicate) list->items.emplace_back(std::move(value));
+    }
+    freeaddrinfo(result);
+    if (list->items.empty())
+        throw std::runtime_error(std::string(fnName) + ": host resolved without a numeric address: " + host);
+    list->storageType = std::make_shared<const NativeContainerType>(
+        NativeContainerType{{TypeName{"string", {}, {}, {}}}, {}});
+    return list;
+}
+} // namespace
+
+Value networkResolveAll(const std::vector<Value>& args) {
+    return resolveHostAddresses(requireString(args[0], "Network.resolveAll"), "Network.resolveAll");
+}
+
+Value networkHostname(const std::vector<Value>&) {
+    char buffer[256]{};
+#ifdef _WIN32
+    static std::once_flag winsockOnce;
+    std::call_once(winsockOnce, [] { WSADATA data{}; WSAStartup(MAKEWORD(2, 2), &data); });
+#endif
+    if (gethostname(buffer, sizeof(buffer) - 1) != 0)
+        throw std::runtime_error("Network.hostname: could not read the local host name");
+    return std::string(buffer);
+}
+
+// Literal-only check (no DNS traffic), covering both IPv4 and IPv6 forms.
+Value networkIsValidIp(const std::vector<Value>& args) {
+    const std::string& text = requireString(args[0], "Network.isValidIp");
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_flags = AI_NUMERICHOST;
+    addrinfo* result = nullptr;
+    if (getaddrinfo(text.c_str(), nullptr, &hints, &result) != 0) return false;
+    freeaddrinfo(result);
+    return true;
+}
+
 
 // --- Time ---
 
@@ -1349,29 +1619,88 @@ Value timeHour(const std::vector<Value>& args)   { return static_cast<std::int64
 Value timeMinute(const std::vector<Value>& args) { return static_cast<std::int64_t>(toLocalTm(toInt64Strict(args[0])).tm_min); }
 Value timeSecond(const std::vector<Value>& args) { return static_cast<std::int64_t>(toLocalTm(toInt64Strict(args[0])).tm_sec); }
 
-// Time.format(timestamp, "YYYY-MM-DD HH:mm:ss") - simple token substitution
-// rather than exposing raw strftime, so the pattern stays readable.
-Value timeFormat(const std::vector<Value>& args) {
-    std::tm tmv = toLocalTm(toInt64Strict(args[0]));
-    std::string result = requireString(args[1], "Time.format");
-
-    auto replaceAll = [&](const std::string& token, int value, int width) {
+namespace {
+// Shared token substitution for Time.format / Time.utcFormat. Deliberately a
+// small readable token set rather than raw strftime.
+std::string formatCivilTime(const std::tm& parts, std::string pattern) {
+    const auto replaceAll = [&](const std::string& token, int value, int width) {
         std::ostringstream oss;
         oss << std::setw(width) << std::setfill('0') << value;
-        std::string valStr = oss.str();
+        const std::string text = oss.str();
         std::size_t pos = 0;
-        while ((pos = result.find(token, pos)) != std::string::npos) {
-            result.replace(pos, token.size(), valStr);
-            pos += valStr.size();
+        while ((pos = pattern.find(token, pos)) != std::string::npos) {
+            pattern.replace(pos, token.size(), text);
+            pos += text.size();
         }
     };
-    replaceAll("YYYY", tmv.tm_year + 1900, 4);
-    replaceAll("MM", tmv.tm_mon + 1, 2);
-    replaceAll("DD", tmv.tm_mday, 2);
-    replaceAll("HH", tmv.tm_hour, 2);
-    replaceAll("mm", tmv.tm_min, 2);
-    replaceAll("ss", tmv.tm_sec, 2);
+    replaceAll("YYYY", parts.tm_year + 1900, 4);
+    replaceAll("MM", parts.tm_mon + 1, 2);
+    replaceAll("DD", parts.tm_mday, 2);
+    replaceAll("HH", parts.tm_hour, 2);
+    replaceAll("mm", parts.tm_min, 2);
+    replaceAll("ss", parts.tm_sec, 2);
+    return pattern;
+}
+
+std::tm toUtcTm(std::int64_t epochSeconds) {
+    const std::time_t t = static_cast<std::time_t>(epochSeconds);
+    std::tm result{};
+#if defined(_WIN32)
+    gmtime_s(&result, &t);
+#else
+    gmtime_r(&t, &result);
+#endif
     return result;
+}
+} // namespace
+
+// Time.format(timestamp, "YYYY-MM-DD HH:mm:ss") in local time.
+Value timeFormat(const std::vector<Value>& args) {
+    return formatCivilTime(toLocalTm(toInt64Strict(args[0])), requireString(args[1], "Time.format"));
+}
+
+// Same pattern language as Time.format, evaluated in UTC.
+Value timeUtcFormat(const std::vector<Value>& args) {
+    return formatCivilTime(toUtcTm(toInt64Strict(args[0])), requireString(args[1], "Time.utcFormat"));
+}
+
+// Monotonic milliseconds: safe for measuring elapsed time because it is
+// unaffected by wall-clock adjustments.
+Value timeMonotonicMillis(const std::vector<Value>&) {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    return static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+}
+
+// 0 = Sunday .. 6 = Saturday, matching struct tm.
+Value timeDayOfWeek(const std::vector<Value>& args) {
+    return static_cast<std::int64_t>(toLocalTm(toInt64Strict(args[0])).tm_wday);
+}
+
+// 1-based day of the year.
+Value timeDayOfYear(const std::vector<Value>& args) {
+    return static_cast<std::int64_t>(toLocalTm(toInt64Strict(args[0])).tm_yday + 1);
+}
+
+Value timeIsLeapYear(const std::vector<Value>& args) {
+    const std::int64_t year = toInt64Strict(args[0]);
+    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
+// Local-time civil parts to epoch seconds. Out-of-range fields normalize the
+// same way mktime does, so 2024-01-32 is 2024-02-01.
+Value timeFromParts(const std::vector<Value>& args) {
+    std::tm parts{};
+    parts.tm_year = static_cast<int>(toInt64Strict(args[0])) - 1900;
+    parts.tm_mon = static_cast<int>(toInt64Strict(args[1])) - 1;
+    parts.tm_mday = static_cast<int>(toInt64Strict(args[2]));
+    parts.tm_hour = static_cast<int>(toInt64Strict(args[3]));
+    parts.tm_min = static_cast<int>(toInt64Strict(args[4]));
+    parts.tm_sec = static_cast<int>(toInt64Strict(args[5]));
+    parts.tm_isdst = -1;
+    const std::time_t result = std::mktime(&parts);
+    if (result == static_cast<std::time_t>(-1))
+        throw std::runtime_error("Time.fromParts: the given date/time is not representable");
+    return static_cast<std::int64_t>(result);
 }
 
 
@@ -1818,6 +2147,29 @@ Value logInfo(const std::vector<Value>& args) { std::cout << "[INFO] " << valueT
 Value logWarn(const std::vector<Value>& args) { std::cout << "[WARN] " << valueToString(args[0]) << "\n"; return Value{}; }
 Value logError(const std::vector<Value>& args) { std::cerr << "[ERROR] " << valueToString(args[0]) << "\n"; return Value{}; }
 
+namespace {
+// One writer for every level so formatting stays consistent and error-class
+// levels remain on stderr.
+Value writeLog(const char* level, const Value& value) {
+    std::ostream& out = (std::string(level) == "ERROR" || std::string(level) == "FATAL") ? std::cerr : std::cout;
+    out << "[" << level << "] " << valueToString(value) << "\n";
+    return Value{};
+}
+} // namespace
+Value logDebug(const std::vector<Value>& args) { return writeLog("DEBUG", args[0]); }
+Value logTrace(const std::vector<Value>& args) { return writeLog("TRACE", args[0]); }
+Value logFatal(const std::vector<Value>& args) { return writeLog("FATAL", args[0]); }
+// Log.at(level, value) - an explicit level chosen at runtime.
+Value logAt(const std::vector<Value>& args) {
+    std::string level = requireString(args[0], "Log.at");
+    for (char& c : level) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    if (level != "TRACE" && level != "DEBUG" && level != "INFO" && level != "WARN" &&
+        level != "ERROR" && level != "FATAL")
+        throw std::runtime_error("Log.at: unknown level \"" + level + "\" (expected trace/debug/info/warn/error/fatal)");
+    return writeLog(level.c_str(), args[1]);
+}
+
+
 // --- Advanced text ---
 Value textFormat(const std::vector<Value>& args) {
     std::string out = requireString(args[0], "Text.format");
@@ -2134,6 +2486,156 @@ std::string sha256(const std::string& in){
 Value cryptoSha256(const std::vector<Value>& args){return sha256(requireString(args[0],"Crypto.sha256"));}
 Value hashCode(const std::vector<Value>& args){ return valueHashCode(args[0]); }
 
+// Compact SHA-1. Legacy-strength: exposed for interoperability with existing
+// protocols, not recommended for new integrity or signature use.
+std::string sha1(const std::string& in){
+    std::uint32_t h[5]={0x67452301,0xEFCDAB89,0x98BADCFE,0x10325476,0xC3D2E1F0};
+    std::vector<std::uint8_t> d(in.begin(),in.end());
+    std::uint64_t bits=(std::uint64_t)d.size()*8; d.push_back(0x80);
+    while(d.size()%64!=56) d.push_back(0);
+    for(int i=7;i>=0;--i) d.push_back((bits>>(i*8))&255);
+    auto R=[](std::uint32_t x,int n){return (x<<n)|(x>>(32-n));};
+    for(std::size_t off=0;off<d.size();off+=64){
+        std::uint32_t w[80]{};
+        for(int i=0;i<16;++i) w[i]=(d[off+i*4]<<24)|(d[off+i*4+1]<<16)|(d[off+i*4+2]<<8)|d[off+i*4+3];
+        for(int i=16;i<80;++i) w[i]=R(w[i-3]^w[i-8]^w[i-14]^w[i-16],1);
+        std::uint32_t a=h[0],b=h[1],c=h[2],dd=h[3],e=h[4];
+        for(int i=0;i<80;++i){
+            std::uint32_t f,k;
+            if(i<20){f=(b&c)|((~b)&dd);k=0x5A827999;}
+            else if(i<40){f=b^c^dd;k=0x6ED9EBA1;}
+            else if(i<60){f=(b&c)|(b&dd)|(c&dd);k=0x8F1BBCDC;}
+            else {f=b^c^dd;k=0xCA62C1D6;}
+            const std::uint32_t t=R(a,5)+f+e+k+w[i];
+            e=dd;dd=c;c=R(b,30);b=a;a=t;
+        }
+        h[0]+=a;h[1]+=b;h[2]+=c;h[3]+=dd;h[4]+=e;
+    }
+    std::ostringstream o;o<<std::hex<<std::setfill('0');
+    for(auto x:h)o<<std::setw(8)<<x;
+    return o.str();
+}
+Value cryptoSha1(const std::vector<Value>& args){return sha1(requireString(args[0],"Crypto.sha1"));}
+
+// Compact MD5. Checksum-strength only; never use it for security decisions.
+std::string md5(const std::string& in){
+    static const std::uint32_t S[64]={7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+                                      5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+                                      4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+                                      6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21};
+    static const std::uint32_t K[64]={
+        0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,0xa8304613,0xfd469501,
+        0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,0x6b901122,0xfd987193,0xa679438e,0x49b40821,
+        0xf61e2562,0xc040b340,0x265e5a51,0xe9b6c7aa,0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,
+        0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,0xa9e3e905,0xfcefa3f8,0x676f02d9,0x8d2a4c8a,
+        0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,
+        0x289b7ec6,0xeaa127fa,0xd4ef3085,0x04881d05,0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,
+        0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,0x655b59c3,0x8f0ccc92,0xffeff47d,0x85845dd1,
+        0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391};
+    std::uint32_t h[4]={0x67452301,0xefcdab89,0x98badcfe,0x10325476};
+    std::vector<std::uint8_t> d(in.begin(),in.end());
+    const std::uint64_t bits=(std::uint64_t)d.size()*8;
+    d.push_back(0x80);
+    while(d.size()%64!=56) d.push_back(0);
+    for(int i=0;i<8;++i) d.push_back(static_cast<std::uint8_t>((bits>>(i*8))&255));
+    const auto R=[](std::uint32_t x,std::uint32_t n){return (x<<n)|(x>>(32-n));};
+    for(std::size_t off=0;off<d.size();off+=64){
+        std::uint32_t m[16]{};
+        for(int i=0;i<16;++i)
+            m[i]=d[off+i*4]|(d[off+i*4+1]<<8)|(d[off+i*4+2]<<16)|(static_cast<std::uint32_t>(d[off+i*4+3])<<24);
+        std::uint32_t a=h[0],b=h[1],c=h[2],dd=h[3];
+        for(std::uint32_t i=0;i<64;++i){
+            std::uint32_t f,g;
+            if(i<16){f=(b&c)|((~b)&dd);g=i;}
+            else if(i<32){f=(dd&b)|((~dd)&c);g=(5*i+1)%16;}
+            else if(i<48){f=b^c^dd;g=(3*i+5)%16;}
+            else {f=c^(b|(~dd));g=(7*i)%16;}
+            f=f+a+K[i]+m[g];
+            a=dd;dd=c;c=b;b=b+R(f,S[i]);
+        }
+        h[0]+=a;h[1]+=b;h[2]+=c;h[3]+=dd;
+    }
+    std::ostringstream o;o<<std::hex<<std::setfill('0');
+    for(auto x:h)
+        for(int i=0;i<4;++i) o<<std::setw(2)<<static_cast<int>((x>>(i*8))&255);
+    return o.str();
+}
+Value cryptoMd5(const std::vector<Value>& args){return md5(requireString(args[0],"Crypto.md5"));}
+
+// FNV-1a 64-bit: a fast non-cryptographic digest for bucketing and change
+// detection, returned as 16 lowercase hex digits.
+Value cryptoFnv1a64(const std::vector<Value>& args){
+    const std::string& value = requireString(args[0], "Crypto.fnv1a64");
+    std::uint64_t hash = 1469598103934665603ull;
+    for (unsigned char c : value) { hash ^= c; hash *= 1099511628211ull; }
+    std::ostringstream o; o<<std::hex<<std::setw(16)<<std::setfill('0')<<hash;
+    return o.str();
+}
+
+Value cryptoHexEncode(const std::vector<Value>& args){
+    const std::string& value = requireString(args[0], "Crypto.hexEncode");
+    std::ostringstream o; o<<std::hex<<std::setfill('0');
+    for (unsigned char c : value) o<<std::setw(2)<<static_cast<int>(c);
+    return o.str();
+}
+
+Value cryptoHexDecode(const std::vector<Value>& args){
+    const std::string& value = requireString(args[0], "Crypto.hexDecode");
+    if (value.size() % 2 != 0) throw std::runtime_error("Crypto.hexDecode: odd-length hex input");
+    std::string out;
+    out.reserve(value.size() / 2);
+    const auto digit = [&](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        throw std::runtime_error("Crypto.hexDecode: invalid hex digit");
+    };
+    for (std::size_t i = 0; i + 1 < value.size(); i += 2)
+        out.push_back(static_cast<char>(digit(value[i]) * 16 + digit(value[i + 1])));
+    return out;
+}
+
+const char* base64Alphabet(){return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";}
+
+Value cryptoBase64Encode(const std::vector<Value>& args){
+    const std::string& value = requireString(args[0], "Crypto.base64Encode");
+    const char* alphabet = base64Alphabet();
+    std::string out;
+    out.reserve(((value.size() + 2) / 3) * 4);
+    for (std::size_t i = 0; i < value.size(); i += 3) {
+        const std::size_t remaining = value.size() - i;
+        std::uint32_t block = static_cast<unsigned char>(value[i]) << 16;
+        if (remaining > 1) block |= static_cast<unsigned char>(value[i + 1]) << 8;
+        if (remaining > 2) block |= static_cast<unsigned char>(value[i + 2]);
+        out.push_back(alphabet[(block >> 18) & 63]);
+        out.push_back(alphabet[(block >> 12) & 63]);
+        out.push_back(remaining > 1 ? alphabet[(block >> 6) & 63] : '=');
+        out.push_back(remaining > 2 ? alphabet[block & 63] : '=');
+    }
+    return out;
+}
+
+Value cryptoBase64Decode(const std::vector<Value>& args){
+    const std::string& value = requireString(args[0], "Crypto.base64Decode");
+    const std::string alphabet = base64Alphabet();
+    std::string out;
+    std::uint32_t buffer = 0;
+    int bits = 0;
+    for (char c : value) {
+        if (c == '=' || c == '\n' || c == '\r') continue;
+        const auto pos = alphabet.find(c);
+        if (pos == std::string::npos) throw std::runtime_error("Crypto.base64Decode: invalid base64 character");
+        buffer = (buffer << 6) | static_cast<std::uint32_t>(pos);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<char>((buffer >> bits) & 0xFF));
+        }
+    }
+    return out;
+}
+
+
 // --- System ---
 
 Value sysExit(const std::vector<Value>& args) {
@@ -2161,6 +2663,58 @@ Value sysExec(const std::vector<Value>& args) {
     }
     pclose(pipe);
     return result;
+}
+
+
+// Runs `command` and returns its exit status instead of its output; the
+// child's stdout/stderr stay attached to this process.
+Value sysExecStatus(const std::vector<Value>& args) {
+    const std::string& command = requireString(args[0], "System.execStatus");
+    const int status = std::system(command.c_str());
+    if (status == -1) throw std::runtime_error("System.execStatus: failed to start \"" + command + "\"");
+#ifdef _WIN32
+    return static_cast<std::int64_t>(status);
+#else
+    if (WIFEXITED(status)) return static_cast<std::int64_t>(WEXITSTATUS(status));
+    if (WIFSIGNALED(status)) return static_cast<std::int64_t>(128 + WTERMSIG(status));
+    return static_cast<std::int64_t>(status);
+#endif
+}
+
+Value sysSetEnv(const std::vector<Value>& args) {
+    const std::string& name = requireString(args[0], "System.setEnv");
+    const std::string& value = requireString(args[1], "System.setEnv");
+    if (name.empty() || name.find('=') != std::string::npos)
+        throw std::runtime_error("System.setEnv: invalid variable name \"" + name + "\"");
+#ifdef _WIN32
+    if (_putenv_s(name.c_str(), value.c_str()) != 0)
+#else
+    if (setenv(name.c_str(), value.c_str(), 1) != 0)
+#endif
+        throw std::runtime_error("System.setEnv: could not set \"" + name + "\"");
+    return Value{};
+}
+
+Value sysHasEnv(const std::vector<Value>& args) {
+    return std::getenv(requireString(args[0], "System.hasEnv").c_str()) != nullptr;
+}
+
+// Reads a variable with an explicit default, avoiding a nil round trip.
+Value sysEnvOr(const std::vector<Value>& args) {
+    const char* value = std::getenv(requireString(args[0], "System.envOr").c_str());
+    return value ? std::string(value) : requireString(args[1], "System.envOr");
+}
+
+Value sysPlatform(const std::vector<Value>&) {
+#if defined(_WIN32)
+    return std::string("windows");
+#elif defined(__APPLE__)
+    return std::string("macos");
+#elif defined(__linux__)
+    return std::string("linux");
+#else
+    return std::string("unknown");
+#endif
 }
 
 
@@ -2384,6 +2938,55 @@ std::vector<NativeFunction> buildTable() {
         std::pair{NativeId::REFLECTION_CONSTRUCTOR, reflectionConstructor},
         std::pair{NativeId::REFLECTION_METHOD_INVOKE, reflectionMethodInvoke},
         std::pair{NativeId::REFLECTION_CONSTRUCTOR_INVOKE, reflectionConstructorInvoke},
+        std::pair{NativeId::FILESYSTEM_RENAME, fsRename},
+        std::pair{NativeId::FILESYSTEM_COPYFILE, fsCopyFile},
+        std::pair{NativeId::FILESYSTEM_SIZE, fsSize},
+        std::pair{NativeId::FILESYSTEM_ISFILE, fsIsFile},
+        std::pair{NativeId::FILESYSTEM_ISDIRECTORY, fsIsDirectory},
+        std::pair{NativeId::FILESYSTEM_CREATEDIR, fsCreateDir},
+        std::pair{NativeId::FILESYSTEM_REMOVEDIR, fsRemoveDir},
+        std::pair{NativeId::FILESYSTEM_MODIFIEDTIME, fsModifiedTime},
+        std::pair{NativeId::FILESYSTEM_ABSOLUTEPATH, fsAbsolutePath},
+        std::pair{NativeId::FILESYSTEM_PARENTPATH, fsParentPath},
+        std::pair{NativeId::FILESYSTEM_FILENAME, fsFileName},
+        std::pair{NativeId::FILESYSTEM_EXTENSION, fsExtension},
+        std::pair{NativeId::FILESYSTEM_STEM, fsStem},
+        std::pair{NativeId::FILESYSTEM_JOINPATH, fsJoinPath},
+        std::pair{NativeId::FILESYSTEM_CURRENTDIR, fsCurrentDir},
+        std::pair{NativeId::FILESYSTEM_TEMPDIR, fsTempDir},
+        std::pair{NativeId::NETWORK_RESOLVEALL, networkResolveAll},
+        std::pair{NativeId::NETWORK_HOSTNAME, networkHostname},
+        std::pair{NativeId::NETWORK_ISVALIDIP, networkIsValidIp},
+        std::pair{NativeId::STRING_LASTINDEXOF, strLastIndexOf},
+        std::pair{NativeId::STRING_INDEXOFFROM, strIndexOfFrom},
+        std::pair{NativeId::STRING_TRIMSTART, strTrimStart},
+        std::pair{NativeId::STRING_TRIMEND, strTrimEnd},
+        std::pair{NativeId::STRING_COMPARE, strCompare},
+        std::pair{NativeId::STRING_COMPAREIGNORECASE, strCompareIgnoreCase},
+        std::pair{NativeId::STRING_CODEPOINTAT, strCodePointAt},
+        std::pair{NativeId::STRING_FROMCODEPOINT, strFromCodePoint},
+        std::pair{NativeId::TIME_MONOTONICMILLIS, timeMonotonicMillis},
+        std::pair{NativeId::TIME_DAYOFWEEK, timeDayOfWeek},
+        std::pair{NativeId::TIME_DAYOFYEAR, timeDayOfYear},
+        std::pair{NativeId::TIME_ISLEAPYEAR, timeIsLeapYear},
+        std::pair{NativeId::TIME_FROMPARTS, timeFromParts},
+        std::pair{NativeId::TIME_UTCFORMAT, timeUtcFormat},
+        std::pair{NativeId::CRYPTO_SHA1, cryptoSha1},
+        std::pair{NativeId::CRYPTO_MD5, cryptoMd5},
+        std::pair{NativeId::CRYPTO_FNV1A64, cryptoFnv1a64},
+        std::pair{NativeId::CRYPTO_HEXENCODE, cryptoHexEncode},
+        std::pair{NativeId::CRYPTO_HEXDECODE, cryptoHexDecode},
+        std::pair{NativeId::CRYPTO_BASE64ENCODE, cryptoBase64Encode},
+        std::pair{NativeId::CRYPTO_BASE64DECODE, cryptoBase64Decode},
+        std::pair{NativeId::LOG_DEBUG, logDebug},
+        std::pair{NativeId::LOG_TRACE, logTrace},
+        std::pair{NativeId::LOG_FATAL, logFatal},
+        std::pair{NativeId::LOG_AT, logAt},
+        std::pair{NativeId::SYSTEM_EXECSTATUS, sysExecStatus},
+        std::pair{NativeId::SYSTEM_SETENV, sysSetEnv},
+        std::pair{NativeId::SYSTEM_HASENV, sysHasEnv},
+        std::pair{NativeId::SYSTEM_ENVOR, sysEnvOr},
+        std::pair{NativeId::SYSTEM_PLATFORM, sysPlatform},
     };
 
     const auto& signatures = nativeSignatureTable();

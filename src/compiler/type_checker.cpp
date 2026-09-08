@@ -1108,6 +1108,13 @@ void TypeChecker::check(const Program& program, bool requireMain) {
         }
     }
 
+    // Every class shape (including inheritance links) is now complete. Any
+    // generic instantiation created while resolving an earlier signature may
+    // have been built from a template that was still an empty shell, so
+    // rebuild them all here. Without this, whether `List<string>` has methods
+    // would depend on which file happened to be checked first.
+    typeResolver_.refreshInstantiations();
+
     // Index all named static functions before any body is checked so interprocedural
     // confinement analysis is independent of declaration order.
     indexNamedFunctions(program);

@@ -141,9 +141,15 @@ ZlType TypeResolver::resolveType(const TypeAnnotation& annotation,
 
     const auto* classIt = semanticModel_.findClass(n);
     if (classIt != nullptr && !classIt->typeParams.empty() && !annotation.typeArgs.empty()) {
+        // A self-reference is only meaningful from inside a generic body: it
+        // names the template being defined, with its own type parameters as
+        // arguments. Outside such a body (no type parameters in scope) the
+        // annotation is an ordinary instantiation and must be built, not
+        // deferred - otherwise `List<string>` in a plain class resolves to a
+        // key with no registered shape and appears to have no methods.
         const bool selfGenericReference = n == classIt->name &&
             annotation.typeArgs.size() == classIt->typeParams.size() &&
-            (currentClassName.empty() || !currentClassTypeParams.empty());
+            !currentClassTypeParams.empty();
         if (selfGenericReference) {
             bool allOwnParams = true;
             GenericInstantiation deferred{n, {}};
@@ -161,7 +167,7 @@ ZlType TypeResolver::resolveType(const TypeAnnotation& annotation,
                 else if (arg.name == "bool") deferred.args.push_back({ZlType::BOOL, ""});
                 else deferred.args.push_back({ZlType::OBJECT, arg.name});
             }
-            if (allOwnParams || currentClassName.empty()) {
+            if (allOwnParams) {
                 const std::string key = deferred.describe();
                 genericInstantiationByName_[key] = deferred;
                 if (outClassName) *outClassName = key;
@@ -262,7 +268,7 @@ std::string TypeResolver::instantiateGenericClass(const std::string& genericName
         return cached->second;
     }
     const std::string key = identity.describe();
-    if (semanticModel_.hasClass(key)) {
+    if (semanticModel_.hasClass(key) && !rebuilding_) {
         genericInstantiationCache_.emplace(identity, key);
         genericInstantiationByName_[key] = identity;
         return key;
@@ -517,6 +523,35 @@ std::string TypeResolver::instantiateGenericClass(const std::string& genericName
 
     semanticModel_.defineClass(std::move(instantiated));
     return key;
+}
+
+void TypeResolver::refreshInstantiations() {
+    rebuilding_ = true;
+    struct Guard { bool& flag; ~Guard() { flag = false; } } guard{rebuilding_};
+    // Snapshot first: rebuilding an instantiation can request further ones
+    // (a parent instantiation, or a nested generic in a member signature).
+    std::vector<GenericInstantiation> pending;
+    pending.reserve(genericInstantiationCache_.size());
+    for (const auto& [identity, key] : genericInstantiationCache_) {
+        (void)key;
+        pending.push_back(identity);
+    }
+    // Repeat until no new instantiation appears, so a chain such as
+    // List<string> -> Option<string> converges rather than being rebuilt once.
+    for (int round = 0; round < 8; ++round) {
+        const std::size_t before = genericInstantiationCache_.size();
+        for (const auto& identity : pending) {
+            genericInstantiationCache_.erase(identity);
+            (void)instantiateGenericClass(identity.base, identity.args, 0);
+        }
+        if (genericInstantiationCache_.size() == before) return;
+        pending.clear();
+        pending.reserve(genericInstantiationCache_.size());
+        for (const auto& [identity, key] : genericInstantiationCache_) {
+            (void)key;
+            pending.push_back(identity);
+        }
+    }
 }
 
 bool TypeResolver::isCurrentGenericTypeParam(const std::string& name,

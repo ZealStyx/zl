@@ -3,11 +3,134 @@ import zl.time.Date
 import zl.time.TimeOfDay
 import zl.time.Duration
 
-// zl.time.Time - ZL-owned time/date convenience API over native clock primitives.
+// zl.time.Time - ZL-owned time/date convenience API.
+//
+// The native clock primitives (Time.now, Time.millis, Time.sleep, Time.year,
+// month, day, hour, minute, second, format, utcFormat, fromParts, dayOfWeek,
+// dayOfYear, isLeapYear, monotonicMillis) resolve by qualified name and are
+// not re-wrapped here. Everything below adds units, arithmetic, comparison or
+// object construction that the primitives do not provide.
+//
+// Unit convention: `Time.now()` and every "timestamp" argument are epoch
+// SECONDS; `Time.millis()` and Duration are MILLISECONDS. Method names state
+// their unit whenever it is not seconds.
 class Time {
+    // --- Object views over a timestamp -------------------------------------
+
     public static func nowDateTime(): DateTime { return new DateTime(Time.now()) }
-    public static func sleepMillis(int millis): void { Time.sleep(millis / 1000.0) }
     public static func today(): Date { return new Date(Time.now()) }
     public static func clock(): TimeOfDay { return new TimeOfDay(Time.now()) }
+    public static func dateTimeAt(int timestamp): DateTime { return new DateTime(timestamp) }
+    public static func dateAt(int timestamp): Date { return new Date(timestamp) }
+
+    // --- Durations ----------------------------------------------------------
+
     public static func durationMillis(int millis): Duration { return new Duration(millis) }
+    public static func durationSeconds(int seconds): Duration { return new Duration(seconds * 1000) }
+    public static func durationMinutes(int minutes): Duration { return new Duration(minutes * 60000) }
+    public static func durationHours(int hours): Duration { return new Duration(hours * 3600000) }
+    public static func durationDays(int days): Duration { return new Duration(days * 86400000) }
+
+    // Elapsed time between two epoch-second timestamps.
+    public static func between(int startTimestamp, int endTimestamp): Duration {
+        return new Duration((endTimestamp - startTimestamp) * 1000)
+    }
+
+    public static func sleepMillis(int millis): void { Time.sleep(millis / 1000.0) }
+    public static func sleepDuration(Duration duration): void { Time.sleep(duration.milliseconds() / 1000.0) }
+
+    // Monotonic elapsed milliseconds since an earlier Time.monotonicMillis().
+    // Immune to wall-clock changes, unlike a Time.now() difference.
+    public static func elapsedMillisSince(int monotonicStart): int {
+        return Time.monotonicMillis() - monotonicStart
+    }
+
+    // --- Arithmetic on epoch seconds -----------------------------------------
+
+    public static func addSeconds(int timestamp, int seconds): int { return timestamp + seconds }
+    public static func addMinutes(int timestamp, int minutes): int { return timestamp + minutes * 60 }
+    public static func addHours(int timestamp, int hours): int { return timestamp + hours * 3600 }
+    public static func addDays(int timestamp, int days): int { return timestamp + days * 86400 }
+    public static func addWeeks(int timestamp, int weeks): int { return timestamp + weeks * 604800 }
+
+    // Calendar-aware: adds whole months, clamping the day to the target
+    // month's length so Jan 31 + 1 month is Feb 28/29, not Mar 3.
+    public static func addMonths(int timestamp, int months): int {
+        var total = (Time.year(timestamp) * 12) + (Time.month(timestamp) - 1) + months
+        var year = total / 12
+        var month = (total % 12) + 1
+        if (month < 1) { month = month + 12 year = year - 1 }
+        var day = Time.day(timestamp)
+        var limit = Time.daysInMonth(year, month)
+        if (day > limit) { day = limit }
+        return Time.fromParts(year, month, day, Time.hour(timestamp), Time.minute(timestamp), Time.second(timestamp))
+    }
+
+    public static func addYears(int timestamp, int years): int { return Time.addMonths(timestamp, years * 12) }
+
+    // --- Differences ----------------------------------------------------------
+    // Truncated toward zero, so 47 hours is 1 whole day.
+
+    public static func diffSeconds(int a, int b): int { return b - a }
+    public static func diffMinutes(int a, int b): int { return (b - a) / 60 }
+    public static func diffHours(int a, int b): int { return (b - a) / 3600 }
+    public static func diffDays(int a, int b): int { return (b - a) / 86400 }
+
+    // --- Comparison --------------------------------------------------------------
+
+    public static func compare(int a, int b): int {
+        if (a < b) { return -1 }
+        if (a > b) { return 1 }
+        return 0
+    }
+    public static func isBefore(int a, int b): bool { return a < b }
+    public static func isAfter(int a, int b): bool { return a > b }
+    public static func isBetween(int timestamp, int start, int end): bool {
+        return timestamp >= start && timestamp <= end
+    }
+    public static func min(int a, int b): int { if (a < b) { return a } return b }
+    public static func max(int a, int b): int { if (a > b) { return a } return b }
+
+    // --- Calendar helpers ----------------------------------------------------------
+
+    public static func daysInMonth(int year, int month): int {
+        if (month == 2) {
+            if (Time.isLeapYear(year)) { return 29 }
+            return 28
+        }
+        if (month == 4 || month == 6 || month == 9 || month == 11) { return 30 }
+        return 31
+    }
+
+    public static func isWeekend(int timestamp): bool {
+        var day = Time.dayOfWeek(timestamp)
+        return day == 0 || day == 6
+    }
+
+    public static func weekdayName(int timestamp): string {
+        List<string> names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+        return names.get(Time.dayOfWeek(timestamp))
+    }
+
+    public static func monthName(int timestamp): string {
+        List<string> names = ["January", "February", "March", "April", "May", "June",
+                              "July", "August", "September", "October", "November", "December"]
+        return names.get(Time.month(timestamp) - 1)
+    }
+
+    // Midnight local time on the timestamp's calendar day.
+    public static func startOfDay(int timestamp): int {
+        return Time.fromParts(Time.year(timestamp), Time.month(timestamp), Time.day(timestamp), 0, 0, 0)
+    }
+
+    public static func endOfDay(int timestamp): int { return Time.startOfDay(timestamp) + 86399 }
+
+    public static func isSameDay(int a, int b): bool { return Time.startOfDay(a) == Time.startOfDay(b) }
+
+    // --- Standard renderings -----------------------------------------------------------
+
+    public static func isoDate(int timestamp): string { return Time.format(timestamp, "YYYY-MM-DD") }
+    public static func isoTime(int timestamp): string { return Time.format(timestamp, "HH:mm:ss") }
+    public static func isoDateTime(int timestamp): string { return Time.format(timestamp, "YYYY-MM-DD HH:mm:ss") }
+    public static func isoUtc(int timestamp): string { return Time.utcFormat(timestamp, "YYYY-MM-DDTHH:mm:ssZ") }
 }
