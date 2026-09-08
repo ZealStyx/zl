@@ -113,6 +113,46 @@ log(c())  // 2
 `func`-typed slot — are not checked yet. Calling a `func`-typed value with the wrong
 number of arguments is caught at runtime, not at compile time.
 
+## Union types and narrowing
+
+A union is a set of alternatives, not the dynamic `unknown` type. Every
+alternative must fit a typed assignment, argument or return. Use `match` to
+refine it before an operation that only accepts one member:
+
+```zl
+static func describe(int|string value): string {
+    return match value {
+        int _ => "number " + (value + 1)
+        string text => String.upper(text)
+        null => "missing"
+    }
+}
+```
+
+A type arm refines both its binding and the original subject identifier while
+that identifier remains unchanged. The catch-all binding carries the remaining
+alternatives. Guards do not establish exhaustive coverage. ZL reference types,
+including `string`, remain nullable: cover `null` or use a wildcard as well.
+Enums and primitive numbers/bools are not nullable.
+
+The subject is evaluated once. If a guard reassigns it, subsequent patterns still
+inspect the original snapshot; use the pattern binding to read that snapshot.
+Reassignment invalidates read refinements, and does not change the variable's
+original declaration or constness. Mutable closure captures and loop back edges
+cannot keep a refinement that their writes may invalidate.
+
+Locals, loop counters, catch variables and pattern bindings have distinct lexical
+storage, even when they reuse a spelling. Closures capture the selected bindings
+by value. Typed reassignment is checked before storing a dynamic value, so a
+rejected write leaves the old slot intact (RHS side effects are not rolled back).
+The same expected-type handling supports reassigned lambdas and typed literals.
+
+The focused regression can be run with:
+
+```sh
+python3 tests/type_boundaries.py /path/to/zl
+```
+
 ## Generic collections
 
 `List<T>`, `Map<K,V>`, and `Set<T>` are real generic classes, not native tags.

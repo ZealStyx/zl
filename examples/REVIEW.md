@@ -26,10 +26,22 @@ closed **O4/F8, O5, and O6**:
   signatures. `GenericRuntimeChecks.zl` also covers async callbacks and native
   `share` factory metadata, including legitimate widening/base-class assignments.
 
-The remaining stabilization work still precedes library expansion: flow-sensitive
-union narrowing, dynamic reassignment/typed native-storage writes, native return
-inference (including `String.split`), and the remaining exception/resource audit.
-The large type-checker split and native lowering remain deferred.
+A subsequent compiler batch closes the local-reassignment and union-narrowing
+gaps. Unions now have a distinct semantic kind, preserve their alternatives
+through aliases/calls/generic instantiation, and use coverage-based match checking.
+Read refinements retain the original write contract and constness; guard writes,
+loop back edges and mutable captures invalidate unsafe assumptions. Unique local
+storage names fix shadowing across blocks, patterns, loops and catch clauses.
+The capture walk now binds callback-local declarations/counters instead of
+mistaking them for outer thread captures. `match` also no longer leaks its subject
+onto the surrounding value stack. Compiler and VM share type-name parsing and
+substitution rather than decoding different grammars.
+
+`tests/type_boundaries.py` verifies the end-to-end workflow and semantic rejection
+of unsafe variants. The remaining stabilization work still precedes library
+expansion: typed native-storage/field writes, native-return inference (including
+`String.split`), and the exception/resource audit. The large type-checker split
+and native lowering remain deferred.
 
 ## Fixed in this branch
 

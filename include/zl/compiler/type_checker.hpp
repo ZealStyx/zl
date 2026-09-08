@@ -29,17 +29,16 @@ namespace zl {
 // ---------------------------------------------------------------------------
 // SymbolTable - tracks variable types and func signatures per scope.
 // ---------------------------------------------------------------------------
-// Currently there's only func-level scope (no block scoping yet, matching
-// the compiler's flat-map approach), so one scope per func plus the
-// "global" scope for class-level declarations is sufficient.
+// Lexical scopes resolve source names to unique storage names. Read
+// refinements are scoped views; they never replace a binding's write contract.
 // ---------------------------------------------------------------------------
 class SymbolTable {
 public:
     struct VarInfo {
-        ZlType type;
-        bool isConst;
+        ZlType type{ZlType::UNKNOWN};
+        bool isConst{false};
         OwnershipKind ownership{OwnershipKind::GC};
-        std::string className; // meaningful only when type == ZlType::OBJECT
+        std::string className; // full identity for objects, collections, tasks and unions
         std::vector<ZlType> functionParamTypes; // function value signature
         std::vector<std::string> functionParamClassNames;
         ZlType functionReturnType{ZlType::UNKNOWN};
@@ -50,10 +49,15 @@ public:
         std::vector<std::string> functionCaptureNames;
         bool functionUsesThis{false};
         bool functionHasSignature{false};
-        std::vector<ZlType> unionTypes; // non-empty for an explicitly declared local union
-        std::vector<std::string> unionClassNames; // parallel class names for object members in a union
         std::optional<int> fixedArraySize; // fixed array length when declared locally
         ZlType arrayElementType{ZlType::UNKNOWN};
+        // Preserve the source contract for writes/expected-type inference.
+        // Inferred bindings render their resolved metadata instead.
+        std::optional<TypeAnnotation> annotation;
+        std::string storageName;
+        // A refinement is a read view of the same immutable storage contract.
+        std::shared_ptr<const VarInfo> declaration;
+        [[nodiscard]] std::string runtimeTypeName() const;
     };
 
     struct FuncInfo {
@@ -65,30 +69,41 @@ public:
     void pushScope();
     void popScope();
 
-    // Returns false if the name is already defined in the CURRENT (innermost) scope.
-    bool defineVar(const std::string& name, ZlType type, bool isConst, const std::string& className = "",
+    // Every lexical binding has a distinct bytecode name. Refinements keep
+    // their original binding's identity instead of creating a runtime local.
+    VarInfo& defineVar(const std::string& name, VarInfo info);
+    VarInfo& defineVar(const std::string& name, ZlType type, bool isConst, const std::string& className = "",
                    const std::vector<ZlType>& functionParamTypes = {},
                    ZlType functionReturnType = ZlType::UNKNOWN,
                    ZlType taskValueType = ZlType::UNKNOWN,
                    const std::string& taskValueClassName = "",
-                   const std::vector<ZlType>& unionTypes = {},
-                   const std::vector<std::string>& unionClassNames = {},
                    std::optional<int> fixedArraySize = std::nullopt,
                    ZlType arrayElementType = ZlType::UNKNOWN,
                    const std::vector<std::string>& functionCaptureNames = {},
                    bool functionUsesThis = false,
                    bool functionHasSignature = false,
                    OwnershipKind ownership = OwnershipKind::GC);
+    // Read snapshots survive recursive inference restoring a branch scope.
     [[nodiscard]] std::optional<VarInfo> lookupVar(const std::string& name) const;
+    VarInfo& binding(const std::string& name);
     void setFunctionSignature(const std::string& name, std::vector<std::string> paramClassNames,
                               std::string returnClassName, bool isAsync, bool hasSignature = true);
+
+    using ScopeState = std::vector<std::unordered_map<std::string, VarInfo>>;
+    [[nodiscard]] ScopeState snapshot() const { return scopes_; }
+    void restore(ScopeState state) { scopes_ = std::move(state); }
+    const auto& currentScope() const { return scopes_.back(); }
+    void refine(const std::string& name, VarInfo view);
+    void invalidate(const std::string& name);
+    void joinRefinements(ScopeState entry, const std::vector<ScopeState>& exits);
 
     void defineFunc(const FuncInfo& info);
     [[nodiscard]] std::optional<FuncInfo> lookupFunc(const std::string& name) const;
 
 private:
     // Each element is one scope: name -> VarInfo.
-    std::vector<std::unordered_map<std::string, VarInfo>> scopes_;
+    ScopeState scopes_;
+    std::size_t nextStorageId_{0};
 
     // Functions are "global" within the compilation unit (forward-referenceable),
     // so they don't participate in scope push/pop.
@@ -190,8 +205,6 @@ private:
         std::vector<std::string> functionCaptureNames;
         bool functionUsesThis{false};
         bool functionHasSignature{false};
-        std::vector<ZlType> unionTypes;
-        std::vector<std::string> unionClassNames;
         OwnershipKind ownership{OwnershipKind::GC};
         std::string borrowSource;
         bool functionIsNamedReference{false};
@@ -205,6 +218,8 @@ private:
 
     // --- expressions: returns the inferred type and its object identity ---
     [[nodiscard]] InferredType inferExpr(const AstNode* node);
+    [[nodiscard]] InferredType inferExpected(const AstNode* node, ZlType type,
+                                             const std::string& className, const TypeAnnotation& annotation);
     void analyzeLambdaCaptures(LambdaExpr* node);
     void validateThreadLambda(const LambdaExpr* node, const char* apiName);
 
@@ -295,6 +310,7 @@ private:
     // instantiateGenericClass wherever a concrete instantiation needs it.
     [[nodiscard]] ZlType resolveType(const TypeAnnotation& annotation, std::string* outClassName = nullptr);
     void validateOwnership(const TypeAnnotation& annotation, OwnershipKind ownership, std::size_t line);
+    [[nodiscard]] SymbolTable::VarInfo variableInfo(const TypeAnnotation& annotation);
 
     // True when `from` can be used where `to` is expected. This handles
     // UNKNOWN (always compatible), NIL (compatible with reference types), and

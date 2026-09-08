@@ -31,22 +31,21 @@ void collectPatternBindings(const MatchExpr::MapEntryPattern& m, std::unordered_
 // the current scope (lambda parameters, then pattern bindings); references to
 // anything else are recorded as outer names. The switch is intentionally
 // exhaustive (no `default`) so -Wswitch flags any node kind not yet visited.
-void collectRefs(const AstNode* node, std::unordered_set<std::string>& refs, bool& usesThis,
-                 const std::unordered_set<std::string>& bound) {
+void collectRefs(const AstNode* node, LambdaCaptureRefs& out, const std::unordered_set<std::string>& bound) {
     if (!node) return;
     switch (node->kind) {
         case NodeKind::Identifier: {
             const auto* n = static_cast<const Identifier*>(node);
-            if (!bound.count(n->name)) refs.insert(n->name);
+            if (!bound.count(n->name)) out.names.insert(n->name);
             break;
         }
         case NodeKind::ThisExpr:
-            usesThis = true;
-            refs.insert("this");
+            out.usesThis = true;
+            out.names.insert("this");
             break;
-        case NodeKind::UnaryExpr: { auto* n = static_cast<const UnaryExpr*>(node); collectRefs(n->operand.get(), refs, usesThis, bound); break; }
-        case NodeKind::AwaitExpr: { auto* n = static_cast<const AwaitExpr*>(node); collectRefs(n->operand.get(), refs, usesThis, bound); break; }
-        case NodeKind::BinaryExpr: { auto* n = static_cast<const BinaryExpr*>(node); collectRefs(n->left.get(), refs, usesThis, bound); collectRefs(n->right.get(), refs, usesThis, bound); break; }
+        case NodeKind::UnaryExpr: { auto* n = static_cast<const UnaryExpr*>(node); collectRefs(n->operand.get(), out, bound); break; }
+        case NodeKind::AwaitExpr: { auto* n = static_cast<const AwaitExpr*>(node); collectRefs(n->operand.get(), out, bound); break; }
+        case NodeKind::BinaryExpr: { auto* n = static_cast<const BinaryExpr*>(node); collectRefs(n->left.get(), out, bound); collectRefs(n->right.get(), out, bound); break; }
         case NodeKind::CallExpr: { auto* n = static_cast<const CallExpr*>(node);
             // The callee is a NAME, not a child node, so walking only the
             // arguments misses it. `f(g(x))` references both f and g, and a
@@ -54,33 +53,66 @@ void collectRefs(const AstNode* node, std::unordered_set<std::string>& refs, boo
             // names that actually resolve to a local are captured at runtime,
             // so recording a class or method name here is harmless.
             if (n->namespaceName.empty() && !n->calleeName.empty() && !bound.count(n->calleeName))
-                refs.insert(n->calleeName);
-            for (auto& a : n->arguments) collectRefs(a.get(), refs, usesThis, bound);
+                out.names.insert(n->calleeName);
+            for (auto& a : n->arguments) collectRefs(a.get(), out, bound);
             break; }
-        case NodeKind::AssignExpr: { auto* n = static_cast<const AssignExpr*>(node); if (!bound.count(n->name)) refs.insert(n->name); collectRefs(n->value.get(), refs, usesThis, bound); break; }
-        case NodeKind::MoveExpr: { auto* n = static_cast<const MoveExpr*>(node); if (!bound.count(n->name)) refs.insert(n->name); break; }
-        case NodeKind::FieldAccessExpr: { auto* n = static_cast<const FieldAccessExpr*>(node); collectRefs(n->object.get(), refs, usesThis, bound); break; }
-        case NodeKind::IndexAccessExpr: { auto* n = static_cast<const IndexAccessExpr*>(node); collectRefs(n->object.get(), refs, usesThis, bound); collectRefs(n->index.get(), refs, usesThis, bound); break; }
-        case NodeKind::FieldAssignExpr: { auto* n = static_cast<const FieldAssignExpr*>(node); collectRefs(n->object.get(), refs, usesThis, bound); collectRefs(n->value.get(), refs, usesThis, bound); break; }
-        case NodeKind::MethodCallExpr: { auto* n = static_cast<const MethodCallExpr*>(node); collectRefs(n->object.get(), refs, usesThis, bound); for (auto& a : n->arguments) collectRefs(a.get(), refs, usesThis, bound); break; }
-        case NodeKind::NewExpr: { auto* n = static_cast<const NewExpr*>(node); for (auto& a : n->arguments) collectRefs(a.get(), refs, usesThis, bound); break; }
-        case NodeKind::CollectionLiteral: { auto* n = static_cast<const CollectionLiteral*>(node); for (auto& a : n->elements) collectRefs(a.get(), refs, usesThis, bound); for (auto& e : n->entries) { collectRefs(e.first.get(), refs, usesThis, bound); collectRefs(e.second.get(), refs, usesThis, bound); } break; }
-        case NodeKind::BlockStmt: { auto* n = static_cast<const BlockStmt*>(node); for (auto& a : n->statements) collectRefs(a.get(), refs, usesThis, bound); break; }
-        case NodeKind::VarDecl: { auto* n = static_cast<const VarDecl*>(node); collectRefs(n->initializer.get(), refs, usesThis, bound); break; }
-        case NodeKind::LogStmt: { auto* n = static_cast<const LogStmt*>(node); collectRefs(n->argument.get(), refs, usesThis, bound); break; }
-        case NodeKind::LogExpr: { auto* n = static_cast<const LogExpr*>(node); collectRefs(n->argument.get(), refs, usesThis, bound); break; }
-        case NodeKind::IfStmt: { auto* n = static_cast<const IfStmt*>(node); for (auto& b : n->branches) { collectRefs(b.condition.get(), refs, usesThis, bound); collectRefs(b.body.get(), refs, usesThis, bound); } collectRefs(n->elseBody.get(), refs, usesThis, bound); break; }
-        case NodeKind::ReturnStmt: { auto* n = static_cast<const ReturnStmt*>(node); collectRefs(n->value.get(), refs, usesThis, bound); break; }
-        case NodeKind::ForStmt: { auto* n = static_cast<const ForStmt*>(node); collectRefs(n->start.get(), refs, usesThis, bound); collectRefs(n->end.get(), refs, usesThis, bound); collectRefs(n->step.get(), refs, usesThis, bound); collectRefs(n->body.get(), refs, usesThis, bound); break; }
-        case NodeKind::WhileStmt: { auto* n = static_cast<const WhileStmt*>(node); collectRefs(n->condition.get(), refs, usesThis, bound); collectRefs(n->body.get(), refs, usesThis, bound); break; }
-        case NodeKind::RepeatStmt: { auto* n = static_cast<const RepeatStmt*>(node); collectRefs(n->body.get(), refs, usesThis, bound); collectRefs(n->condition.get(), refs, usesThis, bound); break; }
-        case NodeKind::TryStmt: { auto* n = static_cast<const TryStmt*>(node); collectRefs(n->tryBlock.get(), refs, usesThis, bound); for (auto& c : n->catches) collectRefs(c.block.get(), refs, usesThis, bound); collectRefs(n->finallyBlock.get(), refs, usesThis, bound); break; }
-        case NodeKind::ThrowStmt: { auto* n = static_cast<const ThrowStmt*>(node); collectRefs(n->value.get(), refs, usesThis, bound); break; }
-        case NodeKind::ExprStmt: { auto* n = static_cast<const ExprStmt*>(node); collectRefs(n->expression.get(), refs, usesThis, bound); break; }
-        case NodeKind::SuperCallExpr: { auto* n = static_cast<const SuperCallExpr*>(node); for (auto& a : n->arguments) collectRefs(a.get(), refs, usesThis, bound); break; }
-        case NodeKind::SuperMethodCallExpr: { auto* n = static_cast<const SuperMethodCallExpr*>(node); for (auto& a : n->arguments) collectRefs(a.get(), refs, usesThis, bound); break; }
-        case NodeKind::DataLiteralExpr: { auto* n = static_cast<const DataLiteralExpr*>(node); for (auto& f : n->fields) collectRefs(f.second.get(), refs, usesThis, bound); break; }
-        case NodeKind::DataUpdateExpr: { auto* n = static_cast<const DataUpdateExpr*>(node); collectRefs(n->base.get(), refs, usesThis, bound); for (auto& f : n->fields) collectRefs(f.second.get(), refs, usesThis, bound); break; }
+        case NodeKind::AssignExpr: {
+            const auto* n = static_cast<const AssignExpr*>(node);
+            if (!bound.count(n->name)) { out.names.insert(n->name); out.assignedNames.insert(n->name); }
+            collectRefs(n->value.get(), out, bound);
+            break;
+        }
+        case NodeKind::MoveExpr: { auto* n = static_cast<const MoveExpr*>(node); if (!bound.count(n->name)) out.names.insert(n->name); break; }
+        case NodeKind::FieldAccessExpr: { auto* n = static_cast<const FieldAccessExpr*>(node); collectRefs(n->object.get(), out, bound); break; }
+        case NodeKind::IndexAccessExpr: { auto* n = static_cast<const IndexAccessExpr*>(node); collectRefs(n->object.get(), out, bound); collectRefs(n->index.get(), out, bound); break; }
+        case NodeKind::FieldAssignExpr: { auto* n = static_cast<const FieldAssignExpr*>(node); collectRefs(n->object.get(), out, bound); collectRefs(n->value.get(), out, bound); break; }
+        case NodeKind::MethodCallExpr: { auto* n = static_cast<const MethodCallExpr*>(node); collectRefs(n->object.get(), out, bound); for (auto& a : n->arguments) collectRefs(a.get(), out, bound); break; }
+        case NodeKind::NewExpr: { auto* n = static_cast<const NewExpr*>(node); for (auto& a : n->arguments) collectRefs(a.get(), out, bound); break; }
+        case NodeKind::CollectionLiteral: { auto* n = static_cast<const CollectionLiteral*>(node); for (auto& a : n->elements) collectRefs(a.get(), out, bound); for (auto& e : n->entries) { collectRefs(e.first.get(), out, bound); collectRefs(e.second.get(), out, bound); } break; }
+        case NodeKind::BlockStmt: {
+            const auto* block = static_cast<const BlockStmt*>(node);
+            auto local = bound;
+            for (const auto& statement : block->statements) {
+                collectRefs(statement.get(), out, local);
+                if (statement->kind == NodeKind::VarDecl)
+                    local.insert(static_cast<const VarDecl*>(statement.get())->name);
+            }
+            break;
+        }
+        case NodeKind::VarDecl: { auto* n = static_cast<const VarDecl*>(node); collectRefs(n->initializer.get(), out, bound); break; }
+        case NodeKind::LogStmt: { auto* n = static_cast<const LogStmt*>(node); collectRefs(n->argument.get(), out, bound); break; }
+        case NodeKind::LogExpr: { auto* n = static_cast<const LogExpr*>(node); collectRefs(n->argument.get(), out, bound); break; }
+        case NodeKind::IfStmt: { auto* n = static_cast<const IfStmt*>(node); for (auto& b : n->branches) { collectRefs(b.condition.get(), out, bound); collectRefs(b.body.get(), out, bound); } collectRefs(n->elseBody.get(), out, bound); break; }
+        case NodeKind::ReturnStmt: { auto* n = static_cast<const ReturnStmt*>(node); collectRefs(n->value.get(), out, bound); break; }
+        case NodeKind::ForStmt: {
+            const auto* n = static_cast<const ForStmt*>(node);
+            collectRefs(n->start.get(), out, bound);
+            collectRefs(n->end.get(), out, bound);
+            collectRefs(n->step.get(), out, bound);
+            auto loop = bound;
+            loop.insert(n->varName);
+            collectRefs(n->body.get(), out, loop);
+            break;
+        }
+        case NodeKind::WhileStmt: { auto* n = static_cast<const WhileStmt*>(node); collectRefs(n->condition.get(), out, bound); collectRefs(n->body.get(), out, bound); break; }
+        case NodeKind::RepeatStmt: { auto* n = static_cast<const RepeatStmt*>(node); collectRefs(n->body.get(), out, bound); collectRefs(n->condition.get(), out, bound); break; }
+        case NodeKind::TryStmt: {
+            const auto* n = static_cast<const TryStmt*>(node);
+            collectRefs(n->tryBlock.get(), out, bound);
+            for (const auto& clause : n->catches) {
+                auto caught = bound;
+                caught.insert(clause.varName);
+                collectRefs(clause.block.get(), out, caught);
+            }
+            collectRefs(n->finallyBlock.get(), out, bound);
+            break;
+        }
+        case NodeKind::ThrowStmt: { auto* n = static_cast<const ThrowStmt*>(node); collectRefs(n->value.get(), out, bound); break; }
+        case NodeKind::ExprStmt: { auto* n = static_cast<const ExprStmt*>(node); collectRefs(n->expression.get(), out, bound); break; }
+        case NodeKind::SuperCallExpr: { auto* n = static_cast<const SuperCallExpr*>(node); for (auto& a : n->arguments) collectRefs(a.get(), out, bound); break; }
+        case NodeKind::SuperMethodCallExpr: { auto* n = static_cast<const SuperMethodCallExpr*>(node); for (auto& a : n->arguments) collectRefs(a.get(), out, bound); break; }
+        case NodeKind::DataLiteralExpr: { auto* n = static_cast<const DataLiteralExpr*>(node); for (auto& f : n->fields) collectRefs(f.second.get(), out, bound); break; }
+        case NodeKind::DataUpdateExpr: { auto* n = static_cast<const DataUpdateExpr*>(node); collectRefs(n->base.get(), out, bound); for (auto& f : n->fields) collectRefs(f.second.get(), out, bound); break; }
         case NodeKind::LambdaExpr: {
             // A lambda nested in this body needs whatever IT references, so the
             // enclosing lambda has to carry those names across for it: at
@@ -93,7 +125,10 @@ void collectRefs(const AstNode* node, std::unordered_set<std::string>& refs, boo
             auto* n = static_cast<const LambdaExpr*>(node);
             std::unordered_set<std::string> nested(bound);
             for (const auto& p : n->params) nested.insert(p.name);
-            collectRefs(n->hasExprBody ? n->exprBody.get() : n->blockBody.get(), refs, usesThis, nested);
+            LambdaCaptureRefs captured;
+            collectRefs(n->hasExprBody ? n->exprBody.get() : n->blockBody.get(), captured, nested);
+            out.names.insert(captured.names.begin(), captured.names.end());
+            out.usesThis = out.usesThis || captured.usesThis;
             break;
         }
         case NodeKind::MatchExpr: {
@@ -101,7 +136,7 @@ void collectRefs(const AstNode* node, std::unordered_set<std::string>& refs, boo
             // result additionally see the names that arm's pattern binds - those
             // are locals, not captures, so add them to the bound set for the arm.
             auto* n = static_cast<const MatchExpr*>(node);
-            collectRefs(n->subject.get(), refs, usesThis, bound);
+            collectRefs(n->subject.get(), out, bound);
             for (const auto& arm : n->arms) {
                 std::unordered_set<std::string> armBound(bound);
                 if (!arm.bindingName.empty()) armBound.insert(arm.bindingName);
@@ -109,8 +144,8 @@ void collectRefs(const AstNode* node, std::unordered_set<std::string>& refs, boo
                 for (const auto& e : arm.listElements)
                     if (e) collectPatternBindings(*e, armBound);
                 for (const auto& m : arm.mapEntries) collectPatternBindings(m, armBound);
-                collectRefs(arm.guard.get(), refs, usesThis, armBound);
-                collectRefs(arm.result.get(), refs, usesThis, armBound);
+                collectRefs(arm.guard.get(), out, armBound);
+                collectRefs(arm.result.get(), out, armBound);
             }
             break;
         }
@@ -134,7 +169,7 @@ void collectRefs(const AstNode* node, std::unordered_set<std::string>& refs, boo
 LambdaCaptureRefs collectLambdaCaptureRefs(const AstNode* body,
                                            const std::unordered_set<std::string>& params) {
     LambdaCaptureRefs out;
-    collectRefs(body, out.names, out.usesThis, params);
+    collectRefs(body, out, params);
     return out;
 }
 

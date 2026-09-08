@@ -1,6 +1,7 @@
 #pragma once
 
 #include "value.hpp"
+#include "zl/common/type_name.hpp"
 
 namespace zl {
 struct Chunk;
@@ -8,7 +9,6 @@ struct Chunk;
 // Runtime substitutions are lexical: only bindings from the declaring class
 // or captured closure may replace a parameter token. Unknown names are never
 // guessed to be type parameters and silently exempted from checking.
-std::string substituteTypeParams(const std::string& typeName, const RuntimeTypeBindings& bindings);
 RuntimeTypeBindings receiverTypeBindings(const ObjectBox& receiver, const Chunk& chunk,
                                         const std::string& declaringClass);
 

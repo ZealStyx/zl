@@ -89,7 +89,7 @@ CompilationPlan buildCompilationPlan(const Program& program) {
                 method.dispatchSignature = dispatchSignatureForFunction(*fn, {}).describe();
                 const auto prefix = method.name;
                 if (method.dispatchSignature.rfind(prefix, 0) == 0) method.dispatchSignature.erase(0, prefix.size());
-                method.returnType = fn->returnType.name.empty() ? "void" : fn->returnType.name;
+                method.returnType = (fn->returnType.name.empty() && fn->returnType.unionOf.empty()) ? "void" : fn->returnType.name;
                 method.access = "public";
                 method.isStatic = false;
                 method.isAsync = fn->isAsync;
@@ -139,7 +139,7 @@ CompilationPlan buildCompilationPlan(const Program& program) {
                     method.dispatchSignature = dispatchSignatureForFunction(*fn, plan.classTypeParams.at(cls->name)).describe();
                     const auto prefix = method.name;
                     if (method.dispatchSignature.rfind(prefix, 0) == 0) method.dispatchSignature.erase(0, prefix.size());
-                    method.returnType = fn->returnType.name.empty() ? "void" : fn->returnType.name;
+                    method.returnType = (fn->returnType.name.empty() && fn->returnType.unionOf.empty()) ? "void" : fn->returnType.name;
                     method.access = fn->access == AccessModifier::PRIVATE ? "private" :
                                     fn->access == AccessModifier::PROTECTED ? "protected" : "public";
                     method.isStatic = fn->isStatic;

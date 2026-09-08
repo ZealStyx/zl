@@ -9,7 +9,7 @@ namespace zl {
 
 enum class ZlType {
     INT, DOUBLE, STRING, BOOL, VOID_TYPE, NIL, LIST, MAP, SET, ARRAY,
-    OBJECT, FUNCTION, TASK, UNKNOWN,
+    OBJECT, FUNCTION, TASK, UNKNOWN, UNION,
 };
 
 [[nodiscard]] std::string zlTypeName(ZlType t);

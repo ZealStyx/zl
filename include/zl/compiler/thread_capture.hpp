@@ -22,6 +22,9 @@ class SymbolTable;
 // a correctness bug, not a cosmetic one.
 struct LambdaCaptureRefs {
     std::unordered_set<std::string> names;
+    // Direct writes to free bindings. Nested closures only write their own
+    // captured copies, so their assignments are not propagated here.
+    std::unordered_set<std::string> assignedNames;
     bool usesThis{false};
 };
 

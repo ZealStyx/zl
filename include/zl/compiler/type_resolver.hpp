@@ -20,6 +20,8 @@ public:
     explicit TypeResolver(SemanticModel& semanticModel) : semanticModel_(semanticModel) {}
 
     void reset();
+    [[nodiscard]] const std::vector<ResolvedTypeArg>& unionMembers(const std::string& name) const;
+    [[nodiscard]] ResolvedTypeArg makeUnion(std::vector<ResolvedTypeArg> members);
 
     [[nodiscard]] ZlType resolveType(const TypeAnnotation& annotation,
                                      const std::string& currentClassName,
@@ -39,6 +41,7 @@ public:
 
 private:
     SemanticModel& semanticModel_;
+    std::unordered_map<std::string, std::vector<ResolvedTypeArg>> unions_;
     std::unordered_map<GenericInstantiation, std::string, GenericInstantiationHash> genericInstantiationCache_;
     std::unordered_map<std::string, GenericInstantiation> genericInstantiationByName_;
 };

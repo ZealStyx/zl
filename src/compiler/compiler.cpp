@@ -96,13 +96,13 @@ Chunk Compiler::compile(const Program& program) {
         paramNames.reserve(fn->params.size());
         parameterTypeNames.reserve(fn->params.size());
         for (const auto& p : fn->params) {
-            paramNames.push_back(p.name);
+            paramNames.push_back(p.storageName);
             parameterTypeNames.push_back(runtimeTypeName(p.type));
         }
         const DispatchSignature signature = dispatchSignature(*fn, classTypeParams.at(fn->ownerClassName));
         std::string qualifiedName = fn->ownerClassName + "." + signature.describe();
         FunctionInfo info{std::move(qualifiedName), std::move(paramNames), std::move(parameterTypeNames),
-                          (fn->returnType.name.empty() ? "void" : runtimeTypeName(fn->returnType)), 0, fn->isStatic, fn->isAsync};
+                          ((fn->returnType.name.empty() && fn->returnType.unionOf.empty()) ? "void" : runtimeTypeName(fn->returnType)), 0, fn->isStatic, fn->isAsync};
         info.ownerClassName = fn->ownerClassName;
         info.isNative = std::any_of(fn->annotations.begin(), fn->annotations.end(), [](const Annotation& a) { return a.name == "native"; });
         info.dispatchSignature = signature;
@@ -206,8 +206,8 @@ Chunk Compiler::compile(const Program& program) {
         activeOwnedLocalNames_.clear();
         for (const auto& param : fn->params) {
             if (param.ownership == OwnershipKind::OWNED &&
-                std::find(activeOwnedLocalNames_.begin(), activeOwnedLocalNames_.end(), param.name) == activeOwnedLocalNames_.end()) {
-                activeOwnedLocalNames_.push_back(param.name);
+                std::find(activeOwnedLocalNames_.begin(), activeOwnedLocalNames_.end(), param.storageName) == activeOwnedLocalNames_.end()) {
+                activeOwnedLocalNames_.push_back(param.storageName);
             }
         }
 
@@ -336,11 +336,11 @@ void Compiler::compileVarDecl(const VarDecl* node) {
         std::size_t nilIdx = chunk_.addConstant(Value{});
         emit(OpCode::PushConst, nilIdx, node->line);
     }
-    std::size_t nameIdx = chunk_.addName(node->name);
+    std::size_t nameIdx = chunk_.addName(node->storageName);
     emit(OpCode::DefineVar, nameIdx, node->line);
     if (node->ownership == OwnershipKind::OWNED &&
-        std::find(activeOwnedLocalNames_.begin(), activeOwnedLocalNames_.end(), node->name) == activeOwnedLocalNames_.end()) {
-        activeOwnedLocalNames_.push_back(node->name);
+        std::find(activeOwnedLocalNames_.begin(), activeOwnedLocalNames_.end(), node->storageName) == activeOwnedLocalNames_.end()) {
+        activeOwnedLocalNames_.push_back(node->storageName);
     }
 }
 
@@ -423,14 +423,14 @@ void Compiler::compileForStmt(const ForStmt* node) {
     std::string stepName = "__for_step_" + std::to_string(id);
 
     compileExpression(node->start.get());
-    emit(OpCode::DefineVar, chunk_.addName(node->varName), node->line);
+    emit(OpCode::DefineVar, chunk_.addName(node->storageName), node->line);
     compileExpression(node->end.get());
     emit(OpCode::DefineVar, chunk_.addName(endName), node->line);
     compileExpression(node->step.get());
     emit(OpCode::DefineVar, chunk_.addName(stepName), node->line);
 
     std::size_t loopStart = chunk_.code.size();
-    emit(OpCode::LoadVar, chunk_.addName(node->varName), node->line);
+    emit(OpCode::LoadVar, chunk_.addName(node->storageName), node->line);
     emit(OpCode::LoadVar, chunk_.addName(endName), node->line);
     emit(OpCode::LoadVar, chunk_.addName(stepName), node->line);
     emit(OpCode::RangeContinue, 0, node->line);
@@ -442,10 +442,10 @@ void Compiler::compileForStmt(const ForStmt* node) {
     compileStatement(node->body.get());
 
     std::size_t incrementLabel = chunk_.code.size();
-    emit(OpCode::LoadVar, chunk_.addName(node->varName), node->line);
+    emit(OpCode::LoadVar, chunk_.addName(node->storageName), node->line);
     emit(OpCode::LoadVar, chunk_.addName(stepName), node->line);
     emit(OpCode::Add, 0, node->line);
-    emit(OpCode::DefineVar, chunk_.addName(node->varName), node->line);
+    emit(OpCode::DefineVar, chunk_.addName(node->storageName), node->line);
     emit(OpCode::Jump, loopStart, node->line);
 
     std::size_t loopEnd = chunk_.code.size();
@@ -589,7 +589,7 @@ void Compiler::compileTryStmt(const TryStmt* node) {
         chunk_.code[handlerIndex].operand = chunk_.code.size();
 
         const CatchClause& clause = node->catches[catchIndex];
-        emit(OpCode::DefineVar, chunk_.addName(clause.varName), clause.line ? clause.line : node->line);
+        emit(OpCode::DefineVar, chunk_.addName(clause.storageName), clause.line ? clause.line : node->line);
         if (hasFinally) activeFinallyBlocks_.push_back(static_cast<const BlockStmt*>(node->finallyBlock.get()));
         compileStatement(clause.block.get());
         if (hasFinally) activeFinallyBlocks_.pop_back();
@@ -707,7 +707,7 @@ void Compiler::compileLiteral(const Literal* node) {
 }
 
 void Compiler::compileIdentifier(const Identifier* node) {
-    std::size_t idx = chunk_.addName(node->name);
+    std::size_t idx = chunk_.addName(node->storageName);
     emit(OpCode::LoadVar, idx, node->line);
 }
 
@@ -993,11 +993,11 @@ void Compiler::compileMatchExpr(const MatchExpr* node) {
     compileExpression(node->subject.get());
     const std::string subjectTemp = "__match_subject_" + std::to_string(chunk_.names.size());
     const std::size_t subjectName = chunk_.addName(subjectTemp);
-    emit(OpCode::Dup, 0, node->line);
     emit(OpCode::DefineVar, subjectName, node->line);
 
     std::vector<std::size_t> endJumps;
     std::size_t tempCounter = 0;
+    const std::unordered_map<std::string, std::string>* bindings = nullptr;
     std::function<void(const MatchExpr::Pattern&, std::size_t, std::vector<std::size_t>&)> compilePattern =
         [&](const MatchExpr::Pattern& pattern, std::size_t sourceName, std::vector<std::size_t>& failJumps) {
             auto loadSource = [&]() { emit(OpCode::LoadVar, sourceName, pattern.line); };
@@ -1006,7 +1006,7 @@ void Compiler::compileMatchExpr(const MatchExpr* node) {
                 case MatchExpr::PatternKind::Variable:
                     if (pattern.kind == MatchExpr::PatternKind::Variable && !pattern.bindingName.empty() && pattern.bindingName != "_") {
                         loadSource();
-                        emit(OpCode::DefineVar, chunk_.addName(pattern.bindingName), pattern.line);
+                        emit(OpCode::DefineVar, chunk_.addName(bindings->at(pattern.bindingName)), pattern.line);
                     }
                     return;
                 case MatchExpr::PatternKind::Literal: {
@@ -1039,7 +1039,7 @@ void Compiler::compileMatchExpr(const MatchExpr* node) {
                     failJumps.push_back(emit(OpCode::JumpIfFalse, 0, pattern.line));
                     if (!pattern.bindingName.empty() && pattern.bindingName != "_") {
                         loadSource();
-                        emit(OpCode::DefineVar, chunk_.addName(pattern.bindingName), pattern.line);
+                        emit(OpCode::DefineVar, chunk_.addName(bindings->at(pattern.bindingName)), pattern.line);
                     }
                     return;
                 case MatchExpr::PatternKind::List: {
@@ -1152,6 +1152,7 @@ void Compiler::compileMatchExpr(const MatchExpr* node) {
         };
 
     for (const auto& arm : node->arms) {
+        bindings = &arm.storageBindings;
         std::function<std::unique_ptr<MatchExpr::Pattern>(const MatchExpr::Pattern&)> clonePattern = [&](const MatchExpr::Pattern& src) {
             auto out = std::make_unique<MatchExpr::Pattern>();
             out->kind = src.kind; out->raw = src.raw; out->literalType = src.literalType;
@@ -1204,20 +1205,24 @@ void Compiler::compileMatchExpr(const MatchExpr* node) {
         if (arm.guard) {
             compileExpression(arm.guard.get());
             const std::size_t guardFail = emit(OpCode::JumpIfFalse, 0, arm.line);
-            emit(OpCode::LoadVar, subjectName, arm.line);
-            emit(OpCode::Pop, 0, arm.line);
             compileExpression(arm.result.get());
             endJumps.push_back(emit(OpCode::Jump, 0, arm.line));
             patchJump(guardFail);
             for (auto j : failJumps) patchJump(j);
         } else {
-            emit(OpCode::LoadVar, subjectName, arm.line);
-            emit(OpCode::Pop, 0, arm.line);
             compileExpression(arm.result.get());
             endJumps.push_back(emit(OpCode::Jump, 0, arm.line));
             for (auto j : failJumps) patchJump(j);
         }
     }
+    // Static coverage proves a matching arm for well-typed inputs. Do not
+    // leak a subject/stack value if a dynamic or malformed value evades it.
+    emit(OpCode::NewObject, chunk_.addName("Exception"), node->line);
+    emit(OpCode::Dup, 0, node->line);
+    emit(OpCode::PushConst, chunk_.addConstant(std::string("non-exhaustive match")), node->line);
+    emit(OpCode::InvokeMethod, methodSlot(DispatchSignature{"Exception", {{DispatchTypeKind::STRING, {}}}}), node->line, 1);
+    emit(OpCode::Pop, 0, node->line);
+    emit(OpCode::Throw, 0, node->line);
     for (auto j : endJumps) patchJump(j);
 }
 
@@ -1227,7 +1232,7 @@ void Compiler::compileLambdaExpr(const LambdaExpr* node) {
 
     std::vector<std::string> paramNames;
     paramNames.reserve(node->params.size());
-    for (const auto& p : node->params) paramNames.push_back(p.name);
+    for (const auto& p : node->params) paramNames.push_back(p.storageName);
 
     std::string lambdaName = "$lambda" + std::to_string(lambdaCounter_++);
     std::size_t funcIndex = chunk_.functions.size();
@@ -1241,13 +1246,13 @@ void Compiler::compileLambdaExpr(const LambdaExpr* node) {
     const std::string lambdaReturnTypeName =
         node->inferredReturnTypeName.empty() ? "unknown" : node->inferredReturnTypeName;
     FunctionInfo lambdaInfo{std::move(lambdaName), paramNames, std::move(lambdaParameterTypeNames),
-                            lambdaReturnTypeName, entryAddress, false, node->isAsync, false, currentClassName_, {}, node->captureNames};
+                            lambdaReturnTypeName, entryAddress, false, node->isAsync, false, currentClassName_, {}, node->captureStorageNames};
     chunk_.functions.push_back(std::move(lambdaInfo));
 
     const auto savedOwnedLocals = activeOwnedLocalNames_;
     activeOwnedLocalNames_.clear();
     for (const auto& param : node->params) {
-        if (param.ownership == OwnershipKind::OWNED) activeOwnedLocalNames_.push_back(param.name);
+        if (param.ownership == OwnershipKind::OWNED) activeOwnedLocalNames_.push_back(param.storageName);
     }
 
     if (node->hasExprBody) {
@@ -1335,7 +1340,7 @@ void Compiler::compileCall(const CallExpr* node) {
     // own comment for the exact stack layout it expects.
     if (node->isValueCall) {
         for (const auto& arg : node->arguments) compileExpression(arg.get());
-        std::size_t nameIdx = chunk_.addName(node->calleeName);
+        std::size_t nameIdx = chunk_.addName(node->calleeStorageName);
         emit(OpCode::LoadVar, nameIdx, node->line);
         emit(OpCode::CallValue, 0, node->line, node->arguments.size());
         return;
@@ -1354,20 +1359,20 @@ void Compiler::compileCall(const CallExpr* node) {
     emit(OpCode::Call, functionIndex, node->line);
 }
 
-// name = value. DefineVar doubles as "declare OR reassign in the current
-// scope" since there's no block-level scoping yet (a func's locals are
-// one flat map) - so reusing it here for reassignment is correct for now.
-// Dup keeps a second copy on the stack so the assignment still evaluates to
-// the assigned value, since DefineVar itself consumes (pops) one copy to store.
+// Assignment targets the lexical binding resolved by the checker. Validate
+// before duplicating/storing so a failed write preserves both the old value
+// and the surrounding expression's stack shape.
 void Compiler::compileAssign(const AssignExpr* node) {
     compileExpression(node->value.get());
+    if (!node->assertedTypeName.empty() && node->assertedTypeName != "unknown")
+        emit(OpCode::AssertType, chunk_.addName(node->assertedTypeName), node->line);
     emit(OpCode::Dup, 0, node->line);
-    std::size_t nameIdx = chunk_.addName(node->name);
+    std::size_t nameIdx = chunk_.addName(node->storageName);
     emit(OpCode::DefineVar, nameIdx, node->line);
 }
 
 void Compiler::compileMove(const MoveExpr* node) {
-    const std::size_t nameIdx = chunk_.addName(node->name);
+    const std::size_t nameIdx = chunk_.addName(node->storageName);
     emit(OpCode::MoveVar, nameIdx, node->line);
 }
 
