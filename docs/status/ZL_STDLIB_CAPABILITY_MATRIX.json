@@ -1,0 +1,3054 @@
+{
+  "schema_version": 1,
+  "source_files": [
+    "include/zl/compiler/native_catalog.hpp",
+    "src/compiler/native_catalog.cpp",
+    "src/vm/native.cpp",
+    "src/compiler/builtin_library.cpp",
+    "stdlib/",
+    "docs/reference/STDLIB_REFERENCE.md"
+  ],
+  "invariants": {
+    "native_catalog_entries": 246,
+    "native_runtime_bindings": 246,
+    "native_catalog_runtime_ids_match": true,
+    "builtin_class_count": 32,
+    "stdlib_zl_file_count": 26
+  },
+  "native_domain_counts": {
+    "Reflection": 33,
+    "Math": 23,
+    "FileSystem": 22,
+    "String": 20,
+    "Collection": 18,
+    "Time": 17,
+    "Type": 10,
+    "Atomic": 9,
+    "Crypto": 9,
+    "System": 8,
+    "Log": 7,
+    "Text": 7,
+    "Channel": 6,
+    "Queue": 6,
+    "Semaphore": 6,
+    "Serialize": 6,
+    "Stack": 6,
+    "Test": 6,
+    "Condition": 4,
+    "IO": 4,
+    "Network": 4,
+    "Shared": 3,
+    "Thread": 3,
+    "RwLock": 2,
+    "Bool": 1,
+    "Double": 1,
+    "Hash": 1,
+    "Int": 1,
+    "Mutex": 1,
+    "Task": 1,
+    "share": 1
+  },
+  "builtin_classes": [
+    {
+      "name": "List<T>",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Map<K, V>",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Set<T>",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Option<T>",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Some<T> extends Option<T>",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "None<T> extends Option<T>",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Result<T, E>",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Ok<T, E> extends Result<T, E>",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Err<T, E> extends Result<T, E>",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Shared<T>",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Exception",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "CancellationException extends Exception",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "RuntimeError extends Exception",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "TypeError extends RuntimeError",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "IndexError extends RuntimeError",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "KeyError extends RuntimeError",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "ArithmeticError extends RuntimeError",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "StackOverflowError extends RuntimeError",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "IOError extends RuntimeError",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "NativeError extends RuntimeError",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "RegexError extends RuntimeError",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "ReflectionError extends Exception",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "InvalidArguments extends ReflectionError",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "AccessViolation extends ReflectionError",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "RegexMatch",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Regex",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Math",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Type",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Field",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Method",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Constructor",
+      "source_layer": "compiler embedded builtin"
+    },
+    {
+      "name": "Function",
+      "source_layer": "compiler embedded builtin"
+    }
+  ],
+  "stdlib_files": [
+    {
+      "path": "stdlib/zl/crypto/Crypto.zl",
+      "classes": [
+        "Crypto"
+      ],
+      "imports": [],
+      "methods": [
+        "digest256",
+        "digest256Hex",
+        "hash32",
+        "hash64",
+        "toHex",
+        "fromHex",
+        "toBase64",
+        "fromBase64",
+        "fromHexOr",
+        "fromBase64Or",
+        "digestsEqual",
+        "verifySha256"
+      ]
+    },
+    {
+      "path": "stdlib/zl/fs/FileSystem.zl",
+      "classes": [
+        "FileSystem"
+      ],
+      "imports": [],
+      "methods": [
+        "readOr",
+        "sizeOr",
+        "modifiedTimeOr",
+        "removeIfExists",
+        "removeDirIfExists",
+        "ensureFile",
+        "ensureParentDir",
+        "readLines",
+        "writeLines",
+        "appendLine",
+        "entries",
+        "files",
+        "directories",
+        "isEmptyDir",
+        "withExtension",
+        "hasExtension"
+      ]
+    },
+    {
+      "path": "stdlib/zl/lang/Atomic.zl",
+      "classes": [
+        "Atomic"
+      ],
+      "imports": [],
+      "methods": [
+        "ofInt",
+        "ofBool",
+        "ofDouble",
+        "increment",
+        "decrement",
+        "reset",
+        "toggle"
+      ]
+    },
+    {
+      "path": "stdlib/zl/lang/Channel.zl",
+      "classes": [
+        "Channel"
+      ],
+      "imports": [],
+      "methods": [
+        "bounded",
+        "sendBlocking",
+        "receiveBlocking",
+        "count"
+      ]
+    },
+    {
+      "path": "stdlib/zl/lang/Condition.zl",
+      "classes": [
+        "Condition"
+      ],
+      "imports": [],
+      "methods": [
+        "create",
+        "waitUntil",
+        "waitUntilTimeout",
+        "signal",
+        "broadcast"
+      ]
+    },
+    {
+      "path": "stdlib/zl/lang/Mutex.zl",
+      "classes": [
+        "Mutex"
+      ],
+      "imports": [],
+      "methods": [
+        "create",
+        "guard"
+      ]
+    },
+    {
+      "path": "stdlib/zl/lang/RwLock.zl",
+      "classes": [
+        "RwLock"
+      ],
+      "imports": [],
+      "methods": [
+        "create",
+        "read",
+        "write"
+      ]
+    },
+    {
+      "path": "stdlib/zl/lang/Semaphore.zl",
+      "classes": [
+        "Semaphore"
+      ],
+      "imports": [],
+      "methods": [
+        "withPermits",
+        "withPermit",
+        "tryWithPermit",
+        "isExhausted"
+      ]
+    },
+    {
+      "path": "stdlib/zl/lang/Task.zl",
+      "classes": [
+        "Task"
+      ],
+      "imports": [],
+      "methods": []
+    },
+    {
+      "path": "stdlib/zl/lang/Thread.zl",
+      "classes": [
+        "Thread"
+      ],
+      "imports": [],
+      "methods": [
+        "startThread",
+        "wait",
+        "running"
+      ]
+    },
+    {
+      "path": "stdlib/zl/logging/Log.zl",
+      "classes": [
+        "Log"
+      ],
+      "imports": [
+        "zl.serialize.Serialize"
+      ],
+      "methods": [
+        "infoLine",
+        "warnLine",
+        "errorLine",
+        "tagged",
+        "infoTagged",
+        "warnTagged",
+        "errorTagged",
+        "when",
+        "exception",
+        "fields"
+      ]
+    },
+    {
+      "path": "stdlib/zl/math/Vector2.zl",
+      "classes": [
+        "Vector2"
+      ],
+      "imports": [],
+      "methods": [
+        "Vector2",
+        "lengthSquared",
+        "length",
+        "normalize",
+        "dot",
+        "distanceSquared",
+        "distance"
+      ]
+    },
+    {
+      "path": "stdlib/zl/math/Vector3.zl",
+      "classes": [
+        "Vector3"
+      ],
+      "imports": [],
+      "methods": [
+        "Vector3",
+        "lengthSquared",
+        "length",
+        "normalize",
+        "dot",
+        "cross",
+        "distanceSquared",
+        "distance"
+      ]
+    },
+    {
+      "path": "stdlib/zl/net/Network.zl",
+      "classes": [
+        "Network"
+      ],
+      "imports": [
+        "zl.text.Text"
+      ],
+      "methods": [
+        "lookup",
+        "lookupOr",
+        "lookupAllOrEmpty",
+        "isResolvable",
+        "isIpv4",
+        "isIpv6",
+        "isLoopback",
+        "isPrivate"
+      ]
+    },
+    {
+      "path": "stdlib/zl/serialize/Serialize.zl",
+      "classes": [
+        "Serialize"
+      ],
+      "imports": [],
+      "methods": [
+        "stringify",
+        "parse",
+        "string",
+        "integer",
+        "number",
+        "boolean",
+        "stringOr",
+        "integerOr",
+        "numberOr",
+        "booleanOr",
+        "stringifyOr",
+        "parseOr",
+        "isValidJson",
+        "isString",
+        "isInt",
+        "isNumber",
+        "isBool",
+        "hasField",
+        "field",
+        "stringField",
+        "intField",
+        "numberField",
+        "boolField",
+        "lengthOr",
+        "element",
+        "stringList",
+        "intList",
+        "encodeStringList",
+        "encodeIntList",
+        "encodeStringMap"
+      ]
+    },
+    {
+      "path": "stdlib/zl/test/Runner.zl",
+      "classes": [
+        "Runner"
+      ],
+      "imports": [],
+      "methods": [
+        "Runner",
+        "run",
+        "report"
+      ]
+    },
+    {
+      "path": "stdlib/zl/test/Test.zl",
+      "classes": [
+        "Test"
+      ],
+      "imports": [],
+      "methods": [
+        "assertThrows"
+      ]
+    },
+    {
+      "path": "stdlib/zl/text/Text.zl",
+      "classes": [
+        "Text"
+      ],
+      "imports": [],
+      "methods": [
+        "length",
+        "isEmpty",
+        "isNotEmpty",
+        "upper",
+        "lower",
+        "trim",
+        "isBlank",
+        "repeatText",
+        "contains",
+        "indexOf",
+        "charAt",
+        "substring",
+        "replace",
+        "remove",
+        "reverse",
+        "toInt",
+        "toFloat",
+        "toBool",
+        "toIntOr",
+        "toFloatOr",
+        "toBoolOr",
+        "startsWith",
+        "endsWith",
+        "count",
+        "padLeft",
+        "padRight",
+        "join",
+        "split",
+        "lines",
+        "words",
+        "chars",
+        "trimStart",
+        "trimEnd",
+        "removePrefix",
+        "removeSuffix",
+        "ensurePrefix",
+        "ensureSuffix",
+        "lastIndexOf",
+        "indexOfFrom",
+        "indicesOf",
+        "containsAny",
+        "compare",
+        "compareIgnoreCase",
+        "equalsIgnoreCase",
+        "containsIgnoreCase",
+        "startsWithIgnoreCase",
+        "endsWithIgnoreCase",
+        "capitalize",
+        "title",
+        "slice",
+        "take",
+        "drop",
+        "padCenter",
+        "truncate",
+        "codePointAt",
+        "fromCodePoint",
+        "isDigits",
+        "isAlpha",
+        "formatAll"
+      ]
+    },
+    {
+      "path": "stdlib/zl/time/Calendar.zl",
+      "classes": [
+        "Calendar"
+      ],
+      "imports": [],
+      "methods": [
+        "civilToDays",
+        "fromDayNumber",
+        "dayNumber",
+        "addDays",
+        "addWeeks",
+        "addMonths",
+        "addYears",
+        "diffDays",
+        "startOfDay",
+        "endOfDay",
+        "isSameDay",
+        "daysInMonth",
+        "isWeekend",
+        "weekdayName",
+        "monthName",
+        "isoDate",
+        "isoTime",
+        "isoDateTime",
+        "isoUtc"
+      ]
+    },
+    {
+      "path": "stdlib/zl/time/Date.zl",
+      "classes": [
+        "Date"
+      ],
+      "imports": [
+        "zl.time.Calendar",
+        "zl.time.Duration"
+      ],
+      "methods": [
+        "Date",
+        "of",
+        "today",
+        "year",
+        "month",
+        "day",
+        "dayOfWeek",
+        "dayOfYear",
+        "weekdayName",
+        "monthName",
+        "timestamp",
+        "dayNumber",
+        "format",
+        "iso",
+        "toString",
+        "addDays",
+        "subtractDays",
+        "addWeeks",
+        "subtractWeeks",
+        "addMonths",
+        "subtractMonths",
+        "addYears",
+        "subtractYears",
+        "startOfMonth",
+        "endOfMonth",
+        "startOfYear",
+        "endOfYear",
+        "daysUntil",
+        "difference",
+        "isWeekend",
+        "isWeekday",
+        "isLeapYear",
+        "isSameMonth",
+        "compare",
+        "isBefore",
+        "isAfter",
+        "equals",
+        "isBetween"
+      ]
+    },
+    {
+      "path": "stdlib/zl/time/DateTime.zl",
+      "classes": [
+        "DateTime"
+      ],
+      "imports": [
+        "zl.time.Calendar",
+        "zl.time.Date",
+        "zl.time.TimeOfDay",
+        "zl.time.Duration"
+      ],
+      "methods": [
+        "DateTime",
+        "of",
+        "now",
+        "year",
+        "month",
+        "day",
+        "hour",
+        "minute",
+        "second",
+        "dayOfWeek",
+        "dayOfYear",
+        "weekdayName",
+        "monthName",
+        "timestamp",
+        "date",
+        "timeOfDay",
+        "format",
+        "iso",
+        "isoUtc",
+        "toString",
+        "addSeconds",
+        "addMinutes",
+        "addHours",
+        "subtractSeconds",
+        "subtractMinutes",
+        "subtractHours",
+        "addDuration",
+        "addDays",
+        "subtractDays",
+        "addWeeks",
+        "subtractWeeks",
+        "addMonths",
+        "subtractMonths",
+        "addYears",
+        "subtractYears",
+        "startOfDay",
+        "endOfDay",
+        "difference",
+        "secondsUntil",
+        "minutesUntil",
+        "hoursUntil",
+        "daysUntil",
+        "isWeekend",
+        "isSameDay",
+        "compare",
+        "isBefore",
+        "isAfter",
+        "equals",
+        "isBetween"
+      ]
+    },
+    {
+      "path": "stdlib/zl/time/Duration.zl",
+      "classes": [
+        "Duration"
+      ],
+      "imports": [],
+      "methods": [
+        "Duration",
+        "seconds",
+        "minutes",
+        "hours",
+        "milliseconds",
+        "add",
+        "subtract",
+        "negate",
+        "abs",
+        "isZero",
+        "isNegative",
+        "isPositive",
+        "compare"
+      ]
+    },
+    {
+      "path": "stdlib/zl/time/Time.zl",
+      "classes": [
+        "Time"
+      ],
+      "imports": [
+        "zl.time.Calendar",
+        "zl.time.DateTime",
+        "zl.time.Date",
+        "zl.time.TimeOfDay",
+        "zl.time.Duration"
+      ],
+      "methods": [
+        "nowDateTime",
+        "today",
+        "clock",
+        "dateTimeAt",
+        "dateAt",
+        "durationMillis",
+        "durationSeconds",
+        "durationMinutes",
+        "durationHours",
+        "durationDays",
+        "between",
+        "sleepMillis",
+        "sleepDuration",
+        "elapsedMillisSince",
+        "addSeconds",
+        "addMinutes",
+        "addHours",
+        "addDays",
+        "addWeeks",
+        "addMonths",
+        "addYears",
+        "dayNumber",
+        "diffSeconds",
+        "diffMinutes",
+        "diffHours",
+        "diffDays",
+        "compare",
+        "isBefore",
+        "isAfter",
+        "isBetween",
+        "min",
+        "max",
+        "daysInMonth",
+        "isWeekend",
+        "weekdayName",
+        "monthName",
+        "startOfDay",
+        "endOfDay",
+        "isSameDay",
+        "isoDate",
+        "isoTime",
+        "isoDateTime",
+        "isoUtc"
+      ]
+    },
+    {
+      "path": "stdlib/zl/time/TimeOfDay.zl",
+      "classes": [
+        "TimeOfDay"
+      ],
+      "imports": [
+        "zl.time.Duration"
+      ],
+      "methods": [
+        "TimeOfDay",
+        "of",
+        "now",
+        "hour",
+        "minute",
+        "second",
+        "totalSeconds",
+        "totalMinutes",
+        "format",
+        "iso",
+        "short",
+        "toString",
+        "addSeconds",
+        "addMinutes",
+        "addHours",
+        "subtractSeconds",
+        "subtractMinutes",
+        "subtractHours",
+        "secondsUntil",
+        "difference",
+        "isMorning",
+        "isAfternoon",
+        "isEvening",
+        "compare",
+        "isBefore",
+        "isAfter",
+        "equals",
+        "isBetween"
+      ]
+    },
+    {
+      "path": "stdlib/zl/util/Queue.zl",
+      "classes": [
+        "Queue"
+      ],
+      "imports": [],
+      "methods": [
+        "Queue",
+        "enqueue",
+        "dequeue",
+        "peek",
+        "length",
+        "isEmpty",
+        "isNotEmpty",
+        "dequeueOr",
+        "peekOr",
+        "enqueueAll",
+        "clear",
+        "drain",
+        "items",
+        "contains",
+        "forEach"
+      ]
+    },
+    {
+      "path": "stdlib/zl/util/Stack.zl",
+      "classes": [
+        "Stack"
+      ],
+      "imports": [],
+      "methods": [
+        "Stack",
+        "push",
+        "pop",
+        "peek",
+        "length",
+        "isEmpty",
+        "isNotEmpty",
+        "popOr",
+        "peekOr",
+        "pushAll",
+        "clear",
+        "drain",
+        "items",
+        "contains",
+        "forEach"
+      ]
+    }
+  ],
+  "native_capabilities": [
+    {
+      "native_id": "TYPE_NAME",
+      "qualified_name": "Type.name",
+      "domain": "Type",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Type",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TYPE_FIELDS",
+      "qualified_name": "Type.fields",
+      "domain": "Type",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Type",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TYPE_METHODS",
+      "qualified_name": "Type.methods",
+      "domain": "Type",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Type",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TYPE_BASE",
+      "qualified_name": "Type.base",
+      "domain": "Type",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Type",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TYPE_CALLABLE",
+      "qualified_name": "Type.callable",
+      "domain": "Type",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Type",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TYPE_KIND",
+      "qualified_name": "Type.kind",
+      "domain": "Type",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Type",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TYPE_IS_DATA",
+      "qualified_name": "Type.isData",
+      "domain": "Type",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Type",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TYPE_IS_ENUM",
+      "qualified_name": "Type.isEnum",
+      "domain": "Type",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Type",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TYPE_ENUM_MEMBERS",
+      "qualified_name": "Type.enumMembers",
+      "domain": "Type",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Type",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TYPE_OF",
+      "qualified_name": "Type.of",
+      "domain": "Type",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Type",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SHARED_SHARE",
+      "qualified_name": "share",
+      "domain": "share",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime native surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SHARED_GET",
+      "qualified_name": "Shared.__get",
+      "domain": "Shared",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Shared",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SHARED_SET",
+      "qualified_name": "Shared.__set",
+      "domain": "Shared",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Shared",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SHARED_WITHLOCK",
+      "qualified_name": "Shared.__withLock",
+      "domain": "Shared",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Shared",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_NAME",
+      "qualified_name": "Reflection.name",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_KIND",
+      "qualified_name": "Reflection.kind",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_IS_DATA",
+      "qualified_name": "Reflection.isData",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_IS_ENUM",
+      "qualified_name": "Reflection.isEnum",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_ENUM_MEMBERS",
+      "qualified_name": "Reflection.enumMembers",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_FIELDS",
+      "qualified_name": "Reflection.fields",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_METHODS",
+      "qualified_name": "Reflection.methods",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_BASE",
+      "qualified_name": "Reflection.base",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_INTERFACES",
+      "qualified_name": "Reflection.interfaces",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_TYPE_PARAMETERS",
+      "qualified_name": "Reflection.typeParameters",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_TYPE_CONSTRUCTORS",
+      "qualified_name": "Reflection.constructors",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_FIELD",
+      "qualified_name": "Reflection.field",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_METHOD",
+      "qualified_name": "Reflection.method",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_CONSTRUCTOR",
+      "qualified_name": "Reflection.constructor",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_METHOD_INVOKE",
+      "qualified_name": "Reflection.methodInvoke",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_CONSTRUCTOR_INVOKE",
+      "qualified_name": "Reflection.constructorInvoke",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_FIELD_NAME",
+      "qualified_name": "Reflection.fieldName",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_FIELD_TYPE",
+      "qualified_name": "Reflection.fieldType",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_FIELD_ACCESS",
+      "qualified_name": "Reflection.fieldAccess",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_METHOD_NAME",
+      "qualified_name": "Reflection.methodName",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_METHOD_RETURN_TYPE",
+      "qualified_name": "Reflection.methodReturnType",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_METHOD_ACCESS",
+      "qualified_name": "Reflection.methodAccess",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_METHOD_STATIC",
+      "qualified_name": "Reflection.methodIsStatic",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_METHOD_ASYNC",
+      "qualified_name": "Reflection.methodIsAsync",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_METHOD_PARAMETERS",
+      "qualified_name": "Reflection.methodParameters",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_CONSTRUCTOR_PARAMETERS",
+      "qualified_name": "Reflection.constructorParameters",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_FUNCTION",
+      "qualified_name": "Reflection.function",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_FUNCTION_NAME",
+      "qualified_name": "Reflection.functionName",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_FUNCTION_PARAMETERS",
+      "qualified_name": "Reflection.functionParameters",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_FUNCTION_RETURN_TYPE",
+      "qualified_name": "Reflection.functionReturnType",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_FUNCTION_ASYNC",
+      "qualified_name": "Reflection.functionIsAsync",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_FUNCTION_IS_NATIVE",
+      "qualified_name": "Reflection.functionIsNative",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "REFLECTION_FUNCTION_INVOKE",
+      "qualified_name": "Reflection.functionInvoke",
+      "domain": "Reflection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Reflection",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_SQRT",
+      "qualified_name": "Math.sqrt",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_ABS",
+      "qualified_name": "Math.abs",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_POW",
+      "qualified_name": "Math.pow",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_FLOOR",
+      "qualified_name": "Math.floor",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_CEIL",
+      "qualified_name": "Math.ceil",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_ROUND",
+      "qualified_name": "Math.round",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_MIN",
+      "qualified_name": "Math.min",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_MAX",
+      "qualified_name": "Math.max",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_CBRT",
+      "qualified_name": "Math.cbrt",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_TRUNC",
+      "qualified_name": "Math.trunc",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_SIN",
+      "qualified_name": "Math.sin",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_COS",
+      "qualified_name": "Math.cos",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_TAN",
+      "qualified_name": "Math.tan",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_ASIN",
+      "qualified_name": "Math.asin",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_ACOS",
+      "qualified_name": "Math.acos",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_ATAN",
+      "qualified_name": "Math.atan",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_ATAN2",
+      "qualified_name": "Math.atan2",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_LOG",
+      "qualified_name": "Math.log",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_LOG10",
+      "qualified_name": "Math.log10",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_EXP",
+      "qualified_name": "Math.exp",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_RANDOM",
+      "qualified_name": "Math.random",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_RANDOMINT",
+      "qualified_name": "Math.randomInt",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MATH_RANDOMFLOAT",
+      "qualified_name": "Math.randomFloat",
+      "domain": "Math",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: Math",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "IO_PRINT",
+      "qualified_name": "IO.print",
+      "domain": "IO",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime IO boundary",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "IO_PRINTLN",
+      "qualified_name": "IO.println",
+      "domain": "IO",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime IO boundary",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "IO_READLINE",
+      "qualified_name": "IO.readLine",
+      "domain": "IO",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime IO boundary",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "IO_CLEAR",
+      "qualified_name": "IO.clear",
+      "domain": "IO",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime IO boundary",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_NEWLIST",
+      "qualified_name": "Collection.newList",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_PUSH",
+      "qualified_name": "Collection.push",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_POP",
+      "qualified_name": "Collection.pop",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_GET",
+      "qualified_name": "Collection.get",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_SET",
+      "qualified_name": "Collection.set",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_LENGTH",
+      "qualified_name": "Collection.length",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_NEWMAP",
+      "qualified_name": "Collection.newMap",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_MAPSET",
+      "qualified_name": "Collection.mapSet",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_MAPGET",
+      "qualified_name": "Collection.mapGet",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_MAPHAS",
+      "qualified_name": "Collection.mapHas",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_MAPREMOVE",
+      "qualified_name": "Collection.mapRemove",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_MAPKEYS",
+      "qualified_name": "Collection.mapKeys",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_MAPVALUES",
+      "qualified_name": "Collection.mapValues",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_NEWSET",
+      "qualified_name": "Collection.newSet",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_SETADD",
+      "qualified_name": "Collection.setAdd",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_SETHAS",
+      "qualified_name": "Collection.setHas",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_SETREMOVE",
+      "qualified_name": "Collection.setRemove",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "COLLECTION_SETITEMS",
+      "qualified_name": "Collection.setItems",
+      "domain": "Collection",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler builtin: List/Map/Set",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "QUEUE_NEWQUEUE",
+      "qualified_name": "Queue.newQueue",
+      "domain": "Queue",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.util.Queue",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "QUEUE_ENQUEUE",
+      "qualified_name": "Queue.enqueue",
+      "domain": "Queue",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.util.Queue",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "QUEUE_DEQUEUE",
+      "qualified_name": "Queue.dequeue",
+      "domain": "Queue",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.util.Queue",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "QUEUE_PEEK",
+      "qualified_name": "Queue.peek",
+      "domain": "Queue",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.util.Queue",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "QUEUE_ISEMPTY",
+      "qualified_name": "Queue.isEmpty",
+      "domain": "Queue",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.util.Queue",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "QUEUE_SIZE",
+      "qualified_name": "Queue.size",
+      "domain": "Queue",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.util.Queue",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STACK_NEWSTACK",
+      "qualified_name": "Stack.newStack",
+      "domain": "Stack",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.util.Stack",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STACK_PUSH",
+      "qualified_name": "Stack.push",
+      "domain": "Stack",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.util.Stack",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STACK_POP",
+      "qualified_name": "Stack.pop",
+      "domain": "Stack",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.util.Stack",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STACK_PEEK",
+      "qualified_name": "Stack.peek",
+      "domain": "Stack",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.util.Stack",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STACK_ISEMPTY",
+      "qualified_name": "Stack.isEmpty",
+      "domain": "Stack",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.util.Stack",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STACK_SIZE",
+      "qualified_name": "Stack.size",
+      "domain": "Stack",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.util.Stack",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_LENGTH",
+      "qualified_name": "String.length",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_UPPER",
+      "qualified_name": "String.upper",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_LOWER",
+      "qualified_name": "String.lower",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_TRIM",
+      "qualified_name": "String.trim",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_CONTAINS",
+      "qualified_name": "String.contains",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_INDEXOF",
+      "qualified_name": "String.indexOf",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_CHARAT",
+      "qualified_name": "String.charAt",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_SUBSTRING",
+      "qualified_name": "String.substring",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_REPLACE",
+      "qualified_name": "String.replace",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_SPLIT",
+      "qualified_name": "String.split",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_TOINT",
+      "qualified_name": "String.toInt",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_TOFLOAT",
+      "qualified_name": "String.toFloat",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_LASTINDEXOF",
+      "qualified_name": "String.lastIndexOf",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_INDEXOFFROM",
+      "qualified_name": "String.indexOfFrom",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_TRIMSTART",
+      "qualified_name": "String.trimStart",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_TRIMEND",
+      "qualified_name": "String.trimEnd",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_COMPARE",
+      "qualified_name": "String.compare",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_COMPAREIGNORECASE",
+      "qualified_name": "String.compareIgnoreCase",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_CODEPOINTAT",
+      "qualified_name": "String.codePointAt",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "STRING_FROMCODEPOINT",
+      "qualified_name": "String.fromCodePoint",
+      "domain": "String",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text + primitive String surface",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_READFILE",
+      "qualified_name": "FileSystem.readFile",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_WRITEFILE",
+      "qualified_name": "FileSystem.writeFile",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_APPENDFILE",
+      "qualified_name": "FileSystem.appendFile",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_EXISTS",
+      "qualified_name": "FileSystem.exists",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_DELETEFILE",
+      "qualified_name": "FileSystem.deleteFile",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_LISTDIR",
+      "qualified_name": "FileSystem.listDir",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_RENAME",
+      "qualified_name": "FileSystem.rename",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_COPYFILE",
+      "qualified_name": "FileSystem.copyFile",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_SIZE",
+      "qualified_name": "FileSystem.size",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_ISFILE",
+      "qualified_name": "FileSystem.isFile",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_ISDIRECTORY",
+      "qualified_name": "FileSystem.isDirectory",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_CREATEDIR",
+      "qualified_name": "FileSystem.createDir",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_REMOVEDIR",
+      "qualified_name": "FileSystem.removeDir",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_MODIFIEDTIME",
+      "qualified_name": "FileSystem.modifiedTime",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_ABSOLUTEPATH",
+      "qualified_name": "FileSystem.absolutePath",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_PARENTPATH",
+      "qualified_name": "FileSystem.parentPath",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_FILENAME",
+      "qualified_name": "FileSystem.fileName",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_EXTENSION",
+      "qualified_name": "FileSystem.extension",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_STEM",
+      "qualified_name": "FileSystem.stem",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_JOINPATH",
+      "qualified_name": "FileSystem.joinPath",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_CURRENTDIR",
+      "qualified_name": "FileSystem.currentDir",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "FILESYSTEM_TEMPDIR",
+      "qualified_name": "FileSystem.tempDir",
+      "domain": "FileSystem",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.fs.FileSystem",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "NETWORK_RESOLVE",
+      "qualified_name": "Network.resolve",
+      "domain": "Network",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.net.Network",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "NETWORK_RESOLVEALL",
+      "qualified_name": "Network.resolveAll",
+      "domain": "Network",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.net.Network",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "NETWORK_HOSTNAME",
+      "qualified_name": "Network.hostname",
+      "domain": "Network",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.net.Network",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "NETWORK_ISVALIDIP",
+      "qualified_name": "Network.isValidIp",
+      "domain": "Network",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.net.Network",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_NOW",
+      "qualified_name": "Time.now",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_NOWMILLIS",
+      "qualified_name": "Time.nowMillis",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_SLEEP",
+      "qualified_name": "Time.sleep",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_SLEEP_ASYNC",
+      "qualified_name": "Time.sleepAsync",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_YEAR",
+      "qualified_name": "Time.year",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_MONTH",
+      "qualified_name": "Time.month",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_DAY",
+      "qualified_name": "Time.day",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_HOUR",
+      "qualified_name": "Time.hour",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_MINUTE",
+      "qualified_name": "Time.minute",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_SECOND",
+      "qualified_name": "Time.second",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_FORMAT",
+      "qualified_name": "Time.format",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_MONOTONICMILLIS",
+      "qualified_name": "Time.monotonicMillis",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_DAYOFWEEK",
+      "qualified_name": "Time.dayOfWeek",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_DAYOFYEAR",
+      "qualified_name": "Time.dayOfYear",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_ISLEAPYEAR",
+      "qualified_name": "Time.isLeapYear",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_FROMPARTS",
+      "qualified_name": "Time.fromParts",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TIME_UTCFORMAT",
+      "qualified_name": "Time.utcFormat",
+      "domain": "Time",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.time.*",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "THREAD_START",
+      "qualified_name": "Thread.start",
+      "domain": "Thread",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Thread",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "THREAD_JOIN",
+      "qualified_name": "Thread.join",
+      "domain": "Thread",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Thread",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "THREAD_ISALIVE",
+      "qualified_name": "Thread.isAlive",
+      "domain": "Thread",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Thread",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TASK_SPAWN",
+      "qualified_name": "Task.spawn",
+      "domain": "Task",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Task",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "MUTEX_WITHLOCK",
+      "qualified_name": "Mutex.withLock",
+      "domain": "Mutex",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Mutex",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "RWLOCK_WITHREAD",
+      "qualified_name": "RwLock.withRead",
+      "domain": "RwLock",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.RwLock",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "RWLOCK_WITHWRITE",
+      "qualified_name": "RwLock.withWrite",
+      "domain": "RwLock",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.RwLock",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "ATOMIC_LOAD",
+      "qualified_name": "Atomic.load",
+      "domain": "Atomic",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Atomic",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "ATOMIC_STORE",
+      "qualified_name": "Atomic.store",
+      "domain": "Atomic",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Atomic",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "ATOMIC_ADD",
+      "qualified_name": "Atomic.add",
+      "domain": "Atomic",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Atomic",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "ATOMIC_LOAD_BOOL",
+      "qualified_name": "Atomic.loadBool",
+      "domain": "Atomic",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Atomic",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "ATOMIC_STORE_BOOL",
+      "qualified_name": "Atomic.storeBool",
+      "domain": "Atomic",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Atomic",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "ATOMIC_LOAD_DOUBLE",
+      "qualified_name": "Atomic.loadDouble",
+      "domain": "Atomic",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Atomic",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "ATOMIC_STORE_DOUBLE",
+      "qualified_name": "Atomic.storeDouble",
+      "domain": "Atomic",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Atomic",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "ATOMIC_LOAD_REF",
+      "qualified_name": "Atomic.loadRef",
+      "domain": "Atomic",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Atomic",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "ATOMIC_STORE_REF",
+      "qualified_name": "Atomic.storeRef",
+      "domain": "Atomic",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Atomic",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SEMAPHORE_ACQUIRE",
+      "qualified_name": "Semaphore.acquire",
+      "domain": "Semaphore",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Semaphore",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SEMAPHORE_RELEASE",
+      "qualified_name": "Semaphore.release",
+      "domain": "Semaphore",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Semaphore",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SEMAPHORE_AVAILABLE",
+      "qualified_name": "Semaphore.available",
+      "domain": "Semaphore",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Semaphore",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SEMAPHORE_SETPERMITS",
+      "qualified_name": "Semaphore.setPermits",
+      "domain": "Semaphore",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Semaphore",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SEMAPHORE_TRYACQUIRE",
+      "qualified_name": "Semaphore.tryAcquire",
+      "domain": "Semaphore",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Semaphore",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SEMAPHORE_RELEASEMANY",
+      "qualified_name": "Semaphore.releaseMany",
+      "domain": "Semaphore",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Semaphore",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CONDITION_WAIT",
+      "qualified_name": "Condition.wait",
+      "domain": "Condition",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Condition",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CONDITION_NOTIFYONE",
+      "qualified_name": "Condition.notifyOne",
+      "domain": "Condition",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Condition",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CONDITION_NOTIFYALL",
+      "qualified_name": "Condition.notifyAll",
+      "domain": "Condition",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Condition",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CONDITION_WAITFOR",
+      "qualified_name": "Condition.waitFor",
+      "domain": "Condition",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Condition",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CHANNEL_CREATE",
+      "qualified_name": "Channel.create",
+      "domain": "Channel",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Channel",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CHANNEL_SEND",
+      "qualified_name": "Channel.send",
+      "domain": "Channel",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Channel",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CHANNEL_RECEIVE",
+      "qualified_name": "Channel.receive",
+      "domain": "Channel",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Channel",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CHANNEL_SIZE",
+      "qualified_name": "Channel.size",
+      "domain": "Channel",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Channel",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CHANNEL_SEND_ASYNC",
+      "qualified_name": "Channel.sendAsync",
+      "domain": "Channel",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Channel",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CHANNEL_RECEIVE_ASYNC",
+      "qualified_name": "Channel.receiveAsync",
+      "domain": "Channel",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.lang.Channel",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TEST_FAIL",
+      "qualified_name": "Test.fail",
+      "domain": "Test",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.test.Test",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TEST_ASSERTTRUE",
+      "qualified_name": "Test.assertTrue",
+      "domain": "Test",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.test.Test",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TEST_ASSERTFALSE",
+      "qualified_name": "Test.assertFalse",
+      "domain": "Test",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.test.Test",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TEST_ASSERTEQUAL",
+      "qualified_name": "Test.assertEqual",
+      "domain": "Test",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.test.Test",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TEST_ASSERTNOTEQUAL",
+      "qualified_name": "Test.assertNotEqual",
+      "domain": "Test",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.test.Test",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TEST_ASSERTNEAR",
+      "qualified_name": "Test.assertNear",
+      "domain": "Test",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.test.Test",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "LOG_INFO",
+      "qualified_name": "Log.info",
+      "domain": "Log",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.logging.Log",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "LOG_WARN",
+      "qualified_name": "Log.warn",
+      "domain": "Log",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.logging.Log",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "LOG_ERROR",
+      "qualified_name": "Log.error",
+      "domain": "Log",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.logging.Log",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "LOG_DEBUG",
+      "qualified_name": "Log.debug",
+      "domain": "Log",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.logging.Log",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "LOG_TRACE",
+      "qualified_name": "Log.trace",
+      "domain": "Log",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.logging.Log",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "LOG_FATAL",
+      "qualified_name": "Log.fatal",
+      "domain": "Log",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.logging.Log",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "LOG_AT",
+      "qualified_name": "Log.at",
+      "domain": "Log",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.logging.Log",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TEXT_FORMAT",
+      "qualified_name": "Text.format",
+      "domain": "Text",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TEXT_REGEXMATCHES",
+      "qualified_name": "Text.regexMatches",
+      "domain": "Text",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TEXT_REGEXFULLMATCHES",
+      "qualified_name": "Text.regexFullMatches",
+      "domain": "Text",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TEXT_REGEXFINDALL",
+      "qualified_name": "Text.regexFindAll",
+      "domain": "Text",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TEXT_REGEXREPLACE",
+      "qualified_name": "Text.regexReplace",
+      "domain": "Text",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TEXT_REGEXFIND",
+      "qualified_name": "Text.regexFind",
+      "domain": "Text",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "TEXT_REGEXFINDMATCHES",
+      "qualified_name": "Text.regexFindMatches",
+      "domain": "Text",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.text.Text",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SERIALIZE_ENCODE",
+      "qualified_name": "Serialize.encode",
+      "domain": "Serialize",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.serialize.Serialize",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SERIALIZE_DECODE",
+      "qualified_name": "Serialize.decode",
+      "domain": "Serialize",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.serialize.Serialize",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SERIALIZE_ASSTRING",
+      "qualified_name": "Serialize.asString",
+      "domain": "Serialize",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.serialize.Serialize",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SERIALIZE_ASINT",
+      "qualified_name": "Serialize.asInt",
+      "domain": "Serialize",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.serialize.Serialize",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SERIALIZE_ASDOUBLE",
+      "qualified_name": "Serialize.asDouble",
+      "domain": "Serialize",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.serialize.Serialize",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SERIALIZE_ASBOOL",
+      "qualified_name": "Serialize.asBool",
+      "domain": "Serialize",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.serialize.Serialize",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CRYPTO_CRC32",
+      "qualified_name": "Crypto.crc32",
+      "domain": "Crypto",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.crypto.Crypto",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CRYPTO_SHA256",
+      "qualified_name": "Crypto.sha256",
+      "domain": "Crypto",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.crypto.Crypto",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CRYPTO_SHA1",
+      "qualified_name": "Crypto.sha1",
+      "domain": "Crypto",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.crypto.Crypto",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CRYPTO_MD5",
+      "qualified_name": "Crypto.md5",
+      "domain": "Crypto",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.crypto.Crypto",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CRYPTO_FNV1A64",
+      "qualified_name": "Crypto.fnv1a64",
+      "domain": "Crypto",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.crypto.Crypto",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CRYPTO_HEXENCODE",
+      "qualified_name": "Crypto.hexEncode",
+      "domain": "Crypto",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.crypto.Crypto",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CRYPTO_HEXDECODE",
+      "qualified_name": "Crypto.hexDecode",
+      "domain": "Crypto",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.crypto.Crypto",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CRYPTO_BASE64ENCODE",
+      "qualified_name": "Crypto.base64Encode",
+      "domain": "Crypto",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.crypto.Crypto",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "CRYPTO_BASE64DECODE",
+      "qualified_name": "Crypto.base64Decode",
+      "domain": "Crypto",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "stdlib: zl.crypto.Crypto",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "HASH_CODE",
+      "qualified_name": "Hash.code",
+      "domain": "Hash",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime primitive",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SYSTEM_EXIT",
+      "qualified_name": "System.exit",
+      "domain": "System",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime system boundary",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SYSTEM_GETENV",
+      "qualified_name": "System.getEnv",
+      "domain": "System",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime system boundary",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SYSTEM_EXEC",
+      "qualified_name": "System.exec",
+      "domain": "System",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime system boundary",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SYSTEM_EXECSTATUS",
+      "qualified_name": "System.execStatus",
+      "domain": "System",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime system boundary",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SYSTEM_SETENV",
+      "qualified_name": "System.setEnv",
+      "domain": "System",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime system boundary",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SYSTEM_HASENV",
+      "qualified_name": "System.hasEnv",
+      "domain": "System",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime system boundary",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SYSTEM_ENVOR",
+      "qualified_name": "System.envOr",
+      "domain": "System",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime system boundary",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "SYSTEM_PLATFORM",
+      "qualified_name": "System.platform",
+      "domain": "System",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime system boundary",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "INT_PARSE",
+      "qualified_name": "Int.parse",
+      "domain": "Int",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime primitive",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "DOUBLE_PARSE",
+      "qualified_name": "Double.parse",
+      "domain": "Double",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime primitive",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    },
+    {
+      "native_id": "BOOL_PARSE",
+      "qualified_name": "Bool.parse",
+      "domain": "Bool",
+      "source_layer": "native catalog + VM native runtime",
+      "public_surface": "compiler/runtime primitive",
+      "status": "implemented",
+      "ownership_metadata": "not explicitly declared in native catalog entry; default NONE"
+    }
+  ]
+}

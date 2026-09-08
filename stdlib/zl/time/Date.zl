@@ -1,19 +1,103 @@
-// zl.time.Date - date-only view over epoch seconds.
+import zl.time.Calendar
+import zl.time.Duration
+
+// zl.time.Date - calendar-date view over epoch seconds.
+//
+// A Date carries a full timestamp but only its local calendar date is
+// meaningful; every operation is calendar-based, so adding a day keeps the
+// same wall-clock time even across a daylight-saving transition. Construct one
+// with `new Date(timestamp)` or `Date.of(year, month, day)`.
 class Date {
     public int epoch
+
     func Date(int epoch): void { this.epoch = epoch }
+
+    // --- Construction ------------------------------------------------------
+
+    public static func of(int year, int month, int day): Date {
+        return new Date(Time.fromParts(year, month, day, 0, 0, 0))
+    }
+
+    public static func today(): Date { return new Date(Time.now()) }
+
+    // --- Components --------------------------------------------------------
+
     public func year(): int { return Time.year(this.epoch) }
     public func month(): int { return Time.month(this.epoch) }
     public func day(): int { return Time.day(this.epoch) }
+    public func dayOfWeek(): int { return Time.dayOfWeek(this.epoch) }
+    public func dayOfYear(): int { return Time.dayOfYear(this.epoch) }
+    public func weekdayName(): string { return Calendar.weekdayName(this.epoch) }
+    public func monthName(): string { return Calendar.monthName(this.epoch) }
+    public func timestamp(): int { return this.epoch }
+
+    // Days since 1970-01-01; a stable integer key for a calendar date.
+    public func dayNumber(): int { return Calendar.dayNumber(this.epoch) }
+
+    // --- Rendering ---------------------------------------------------------
+
     public func format(string pattern): string { return Time.format(this.epoch, pattern) }
-    public func addDays(int days): Date { return new Date(this.epoch + days * 86400) }
+    public func iso(): string { return Calendar.isoDate(this.epoch) }
+    public func toString(): string { return this.iso() }
+
+    // --- Calendar arithmetic -----------------------------------------------
+    // All of these preserve the time of day and respect month lengths.
+
+    public func addDays(int days): Date { return new Date(Calendar.addDays(this.epoch, days)) }
     public func subtractDays(int days): Date { return this.addDays(-days) }
+    public func addWeeks(int weeks): Date { return new Date(Calendar.addWeeks(this.epoch, weeks)) }
+    public func subtractWeeks(int weeks): Date { return this.addWeeks(-weeks) }
+    public func addMonths(int months): Date { return new Date(Calendar.addMonths(this.epoch, months)) }
+    public func subtractMonths(int months): Date { return this.addMonths(-months) }
+    public func addYears(int years): Date { return new Date(Calendar.addYears(this.epoch, years)) }
+    public func subtractYears(int years): Date { return this.addYears(-years) }
+
+    // --- Period boundaries --------------------------------------------------
+
+    public func startOfMonth(): Date { return Date.of(this.year(), this.month(), 1) }
+
+    public func endOfMonth(): Date {
+        return Date.of(this.year(), this.month(), Calendar.daysInMonth(this.year(), this.month()))
+    }
+
+    public func startOfYear(): Date { return Date.of(this.year(), 1, 1) }
+    public func endOfYear(): Date { return Date.of(this.year(), 12, 31) }
+
+    // --- Differences ---------------------------------------------------------
+
+    // Whole calendar days from this date to `other`; negative when earlier.
+    public func daysUntil(Date other): int {
+        return other.dayNumber() - this.dayNumber()
+    }
+
+    public func difference(Date other): Duration {
+        return new Duration(this.daysUntil(other) * 86400000)
+    }
+
+    // --- Predicates ------------------------------------------------------------
+
+    public func isWeekend(): bool { return Calendar.isWeekend(this.epoch) }
+    public func isWeekday(): bool { return !this.isWeekend() }
+    public func isLeapYear(): bool { return Time.isLeapYear(this.year()) }
+    public func isSameMonth(Date other): bool {
+        return this.year() == other.year() && this.month() == other.month()
+    }
+
+    // --- Comparison --------------------------------------------------------------
+    // Compares calendar dates, so two timestamps on the same day are equal.
+
     public func compare(Date other): int {
-        if (this.epoch < other.epoch) { return -1 }
-        if (this.epoch > other.epoch) { return 1 }
+        var a = this.dayNumber()
+        var b = other.dayNumber()
+        if (a < b) { return -1 }
+        if (a > b) { return 1 }
         return 0
     }
+
     public func isBefore(Date other): bool { return this.compare(other) < 0 }
     public func isAfter(Date other): bool { return this.compare(other) > 0 }
     public func equals(Date other): bool { return this.compare(other) == 0 }
+    public func isBetween(Date start, Date end): bool {
+        return this.compare(start) >= 0 && this.compare(end) <= 0
+    }
 }

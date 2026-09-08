@@ -276,6 +276,221 @@ class List<T> {
         return result
     }
 
+    public func indexOfFrom(T item, int start): int {
+        var from = start
+        if (from < 0) { from = 0 }
+        var i = from
+        while (i < this.length()) {
+            if (this.get(i) == item) { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    public func lastIndexOf(T item): int {
+        var i = this.length() - 1
+        while (i >= 0) {
+            if (this.get(i) == item) { return i }
+            i = i - 1
+        }
+        return -1
+    }
+
+    public func find(func predicate, T fallback): T {
+        for i in 0..this.length() {
+            var item = this.get(i)
+            if (predicate(item)) { return item }
+        }
+        return fallback
+    }
+
+    public func findIndex(func predicate): int {
+        for i in 0..this.length() {
+            if (predicate(this.get(i))) { return i }
+        }
+        return -1
+    }
+
+    public func findLastIndex(func predicate): int {
+        var i = this.length() - 1
+        while (i >= 0) {
+            if (predicate(this.get(i))) { return i }
+            i = i - 1
+        }
+        return -1
+    }
+
+    public func none(func predicate): bool {
+        return !this.any(predicate)
+    }
+
+    public func countWhere(func predicate): int {
+        var result = 0
+        for i in 0..this.length() {
+            if (predicate(this.get(i))) { result = result + 1 }
+        }
+        return result
+    }
+
+    public func reject(func predicate): List<T> {
+        var result = new List<T>()
+        for i in 0..this.length() {
+            var item = this.get(i)
+            if (!predicate(item)) { result.push(item) }
+        }
+        return result
+    }
+
+    public func getOr(int index, T fallback): T {
+        if (index < 0 || index >= this.length()) { return fallback }
+        return this.get(index)
+    }
+
+    public func takeWhile(func predicate): List<T> {
+        var result = new List<T>()
+        var i = 0
+        while (i < this.length() && predicate(this.get(i))) {
+            result.push(this.get(i))
+            i = i + 1
+        }
+        return result
+    }
+
+    public func dropWhile(func predicate): List<T> {
+        var start = 0
+        while (start < this.length() && predicate(this.get(start))) {
+            start = start + 1
+        }
+        return this.slice(start, this.length())
+    }
+
+    public func distinct(): List<T> {
+        var result = new List<T>()
+        for i in 0..this.length() {
+            var item = this.get(i)
+            if (!result.contains(item)) { result.push(item) }
+        }
+        return result
+    }
+
+    public func forEachIndexed(func action): void {
+        for i in 0..this.length() {
+            action(i, this.get(i))
+        }
+    }
+
+    // Fold with an explicit accumulator type; `reduce` keeps T for both.
+    public func fold(func combine, unknown start): unknown {
+        var result = start
+        for i in 0..this.length() {
+            result = combine(result, this.get(i))
+        }
+        return result
+    }
+
+    public func removeRange(int start, int end): void {
+        if (start < 0 || end < start || end > this.length()) {
+            throw new Exception("List.removeRange bounds out of range")
+        }
+        var removed = end - start
+        var i = start
+        while (i + removed < this.length()) {
+            this.put(i, this.get(i + removed))
+            i = i + 1
+        }
+        var remaining = removed
+        while (remaining > 0) {
+            this.pop()
+            remaining = remaining - 1
+        }
+    }
+
+    public func removeWhere(func predicate): int {
+        var kept = new List<T>()
+        var removed = 0
+        for i in 0..this.length() {
+            var item = this.get(i)
+            if (predicate(item)) { removed = removed + 1 } else { kept.push(item) }
+        }
+        if (removed == 0) { return 0 }
+        this.clear()
+        this.extend(kept)
+        return removed
+    }
+
+    public func fill(T item): void {
+        for i in 0..this.length() {
+            this.put(i, item)
+        }
+    }
+
+    public func startsWith(List<T> prefix): bool {
+        if (prefix.length() > this.length()) { return false }
+        for i in 0..prefix.length() {
+            if (this.get(i) != prefix.get(i)) { return false }
+        }
+        return true
+    }
+
+    public func endsWith(List<T> suffix): bool {
+        var offset = this.length() - suffix.length()
+        if (offset < 0) { return false }
+        for i in 0..suffix.length() {
+            if (this.get(offset + i) != suffix.get(i)) { return false }
+        }
+        return true
+    }
+
+    public func equalsList(List<T> other): bool {
+        if (this.length() != other.length()) { return false }
+        return this.startsWith(other)
+    }
+
+    public func concat(List<T> other): List<T> {
+        var result = this.copy()
+        result.extend(other)
+        return result
+    }
+
+    public func minBy(func less, T fallback): T {
+        if (this.isEmpty()) { return fallback }
+        var best = this.get(0)
+        for i in 1..this.length() {
+            var candidate = this.get(i)
+            if (less(candidate, best)) { best = candidate }
+        }
+        return best
+    }
+
+    public func maxBy(func less, T fallback): T {
+        if (this.isEmpty()) { return fallback }
+        var best = this.get(0)
+        for i in 1..this.length() {
+            var candidate = this.get(i)
+            if (less(best, candidate)) { best = candidate }
+        }
+        return best
+    }
+
+    public func sorted(func less): List<T> {
+        var result = this.copy()
+        result.sort(less)
+        return result
+    }
+
+    // Requires a sorted list under the same ordering; returns -1 when absent.
+    public func binarySearch(T item, func less): int {
+        var low = 0
+        var high = this.length() - 1
+        while (low <= high) {
+            var mid = low + (high - low) / 2
+            var probe = this.get(mid)
+            if (probe == item) { return mid }
+            if (less(probe, item)) { low = mid + 1 } else { high = mid - 1 }
+        }
+        return -1
+    }
+
     // Stable insertion sort. The storage boundary remains Collection.get/put.
     public func sort(func less): void {
         var i = 1
@@ -389,6 +604,98 @@ class Map<K, V> {
             action(key, this.get(key))
         }
     }
+
+    // Inserts when absent and returns the value now stored under `key`.
+    public func getOrPut(K key, V fallback): V {
+        if (this.has(key)) { return this.get(key) }
+        this.put(key, fallback)
+        return fallback
+    }
+
+    // Returns the removed value, or `fallback` when the key was absent.
+    public func removeOr(K key, V fallback): V {
+        if (!this.has(key)) { return fallback }
+        var removed = this.get(key)
+        this.remove(key)
+        return removed
+    }
+
+    public func replaceIfPresent(K key, V value): bool {
+        if (!this.has(key)) { return false }
+        this.put(key, value)
+        return true
+    }
+
+    public func putAll(Map<K,V> other): void {
+        var snapshot = other.keys()
+        for i in 0..snapshot.length() {
+            var key = snapshot.get(i)
+            this.put(key, other.get(key))
+        }
+    }
+
+    public func copy(): Map<K,V> {
+        var result = new Map<K,V>()
+        result.putAll(this)
+        return result
+    }
+
+    public func keyOf(V value, K fallback): K {
+        var snapshot = this.keys()
+        for i in 0..snapshot.length() {
+            var key = snapshot.get(i)
+            if (this.get(key) == value) { return key }
+        }
+        return fallback
+    }
+
+    public func anyEntry(func predicate): bool {
+        var snapshot = this.keys()
+        for i in 0..snapshot.length() {
+            var key = snapshot.get(i)
+            if (predicate(key, this.get(key))) { return true }
+        }
+        return false
+    }
+
+    public func allEntries(func predicate): bool {
+        var snapshot = this.keys()
+        for i in 0..snapshot.length() {
+            var key = snapshot.get(i)
+            if (!predicate(key, this.get(key))) { return false }
+        }
+        return true
+    }
+
+    public func filterKeys(func predicate): Map<K,V> {
+        var result = new Map<K,V>()
+        var snapshot = this.keys()
+        for i in 0..snapshot.length() {
+            var key = snapshot.get(i)
+            if (predicate(key, this.get(key))) { result.put(key, this.get(key)) }
+        }
+        return result
+    }
+
+    public func removeWhere(func predicate): int {
+        var snapshot = this.keys()
+        var removed = 0
+        for i in 0..snapshot.length() {
+            var key = snapshot.get(i)
+            if (predicate(key, this.get(key))) {
+                this.remove(key)
+                removed = removed + 1
+            }
+        }
+        return removed
+    }
+
+    public func containsAllKeys(List<K> required): bool {
+        for i in 0..required.length() {
+            if (!this.has(required.get(i))) { return false }
+        }
+        return true
+    }
 }
 )ZL";
 
@@ -486,6 +793,84 @@ class Set<T> {
         var raw = Collection.setItems(this.__native)
         for i in 0..Collection.length(raw) {
             result.push(Collection.get(raw, i))
+        }
+        return result
+    }
+
+    // Returns true when the item was newly inserted.
+    public func addIfAbsent(T item): bool {
+        if (this.has(item)) { return false }
+        this.add(item)
+        return true
+    }
+
+    public func removeIfPresent(T item): bool {
+        if (!this.has(item)) { return false }
+        this.remove(item)
+        return true
+    }
+
+    public func removeAll(List<T> values): int {
+        var removed = 0
+        for i in 0..values.length() {
+            if (this.removeIfPresent(values.get(i))) { removed = removed + 1 }
+        }
+        return removed
+    }
+
+    public func retainAll(Set<T> other): int {
+        var snapshot = this.items()
+        var removed = 0
+        for i in 0..snapshot.length() {
+            var item = snapshot.get(i)
+            if (!other.has(item)) {
+                this.remove(item)
+                removed = removed + 1
+            }
+        }
+        return removed
+    }
+
+    public func symmetricDifference(Set<T> other): Set<T> {
+        var result = this.difference(other)
+        var extra = other.difference(this)
+        result.addAll(extra.items())
+        return result
+    }
+
+    public func isSupersetOf(Set<T> other): bool {
+        return other.isSubsetOf(this)
+    }
+
+    public func isDisjointFrom(Set<T> other): bool {
+        return this.intersection(other).isEmpty()
+    }
+
+    public func equalsSet(Set<T> other): bool {
+        if (this.length() != other.length()) { return false }
+        return this.isSubsetOf(other)
+    }
+
+    public func copy(): Set<T> {
+        var result = new Set<T>()
+        result.addAll(this.items())
+        return result
+    }
+
+    public func any(func predicate): bool {
+        return this.items().any(predicate)
+    }
+
+    public func all(func predicate): bool {
+        return this.items().all(predicate)
+    }
+
+    public func filter(func predicate): Set<T> {
+        var result = new Set<T>()
+        var snapshot = this.items()
+        for i in 0..snapshot.length() {
+            var item = snapshot.get(i)
+            if (predicate(item)) { result.add(item) }
         }
         return result
     }
@@ -689,8 +1074,66 @@ class CancellationException extends Exception {
 }
 )ZL";
 
+// Failures raised by the VM itself are ordinary ZL exceptions, so a program
+// can catch them by type instead of only through an untyped catch-all.
+constexpr std::string_view kBuiltinRuntimeErrorSource = R"ZL(
+class RuntimeError extends Exception {
+    func RuntimeError(string message): void {
+        super(message)
+    }
+}
+)ZL";
+
+constexpr std::string_view kBuiltinTypeErrorSource = R"ZL(
+class TypeError extends RuntimeError {
+    func TypeError(string message): void {
+        super(message)
+    }
+}
+)ZL";
+
+constexpr std::string_view kBuiltinIndexErrorSource = R"ZL(
+class IndexError extends RuntimeError {
+    func IndexError(string message): void {
+        super(message)
+    }
+}
+)ZL";
+
+constexpr std::string_view kBuiltinKeyErrorSource = R"ZL(
+class KeyError extends RuntimeError {
+    func KeyError(string message): void {
+        super(message)
+    }
+}
+)ZL";
+
+constexpr std::string_view kBuiltinArithmeticErrorSource = R"ZL(
+class ArithmeticError extends RuntimeError {
+    func ArithmeticError(string message): void {
+        super(message)
+    }
+}
+)ZL";
+
+constexpr std::string_view kBuiltinStackOverflowErrorSource = R"ZL(
+class StackOverflowError extends RuntimeError {
+    func StackOverflowError(string message): void {
+        super(message)
+    }
+}
+)ZL";
+
+constexpr std::string_view kBuiltinIOErrorSource = R"ZL(
+class IOError extends RuntimeError {
+    func IOError(string message): void {
+        super(message)
+    }
+}
+)ZL";
+
 constexpr std::string_view kBuiltinNativeErrorSource = R"ZL(
-class NativeError extends Exception {
+class NativeError extends RuntimeError {
     func NativeError(string message): void {
         super(message)
     }
@@ -699,7 +1142,7 @@ class NativeError extends Exception {
 
 
 constexpr std::string_view kBuiltinRegexErrorSource = R"ZL(
-class RegexError extends Exception {
+class RegexError extends RuntimeError {
     func RegexError(string message): void {
         super(message)
     }
@@ -776,6 +1219,8 @@ class RegexMatch {
 )ZL";
 
 constexpr std::string_view kBuiltinRegexSource = R"ZL(
+import zl.text.Text
+
 class Regex {
     public string pattern
     public string last
@@ -1034,23 +1479,23 @@ class Regex {
     }
 
     public func matches(string value): bool {
-        return String.regexFullMatches(value, this.pattern)
+        return Text.regexFullMatches(value, this.pattern)
     }
 
     public func findAll(string value): list<string> {
-        return String.regexFindAll(value, this.pattern)
+        return Text.regexFindAll(value, this.pattern)
     }
 
     public func replace(string value, string replacement): string {
-        return String.regexReplace(value, this.pattern, replacement)
+        return Text.regexReplace(value, this.pattern, replacement)
     }
 
     public func find(string value): RegexMatch {
-        return String.regexFind(value, this.pattern)
+        return Text.regexFind(value, this.pattern)
     }
 
     public func findMatches(string value): list<RegexMatch> {
-        return String.regexFindMatches(value, this.pattern)
+        return Text.regexFindMatches(value, this.pattern)
     }
 
     public func named(string name): Regex {
@@ -1178,12 +1623,20 @@ class Function {
 }
 )ZL";
 
+
 const std::vector<std::string_view> kBuiltinSources = {
     kBuiltinOptionSource,
     kBuiltinResultSource,
     kBuiltinSharedSource,
     kBuiltinExceptionSource,
     kBuiltinCancellationExceptionSource,
+    kBuiltinRuntimeErrorSource,
+    kBuiltinTypeErrorSource,
+    kBuiltinIndexErrorSource,
+    kBuiltinKeyErrorSource,
+    kBuiltinArithmeticErrorSource,
+    kBuiltinStackOverflowErrorSource,
+    kBuiltinIOErrorSource,
     kBuiltinNativeErrorSource,
     kBuiltinRegexErrorSource,
     kBuiltinReflectionErrorSource,

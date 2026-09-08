@@ -451,6 +451,15 @@ void TypeChecker::checkAccess(const std::string& className, const std::string& m
 
     if (currentClassName_ == className) return; // accessing our own class's member
 
+    // Inside a generic template body, `this` carries the self-parameterized
+    // name (`Shared<T>`) while the enclosing class is still the template
+    // (`Shared`). That is the same declaring class, not a foreign one.
+    const auto templateName = [](const std::string& name) {
+        const auto open = name.find('<');
+        return open == std::string::npos ? name : name.substr(0, open);
+    };
+    if (!currentClassTypeParams_.empty() && templateName(currentClassName_) == templateName(className)) return;
+
     // PRIVATE and DEFAULT (no modifier written - the roadmap's stated
     // default) are only accessible from inside the declaring class. PROTECTED
     // additionally allows any subclass of the declaring class.
@@ -1098,6 +1107,13 @@ void TypeChecker::check(const Program& program, bool requireMain) {
                 typeError("type '" + name + "' cannot redeclare inherited field '" + field.first + "'", decl->line);
         }
     }
+
+    // Every class shape (including inheritance links) is now complete. Any
+    // generic instantiation created while resolving an earlier signature may
+    // have been built from a template that was still an empty shell, so
+    // rebuild them all here. Without this, whether `List<string>` has methods
+    // would depend on which file happened to be checked first.
+    typeResolver_.refreshInstantiations();
 
     // Index all named static functions before any body is checked so interprocedural
     // confinement analysis is independent of declaration order.
@@ -5000,6 +5016,19 @@ TypeChecker::InferredType TypeChecker::inferThisExpr(const ThisExpr* node) {
     if (currentClassName_.empty()) {
         typeError("'this' used outside of a class member", node->line);
     }
+    // Inside a generic template body, `this` denotes the self-parameterized
+    // form (`Map<K,V>`), which is what a self-referential parameter such as
+    // `putAll(Map<K,V> other)` resolves to. Reporting the bare template name
+    // would make `other.putAll(this)` fail to match its own signature.
+    if (!currentClassTypeParams_.empty() && currentClassName_.find('<') == std::string::npos) {
+        std::string self = currentClassName_ + "<";
+        for (std::size_t i = 0; i < currentClassTypeParams_.size(); ++i) {
+            if (i) self += ",";
+            self += currentClassTypeParams_[i];
+        }
+        self += ">";
+        if (semanticModel_.findClass(self)) return InferredType(ZlType::OBJECT, self);
+    }
     return InferredType(ZlType::OBJECT, currentClassName_);
 }
 
@@ -5165,6 +5194,15 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
         ? currentLambdaExpectation_.returnType : ZlType::UNKNOWN;
     currentReturnClassName_ = currentLambdaExpectation_.active
         ? currentLambdaExpectation_.returnClassName : std::string();
+    // An explicit `func(...): T` annotation is the authority for this lambda's
+    // result, overriding whatever the call site happened to expect.
+    ZlType declaredReturnType = ZlType::UNKNOWN;
+    std::string declaredReturnClassName;
+    if (node->hasDeclaredReturnType) {
+        declaredReturnType = resolveType(node->declaredReturnType, &declaredReturnClassName);
+        currentReturnType_ = declaredReturnType;
+        currentReturnClassName_ = declaredReturnClassName;
+    }
     // A callable annotation describes Task<T>, but an async body returns T.
     // Decode the complete expected signature rather than depending on the
     // optional task-value side metadata (which returned callbacks lacked).
@@ -5191,6 +5229,25 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
             inferredReturnResult.type = currentReturnType_;
             inferredReturnResult.className = currentReturnClassName_;
         }
+    }
+    if (node->hasDeclaredReturnType) {
+        const bool bodyIsVoidLike = inferredReturnResult.type == ZlType::NIL ||
+                                    inferredReturnResult.type == ZlType::VOID_TYPE;
+        const bool declaredVoid = declaredReturnType == ZlType::VOID_TYPE;
+        if (!(declaredVoid && bodyIsVoidLike) &&
+            !isAssignable(inferredReturnResult.type, declaredReturnType,
+                          inferredReturnResult.className, declaredReturnClassName)) {
+            const std::string got = inferredReturnResult.className.empty()
+                ? zlTypeName(inferredReturnResult.type) : inferredReturnResult.className;
+            const std::string want = declaredReturnClassName.empty()
+                ? zlTypeName(declaredReturnType) : declaredReturnClassName;
+            typeError("lambda declares return type '" + want + "' but its body returns '" + got + "'",
+                      node->line);
+        }
+        // The declaration, not the inferred body type, is this lambda's
+        // contract - so a widening annotation stays visible to callers.
+        inferredReturnResult.type = declaredReturnType;
+        inferredReturnResult.className = declaredReturnClassName;
     }
     const ZlType inferredReturn = inferredReturnResult.type;
     const std::string inferredReturnClassName = inferredReturnResult.className;

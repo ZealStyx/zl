@@ -63,6 +63,10 @@ private:
     enum class ExecuteStatus { Completed, Suspended };
     [[nodiscard]] ExecuteStatus execute(const Chunk& chunk, std::size_t startIp, bool stopAtReturn,
                               const std::vector<std::string>& programArgs, Value* returnValue);
+    // Handler search shared by thrown ZL exceptions and converted runtime
+    // faults. Returns false when this run owns no matching handler.
+    bool dispatchThrownException(const Chunk& chunk, const ObjectRef& thrown,
+                                 std::size_t initialCallDepth, std::size_t& ip);
     [[nodiscard]] Value invokeFunction(const Chunk& chunk, std::size_t functionIndex,
                                        const std::vector<Value>& args,
                                        const std::optional<Value>& receiver = std::nullopt,

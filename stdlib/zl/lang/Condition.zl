@@ -1,3 +1,38 @@
-// Low-level condition-variable coordination primitive.
+// zl.lang.Condition - condition-variable coordination.
+//
+// Create one with `new Condition()`. The natives are wait, waitFor(seconds),
+// notifyOne and notifyAll.
+//
+// IMPORTANT: `Condition.wait` carries no predicate and no timeout, so a notify
+// delivered before the waiter blocks is LOST and that waiter sleeps until the
+// next notification. Never use a bare wait as your only synchronization; pair
+// it with your own state check, or use the predicate helpers below, which poll
+// with a bounded wait and therefore cannot miss a wakeup permanently.
 class Condition {
+    public static func create(): Condition {
+        return new Condition()
+    }
+
+    // Waits until `predicate()` is true, re-checking after each bounded wait.
+    // Immune to lost notifications because the predicate is tested first and
+    // after every timeout slice.
+    public static func waitUntil(Condition cond, func predicate): void {
+        while (!predicate()) {
+            Condition.waitFor(cond, 0.05)
+        }
+    }
+
+    // Bounded form: returns true if `predicate()` became true within
+    // `timeoutSeconds`, false if the deadline passed first.
+    public static func waitUntilTimeout(Condition cond, func predicate, double timeoutSeconds): bool {
+        var deadline = Time.monotonicMillis() + Math.round(timeoutSeconds * 1000.0)
+        while (!predicate()) {
+            if (Time.monotonicMillis() >= deadline) { return predicate() }
+            Condition.waitFor(cond, 0.05)
+        }
+        return true
+    }
+
+    public static func signal(Condition cond): void { Condition.notifyOne(cond) }
+    public static func broadcast(Condition cond): void { Condition.notifyAll(cond) }
 }

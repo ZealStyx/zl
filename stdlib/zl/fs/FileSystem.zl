@@ -1,12 +1,129 @@
 // zl.fs.FileSystem - ZL-owned filesystem convenience API.
-// FileSystem.* native calls remain the OS boundary.
+//
+// `FileSystem.*` native calls are the OS boundary and are resolved by
+// qualified-name lookup against the native table, so this facade only adds
+// operations that native primitives do not already provide: safe fallbacks,
+// idempotent helpers, and small compositions. Native operations such as
+// readFile, writeFile, appendFile, exists, deleteFile, listDir, rename,
+// copyFile, size, isFile, isDirectory, createDir, removeDir, modifiedTime,
+// absolutePath, parentPath, fileName, extension, stem, joinPath, currentDir
+// and tempDir are available directly and are deliberately not re-wrapped.
 class FileSystem {
-    public static func readText(string path): string { return FileSystem.readFile(path) }
-    public static func writeText(string path, string content): void { FileSystem.writeFile(path, content) }
-    public static func appendText(string path, string content): void { FileSystem.appendFile(path, content) }
-    public static func fileExists(string path): bool { return FileSystem.exists(path) }
-    public static func remove(string path): void { FileSystem.deleteFile(path) }
-    public static func replaceText(string path, string content): void { FileSystem.writeFile(path, content) }
-    public static func ensureFile(string path): void { if (!FileSystem.exists(path)) { FileSystem.writeFile(path, "") } }
-    public static func readOr(string path, string fallback): string { try { return FileSystem.readFile(path) } catch e { return fallback } }
+    // --- Safe fallback operations -----------------------------------------
+    // Every one of these swallows only the failure it is documented to
+    // tolerate; nothing here hides a programming error in the caller.
+
+    public static func readOr(string path, string fallback): string {
+        try { return FileSystem.readFile(path) } catch Exception e { return fallback }
+    }
+
+    public static func sizeOr(string path, int fallback): int {
+        try { return FileSystem.size(path) } catch Exception e { return fallback }
+    }
+
+    public static func modifiedTimeOr(string path, int fallback): int {
+        try { return FileSystem.modifiedTime(path) } catch Exception e { return fallback }
+    }
+
+    // Returns true when the file existed and was deleted.
+    public static func removeIfExists(string path): bool {
+        if (!FileSystem.exists(path)) { return false }
+        FileSystem.deleteFile(path)
+        return true
+    }
+
+    // Returns the number of entries deleted; 0 when the directory was absent.
+    public static func removeDirIfExists(string path): int {
+        if (!FileSystem.exists(path)) { return 0 }
+        return FileSystem.removeDir(path)
+    }
+
+    // --- Idempotent creation ----------------------------------------------
+
+    public static func ensureFile(string path): void {
+        if (!FileSystem.exists(path)) { FileSystem.writeFile(path, "") }
+    }
+
+    // Creates every missing directory in `path`'s parent chain.
+    public static func ensureParentDir(string path): void {
+        var parent = FileSystem.parentPath(path)
+        if (parent != "" && !FileSystem.isDirectory(parent)) { FileSystem.createDir(parent) }
+    }
+
+    // --- Text helpers ------------------------------------------------------
+
+    public static func readLines(string path): List<string> {
+        var result = new List<string>()
+        var raw = String.split(FileSystem.readFile(path), "\n")
+        for i in 0..Collection.length(raw) {
+            result.push(Collection.get(raw, i))
+        }
+        // A trailing newline must not produce a phantom final line.
+        if (result.length() > 0 && result.last() == "") { result.pop() }
+        return result
+    }
+
+    public static func writeLines(string path, List<string> lines): void {
+        var content = ""
+        for i in 0..lines.length() {
+            content = content + lines.get(i) + "\n"
+        }
+        FileSystem.writeFile(path, content)
+    }
+
+    public static func appendLine(string path, string line): void {
+        FileSystem.appendFile(path, line + "\n")
+    }
+
+    // --- Directory listing -------------------------------------------------
+
+    // Entry names only, matching the native listDir contract.
+    public static func entries(string path): List<string> {
+        var result = new List<string>()
+        var raw = FileSystem.listDir(path)
+        for i in 0..Collection.length(raw) {
+            result.push(Collection.get(raw, i))
+        }
+        return result
+    }
+
+    // Full paths of the regular files directly inside `path`.
+    public static func files(string path): List<string> {
+        var result = new List<string>()
+        var names = FileSystem.entries(path)
+        for i in 0..names.length() {
+            var full = FileSystem.joinPath(path, names.get(i))
+            if (FileSystem.isFile(full)) { result.push(full) }
+        }
+        return result
+    }
+
+    // Full paths of the subdirectories directly inside `path`.
+    public static func directories(string path): List<string> {
+        var result = new List<string>()
+        var names = FileSystem.entries(path)
+        for i in 0..names.length() {
+            var full = FileSystem.joinPath(path, names.get(i))
+            if (FileSystem.isDirectory(full)) { result.push(full) }
+        }
+        return result
+    }
+
+    public static func isEmptyDir(string path): bool {
+        return Collection.length(FileSystem.listDir(path)) == 0
+    }
+
+    // --- Path manipulation --------------------------------------------------
+
+    // Replaces the extension, which must include its leading dot or be empty.
+    public static func withExtension(string path, string extension): string {
+        var parent = FileSystem.parentPath(path)
+        var name = FileSystem.stem(path) + extension
+        if (parent == "") { return name }
+        return FileSystem.joinPath(parent, name)
+    }
+
+    public static func hasExtension(string path, string extension): bool {
+        return FileSystem.extension(path) == extension
+    }
 }

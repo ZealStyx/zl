@@ -75,11 +75,28 @@ log(applyTwice(func(x) => x * 2, 3))  // 12
 ```
 
 **Syntax.** `func` — the same keyword as a named declaration, reused in expression
-position — followed by a parameter list, then either `=> expr` (single expression,
-return implied) or `{ statements }` (block body, explicit `return` required; falling off
-the end returns `nil`). Parameters may be untyped (`x`) or typed (`int x`), using the
-same `Type Name` order as named functions. `func` alone, with no parameter list, is also
-a valid *type* name for a slot holding a function value: `callback: func`.
+position — followed by a parameter list, an optional `: ReturnType`, then either
+`=> expr` (single expression, return implied) or `{ statements }` (block body, explicit
+`return` required; falling off the end returns `nil`). Parameters may be untyped (`x`)
+or typed (`int x`), using the same `Type Name` order as named functions. `func` alone,
+with no parameter list, is also a valid *type* name for a slot holding a function value:
+`callback: func`.
+
+**Declared return types.** A lambda may state its result type just like a named
+function. The annotation is a checked contract, not documentation — the body's inferred
+result must be assignable to it:
+
+```zl
+var double = func(int x): int => x * 2          // ok
+var isBig  = func(int x): bool => x > 10        // ok
+var report = func(int x): void { log(x) }       // ok - no value returned
+
+var wrong  = func(int x): bool => x + 1         // error: body returns 'int'
+```
+
+When the annotation is present it overrides whatever the call site expected, so the
+lambda's contract stays visible to callers. Omitting it keeps the previous behaviour:
+the result type is inferred from the body, and from the expected type at the call site.
 
 **Capture is by value.** A lambda snapshots every variable in scope at the moment it is
 *evaluated* (not declared) — a copy, not a live reference:

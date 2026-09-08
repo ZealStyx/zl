@@ -1,5 +1,6 @@
 #include "zl/vm/runtime_type_checks.hpp"
 #include "zl/compiler/bytecode.hpp"
+#include "zl/vm/runtime_fault.hpp"
 
 #include <algorithm>
 
@@ -37,7 +38,7 @@ bool RuntimeTypeCheck::check(const Value& value, const std::string& typeName, Mo
 
 void RuntimeTypeCheck::require(const Value& value, const std::string& typeName) {
     if (!check(value, typeName))
-        throw std::runtime_error("type assertion failed: expected " + typeName + ", got " + runtimeValueTypeName(value));
+        throwTypeError("type assertion failed: expected " + typeName + ", got " + runtimeValueTypeName(value));
 }
 
 bool RuntimeTypeCheck::matches(const Value& value, const TypeName& type, Mode mode) {

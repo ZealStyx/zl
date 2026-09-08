@@ -1,13 +1,97 @@
-// zl.util.Queue - FIFO queue API (native storage primitive).
+// zl.util.Queue - typed FIFO queue.
 //
-// This file exists so `import zl.util.Queue` resolves to a real file, same
-// as any user-defined package - the module loader doesn't special-case
-// stdlib packages at the resolver level. The actual Queue.* functions are
-// natives implemented in native.cpp; this class body is intentionally
-// empty since native calls (Namespace.method(...)) are resolved by
-// qualified-name lookup against the native table, not by looking at any
-// class's declared members.
-class Queue {
-    // FIFO reference package: native storage is intentionally hidden behind this API.
-    // API: newQueue, enqueue, dequeue, peek, isEmpty, size.
+// The native Queue.* functions (newQueue, enqueue, dequeue, peek, isEmpty,
+// size) are the storage primitive and resolve by qualified-name lookup
+// against the native table. This class is the typed surface over them, giving
+// Queue<T> the same element typing and safe-fallback conventions as
+// List/Map/Set. The natives stay callable directly for untyped use.
+//
+// Note: inside this file `Queue.enqueue(...)` resolves to the NATIVE, not to
+// this class's own method, because qualified-namespace calls are matched
+// against the native table first. The methods below are therefore genuine
+// delegations, not self-recursion.
+class Queue<T> {
+    list<T> __native
+
+    func Queue(): void {
+        this.__native = Queue.newQueue()
+    }
+
+    public func enqueue(T item): void {
+        Queue.enqueue(this.__native, item)
+    }
+
+    // Removes and returns the front element; throws when empty.
+    public func dequeue(): T {
+        return Queue.dequeue(this.__native)
+    }
+
+    // Returns the front element without removing it; throws when empty.
+    public func peek(): T {
+        return Queue.peek(this.__native)
+    }
+
+    public func length(): int {
+        return Queue.size(this.__native)
+    }
+
+    public func isEmpty(): bool {
+        return Queue.isEmpty(this.__native)
+    }
+
+    public func isNotEmpty(): bool {
+        return !this.isEmpty()
+    }
+
+    // --- Safe fallbacks ----------------------------------------------------
+
+    public func dequeueOr(T fallback): T {
+        if (this.isEmpty()) { return fallback }
+        return this.dequeue()
+    }
+
+    public func peekOr(T fallback): T {
+        if (this.isEmpty()) { return fallback }
+        return this.peek()
+    }
+
+    // --- Bulk operations ---------------------------------------------------
+
+    public func enqueueAll(List<T> values): void {
+        for i in 0..values.length() {
+            this.enqueue(values.get(i))
+        }
+    }
+
+    public func clear(): void {
+        while (!this.isEmpty()) {
+            this.dequeue()
+        }
+    }
+
+    // Drains the queue into a list, front element first.
+    public func drain(): List<T> {
+        var result = new List<T>()
+        while (!this.isEmpty()) {
+            result.push(this.dequeue())
+        }
+        return result
+    }
+
+    // Front-to-back snapshot; the queue is left unchanged.
+    public func items(): List<T> {
+        var result = new List<T>()
+        for i in 0..Collection.length(this.__native) {
+            result.push(Collection.get(this.__native, i))
+        }
+        return result
+    }
+
+    public func contains(T item): bool {
+        return this.items().contains(item)
+    }
+
+    public func forEach(func action): void {
+        this.items().forEach(action)
+    }
 }

@@ -15,6 +15,10 @@ StoredException::StoredException(const std::exception_ptr& error) {
         std::rethrow_exception(error);
     } catch (const ZlThrownException& exception) {
         managed_ = exception.value();
+        // Pin immediately: not every holder of a StoredException is traced by
+        // the collector (a Thread's captured failure is not), so the payload
+        // must stay reachable on its own until this failure is destroyed.
+        if (managed_) root_ = std::make_shared<ProtectedGCRoot>(managed_.get());
         message_ = managed_ ? managed_->className : "ZL exception";
         if (managed_) {
             const auto message = managed_->fields.find("message");
