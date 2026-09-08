@@ -15,8 +15,9 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-Targets: `zl_language` (runtime) and `zlpkg` (dependency manager), plus the C++ test
-executables.
+Targets: `zl_language` (runtime), `zlpkg` (dependency manager), and `zl-bind`
+(native binding generator), plus the C++ test executables. The Python-based `zl-lsp`
+and `zl-test` tools do not need compilation.
 
 On Windows, `scripts/build.bat` wraps the same configuration and accepts:
 
