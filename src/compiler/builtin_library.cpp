@@ -4,7 +4,7 @@ namespace zl {
 namespace {
 constexpr std::string_view kBuiltinListSource = R"ZL(
 class List<T> {
-    list<int> __native
+    list<T> __native
 
     func List(): void {
         this.__native = Collection.newList()
@@ -295,7 +295,7 @@ class List<T> {
 
 constexpr std::string_view kBuiltinMapSource = R"ZL(
 class Map<K, V> {
-    map<int, int> __native
+    map<K, V> __native
 
     func Map(): void {
         this.__native = Collection.newMap()
@@ -394,7 +394,7 @@ class Map<K, V> {
 
 constexpr std::string_view kBuiltinSetSource = R"ZL(
 class Set<T> {
-    set<int> __native
+    set<T> __native
 
     func Set(): void {
         this.__native = Collection.newSet()

@@ -462,6 +462,12 @@ NodePtr ExpressionParser::parseMatchExpr() {
             pattern->raw = tok.lexeme;
             return pattern;
         }
+        if (parser_.check(TokenType::KW_FUNC) || parser_.check(TokenType::KW_ARRAY)) {
+            pattern->kind = MatchExpr::PatternKind::Type;
+            pattern->typePattern = parser_.parseTypeAnnotation();
+            pattern->bindingName = parser_.expect(TokenType::IDENTIFIER, "Expected binding after type pattern").lexeme;
+            return pattern;
+        }
         if (parser_.check(TokenType::IDENTIFIER) || parser_.check(TokenType::KW_LIST) || parser_.check(TokenType::KW_SET) || parser_.check(TokenType::KW_MAP)) {
             Token first = parser_.advance();
             if (parser_.match({TokenType::DOT})) {

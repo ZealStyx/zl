@@ -6,6 +6,7 @@
 #include "zl/vm/vm.hpp"
 #include "zl/vm/value.hpp"
 #include "zl/vm/gc.hpp"
+#include "zl/vm/runtime_type_checks.hpp"
 #include "zl/regex/regex.hpp"
 
 #include <algorithm>
@@ -42,9 +43,15 @@ namespace zl {
 
 thread_local VM* g_currentNativeVm = nullptr;
 
-void setCurrentNativeVm(VM* vm) { g_currentNativeVm = vm; }
+VM* setCurrentNativeVm(VM* vm) {
+    VM* previous = g_currentNativeVm;
+    g_currentNativeVm = vm;
+    return previous;
+}
 
 namespace {
+
+const Chunk* nativeChunk() { return g_currentNativeVm ? g_currentNativeVm->activeChunk() : nullptr; }
 
 // --- Math ---
 
@@ -217,12 +224,12 @@ Value ioClear(const std::vector<Value>& /*args*/) {
 // --- Collection (lists, arrays, sets share ListRef; maps use MapRef) ---
 
 ListRef requireList(const Value& v, const char* fnName) {
-    if (auto p = std::get_if<ListRef>(&v)) return *p;
+    if (const auto* p = std::get_if<ListRef>(&v); p && *p) return *p;
     throw std::runtime_error(std::string(fnName) + " expects a list/array/set as its first argument");
 }
 
 MapRef requireMap(const Value& v, const char* fnName) {
-    if (auto p = std::get_if<MapRef>(&v)) return *p;
+    if (const auto* p = std::get_if<MapRef>(&v); p && *p) return *p;
     throw std::runtime_error(std::string(fnName) + " expects a map as its first argument");
 }
 
@@ -257,6 +264,8 @@ Value collNewList(const std::vector<Value>&) { return makeEmptyList(); }
 
 Value collPush(const std::vector<Value>& args) {
     auto list = requireList(args[0], "Collection.push");
+    RuntimeTypeCheck types(nativeChunk());
+    types.listWrite(list, &args[1], listLogicalSize(list) + 1);
     if (list->frontIndex != 0) {
         // A list with a queue front offset is still a valid ListRef, but
         // Collection.push should preserve normal list semantics. Compact the
@@ -266,19 +275,24 @@ Value collPush(const std::vector<Value>& args) {
         list->frontIndex = 0;
     }
     list->items.push_back(args[1]);
+    types.commit();
     return Value{};
 }
 
 Value collPop(const std::vector<Value>& args) {
     auto list = requireList(args[0], "Collection.pop");
+    RuntimeTypeCheck types(nativeChunk());
     if (listLogicalSize(list) == 0) throw std::runtime_error("Collection.pop: cannot pop from an empty list");
-    Value back = list->items.back();
+    types.listWrite(list, nullptr, listLogicalSize(list) - 1);
+    Value back = std::move(list->items.back());
     list->items.pop_back();
     normalizeListFront(list);
+    types.commit();
     return back;
 }
 
 Value collGet(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto list = requireList(args[0], "Collection.get");
     const std::size_t size = listLogicalSize(list);
     const std::size_t index = requireIndex(args[1], size, "Collection.get");
@@ -287,15 +301,20 @@ Value collGet(const std::vector<Value>& args) {
 
 Value collSet(const std::vector<Value>& args) {
     auto list = requireList(args[0], "Collection.set");
+    Value replacement = args[2];
+    RuntimeTypeCheck types(nativeChunk());
     const std::size_t size = listLogicalSize(list);
     const std::size_t index = requireIndex(args[1], size, "Collection.set");
-    list->items[list->frontIndex + index] = args[2];
+    types.listWrite(list, &replacement, size);
+    std::swap(list->items[list->frontIndex + index], replacement);
+    types.commit();
     return Value{};
 }
 
 Value collLength(const std::vector<Value>& args) {
-    if (auto p = std::get_if<ListRef>(&args[0])) return static_cast<std::int64_t>(listLogicalSize(*p));
-    if (auto p = std::get_if<MapRef>(&args[0])) return static_cast<std::int64_t>((*p)->entries.size());
+    RuntimeTypeCheck access(nativeChunk());
+    if (const auto* p = std::get_if<ListRef>(&args[0]); p && *p) return static_cast<std::int64_t>(listLogicalSize(*p));
+    if (const auto* p = std::get_if<MapRef>(&args[0]); p && *p) return static_cast<std::int64_t>((*p)->entries.size());
     if (auto p = std::get_if<std::string>(&args[0])) return static_cast<std::int64_t>(p->size());
     throw std::runtime_error("Collection.length expects a list/array/set, map, or string");
 }
@@ -311,29 +330,38 @@ Value queueNew(const std::vector<Value>&) { return makeEmptyList(); }
 
 Value queueEnqueue(const std::vector<Value>& args) {
     auto list = requireList(args[0], "Queue.enqueue");
+    RuntimeTypeCheck types(nativeChunk());
+    types.listWrite(list, &args[1], listLogicalSize(list) + 1);
     list->items.push_back(args[1]);
+    types.commit();
     return Value{};
 }
 
 Value queueDequeue(const std::vector<Value>& args) {
     auto list = requireList(args[0], "Queue.dequeue");
+    RuntimeTypeCheck types(nativeChunk());
     if (listLogicalSize(list) == 0) throw std::runtime_error("Queue.dequeue: cannot dequeue from an empty queue");
-    Value front = list->items[list->frontIndex++];
+    types.listWrite(list, nullptr, listLogicalSize(list) - 1);
+    Value front = std::move(list->items[list->frontIndex++]);
     normalizeListFront(list);
+    types.commit();
     return front;
 }
 
 Value queuePeek(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto list = requireList(args[0], "Queue.peek");
     if (listLogicalSize(list) == 0) throw std::runtime_error("Queue.peek: cannot peek an empty queue");
     return list->items[list->frontIndex];
 }
 
 Value queueIsEmpty(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     return listLogicalSize(requireList(args[0], "Queue.isEmpty")) == 0;
 }
 
 Value queueSize(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     return static_cast<std::int64_t>(listLogicalSize(requireList(args[0], "Queue.size")));
 }
 
@@ -341,31 +369,40 @@ Value stackNew(const std::vector<Value>&) { return makeEmptyList(); }
 
 Value stackPush(const std::vector<Value>& args) {
     auto list = requireList(args[0], "Stack.push");
+    RuntimeTypeCheck types(nativeChunk());
+    types.listWrite(list, &args[1], listLogicalSize(list) + 1);
     normalizeListFront(list);
     list->items.push_back(args[1]);
+    types.commit();
     return Value{};
 }
 
 Value stackPop(const std::vector<Value>& args) {
     auto list = requireList(args[0], "Stack.pop");
+    RuntimeTypeCheck types(nativeChunk());
     if (listLogicalSize(list) == 0) throw std::runtime_error("Stack.pop: cannot pop from an empty stack");
-    Value back = list->items.back();
+    types.listWrite(list, nullptr, listLogicalSize(list) - 1);
+    Value back = std::move(list->items.back());
     list->items.pop_back();
     normalizeListFront(list);
+    types.commit();
     return back;
 }
 
 Value stackPeek(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto list = requireList(args[0], "Stack.peek");
     if (listLogicalSize(list) == 0) throw std::runtime_error("Stack.peek: cannot peek an empty stack");
     return list->items.back();
 }
 
 Value stackIsEmpty(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     return listLogicalSize(requireList(args[0], "Stack.isEmpty")) == 0;
 }
 
 Value stackSize(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     return static_cast<std::int64_t>(listLogicalSize(requireList(args[0], "Stack.size")));
 }
 
@@ -373,14 +410,23 @@ Value collNewMap(const std::vector<Value>&) { return makeEmptyMap(); }
 
 Value collMapSet(const std::vector<Value>& args) {
     auto map = requireMap(args[0], "Collection.mapSet");
+    Value replacement = args[2];
+    RuntimeTypeCheck types(nativeChunk());
+    types.mapWrite(map, args[1], replacement);
     for (auto& entry : map->entries) {
-        if (valuesEqual(entry.first, args[1])) { entry.second = args[2]; return Value{}; }
+        if (valuesEqual(entry.first, args[1])) {
+            std::swap(entry.second, replacement);
+            types.commit();
+            return Value{};
+        }
     }
-    map->entries.emplace_back(args[1], args[2]);
+    map->entries.emplace_back(args[1], std::move(replacement));
+    types.commit();
     return Value{};
 }
 
 Value collMapGet(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto map = requireMap(args[0], "Collection.mapGet");
     for (auto& entry : map->entries) {
         if (valuesEqual(entry.first, args[1])) return entry.second;
@@ -389,6 +435,7 @@ Value collMapGet(const std::vector<Value>& args) {
 }
 
 Value collMapHas(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto map = requireMap(args[0], "Collection.mapHas");
     for (auto& entry : map->entries) {
         if (valuesEqual(entry.first, args[1])) return true;
@@ -398,25 +445,35 @@ Value collMapHas(const std::vector<Value>& args) {
 
 Value collMapRemove(const std::vector<Value>& args) {
     auto map = requireMap(args[0], "Collection.mapRemove");
+    std::pair<Value, Value> removed;
+    RuntimeTypeCheck access(nativeChunk());
     for (auto it = map->entries.begin(); it != map->entries.end(); ++it) {
-        if (valuesEqual(it->first, args[1])) { map->entries.erase(it); break; }
+        if (valuesEqual(it->first, args[1])) {
+            removed = std::move(*it);
+            map->entries.erase(it);
+            break;
+        }
     }
     return Value{};
 }
 
 Value collMapKeys(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto map = requireMap(args[0], "Collection.mapKeys");
     auto out = std::get<ListRef>(makeEmptyList());
     out->items.reserve(map->entries.size());
     for (const auto& entry : map->entries) out->items.push_back(entry.first);
+    if (map->storageType) out->storageType = std::make_shared<const NativeContainerType>(NativeContainerType{{map->storageType->arguments[0]}, {}});
     return out;
 }
 
 Value collMapValues(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto map = requireMap(args[0], "Collection.mapValues");
     auto out = std::get<ListRef>(makeEmptyList());
     out->items.reserve(map->entries.size());
     for (const auto& entry : map->entries) out->items.push_back(entry.second);
+    if (map->storageType) out->storageType = std::make_shared<const NativeContainerType>(NativeContainerType{{map->storageType->arguments[1]}, {}});
     return out;
 }
 
@@ -424,34 +481,49 @@ Value collNewSet(const std::vector<Value>&) { return makeEmptyList(); } // sets 
 
 Value collSetAdd(const std::vector<Value>& args) {
     auto set = requireList(args[0], "Collection.setAdd");
-    for (auto& item : set->items) {
-        if (valuesEqual(item, args[1])) return Value{}; // already present - sets don't allow duplicates
+    RuntimeTypeCheck types(nativeChunk());
+    types.listWrite(set, &args[1], listLogicalSize(set));
+    for (std::size_t i = set->frontIndex; i < set->items.size(); ++i) {
+        if (valuesEqual(set->items[i], args[1])) { types.commit(); return Value{}; }
     }
+    types.listWrite(set, nullptr, listLogicalSize(set) + 1);
     set->items.push_back(args[1]);
+    types.commit();
     return Value{};
 }
 
 Value collSetHas(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto set = requireList(args[0], "Collection.setHas");
-    for (auto& item : set->items) {
-        if (valuesEqual(item, args[1])) return true;
+    for (std::size_t i = set->frontIndex; i < set->items.size(); ++i) {
+        if (valuesEqual(set->items[i], args[1])) return true;
     }
     return false;
 }
 
 Value collSetRemove(const std::vector<Value>& args) {
     auto set = requireList(args[0], "Collection.setRemove");
-    for (auto it = set->items.begin(); it != set->items.end(); ++it) {
-        if (valuesEqual(*it, args[1])) { set->items.erase(it); break; }
+    Value removed;
+    RuntimeTypeCheck types(nativeChunk());
+    for (std::size_t i = set->frontIndex; i < set->items.size(); ++i) {
+        if (valuesEqual(set->items[i], args[1])) {
+            types.listWrite(set, nullptr, listLogicalSize(set) - 1);
+            removed = std::move(set->items[i]);
+            set->items.erase(set->items.begin() + static_cast<std::ptrdiff_t>(i));
+            break;
+        }
     }
+    types.commit();
     return Value{};
 }
 
 Value collSetItems(const std::vector<Value>& args) {
+    RuntimeTypeCheck access(nativeChunk());
     auto set = requireList(args[0], "Collection.setItems");
     auto out = std::get<ListRef>(makeEmptyList());
     out->items.reserve(set->items.size());
-    for (const auto& item : set->items) out->items.push_back(item);
+    for (std::size_t i = set->frontIndex; i < set->items.size(); ++i) out->items.push_back(set->items[i]);
+    if (set->storageType) out->storageType = std::make_shared<const NativeContainerType>(NativeContainerType{set->storageType->arguments, {}});
     return out;
 }
 
@@ -825,7 +897,11 @@ Value mutexWithLock(const std::vector<Value>& args) {
     if (!closure || !*closure || !(*closure)->chunk || !(*closure)->paramNames.empty())
         throw std::runtime_error("Mutex.withLock: expected a zero-argument func");
     if (!g_currentNativeVm) throw std::runtime_error("Mutex.withLock: no active VM");
-    std::unique_lock<std::mutex> lock(*mutexState);
+    std::unique_lock<std::mutex> lock(*mutexState, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+    }
     return g_currentNativeVm->invokeTaskClosure(*closure);
 }
 
@@ -838,7 +914,11 @@ Value rwLockWithRead(const std::vector<Value>& args) {
     if (!closure || !*closure || !(*closure)->chunk || !(*closure)->paramNames.empty())
         throw std::runtime_error("RwLock.withRead: expected a zero-argument func");
     if (!g_currentNativeVm) throw std::runtime_error("RwLock.withRead: no active VM");
-    std::shared_lock<std::shared_mutex> lock(*rwLockState);
+    std::shared_lock<std::shared_mutex> lock(*rwLockState, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+    }
     return g_currentNativeVm->invokeTaskClosure(*closure);
 }
 
@@ -851,7 +931,11 @@ Value rwLockWithWrite(const std::vector<Value>& args) {
     if (!closure || !*closure || !(*closure)->chunk || !(*closure)->paramNames.empty())
         throw std::runtime_error("RwLock.withWrite: expected a zero-argument func");
     if (!g_currentNativeVm) throw std::runtime_error("RwLock.withWrite: no active VM");
-    std::unique_lock<std::shared_mutex> lock(*rwLockState);
+    std::unique_lock<std::shared_mutex> lock(*rwLockState, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+    }
     return g_currentNativeVm->invokeTaskClosure(*closure);
 }
 
@@ -946,6 +1030,7 @@ Value semaphoreAcquire(const std::vector<Value>& args) {
     if (!obj || !*obj || (*obj)->className != "Semaphore")
         throw std::runtime_error("Semaphore.acquire: expected a Semaphore");
     auto state = ensureObjectState(*(*obj), &ObjectBox::semaphoreState, [] { return std::make_shared<ObjectBox::SemaphoreState>(); });
+    VM::BlockingNativeCall blocked(g_currentNativeVm);
     std::unique_lock<std::mutex> lock(state->mutex);
     state->cv.wait(lock, [&] { return state->permits > 0; });
     --state->permits;
@@ -979,6 +1064,7 @@ Value conditionWait(const std::vector<Value>& args) {
     if (!obj || !*obj || (*obj)->className != "Condition")
         throw std::runtime_error("Condition.wait: expected a Condition");
     auto state = ensureObjectState(*(*obj), &ObjectBox::conditionState, [] { return std::make_shared<ObjectBox::ConditionState>(); });
+    VM::BlockingNativeCall blocked(g_currentNativeVm);
     std::unique_lock<std::mutex> lock(state->mutex);
     state->cv.wait(lock);
     return Value{};
@@ -1019,8 +1105,12 @@ Value channelSend(const std::vector<Value>& args) {
     if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
         throw std::runtime_error("Channel.send: expected a Channel");
     auto state = (*obj)->channelState;
-    std::unique_lock<std::mutex> lock(state->mutex);
-    state->cvNotFull.wait(lock, [&] { return state->items.size() < state->capacity; });
+    std::unique_lock<std::mutex> lock(state->mutex, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+        state->cvNotFull.wait(lock, [&] { return state->items.size() < state->capacity; });
+    }
     state->items.push_back(args[1]);
     lock.unlock();
     state->cvNotEmpty.notify_one();
@@ -1032,8 +1122,12 @@ Value channelReceive(const std::vector<Value>& args) {
     if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
         throw std::runtime_error("Channel.receive: expected a Channel");
     auto state = (*obj)->channelState;
-    std::unique_lock<std::mutex> lock(state->mutex);
-    state->cvNotEmpty.wait(lock, [&] { return !state->items.empty(); });
+    std::unique_lock<std::mutex> lock(state->mutex, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+        state->cvNotEmpty.wait(lock, [&] { return !state->items.empty(); });
+    }
     Value value = std::move(state->items.front());
     state->items.pop_front();
     lock.unlock();
@@ -1055,7 +1149,7 @@ Value channelSendAsync(const std::vector<Value>& args) {
     auto obj = std::get_if<ObjectRef>(&args[0]);
     if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
         throw std::runtime_error("Channel.sendAsync: expected a Channel");
-    auto task = std::make_shared<RuntimeTaskState>("void");
+    auto task = std::make_shared<RuntimeTaskState>("void", std::vector<Value>{args[0]});
     const Value value = args[1];
     std::shared_ptr<ObjectBox::ChannelState> state = (*obj)->channelState;
 
@@ -1113,7 +1207,7 @@ Value channelReceiveAsync(const std::vector<Value>& args) {
     auto obj = std::get_if<ObjectRef>(&args[0]);
     if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
         throw std::runtime_error("Channel.receiveAsync: expected a Channel");
-    auto task = std::make_shared<RuntimeTaskState>();
+    auto task = std::make_shared<RuntimeTaskState>("", std::vector<Value>{args[0]});
     std::shared_ptr<ObjectBox::ChannelState> state = (*obj)->channelState;
     std::optional<Value> immediate;
     TaskRef senderTask;
@@ -1183,11 +1277,13 @@ Value taskSpawn(const std::vector<Value>& args) {
 
     auto task = std::make_shared<RuntimeTaskState>(c.returnTypeName.empty() ? "void" : c.returnTypeName);
     const auto closureCopy = *closure;
-    RuntimeTaskExecutor::instance().enqueue([task, closureCopy]() mutable {
+    auto root = std::make_shared<ProtectedGCRoot>(closureCopy.get());
+    RuntimeTaskExecutor::instance().enqueue([task, closureCopy, root]() mutable {
+        std::unique_ptr<VM> workerVm;
         try {
+            workerVm = std::make_unique<VM>();
             task->start();
-            VM workerVm;
-            Value result = workerVm.invokeTaskClosure(closureCopy);
+            Value result = workerVm->invokeTaskClosure(closureCopy);
             task->succeed(std::move(result));
         } catch (...) {
             try { task->fail(std::current_exception()); } catch (const std::logic_error&) {}
@@ -1209,19 +1305,15 @@ Value threadStart(const std::vector<Value>& args) {
 
     auto state = std::make_shared<RuntimeThreadState>();
     const auto closureCopy = *closure;
-    const void* closureIdentity = closureCopy.get();
-    TracingGC::instance().protect(closureIdentity);
-    state->startWith([closureCopy, closureIdentity]() mutable {
+    auto root = std::make_shared<ProtectedGCRoot>(closureCopy.get());
+    state->startWith([closureCopy, root]() mutable {
         try {
             VM workerVm;
-            workerVm.invokeThreadClosure(closureCopy);
+            (void)workerVm.invokeTaskClosure(closureCopy);
         } catch (...) {
-            TracingGC::instance().unprotect(closureIdentity);
-            // An exception escaping a Thread is an uncaught exception and is
-            // process-fatal by language definition.
+            // An exception escaping a Thread is process-fatal by definition.
             std::terminate();
         }
-        TracingGC::instance().unprotect(closureIdentity);
     });
     return Value{std::move(state)};
 }
@@ -1229,6 +1321,7 @@ Value threadStart(const std::vector<Value>& args) {
 Value threadJoin(const std::vector<Value>& args) {
     auto thread = std::get_if<ThreadRef>(&args[0]);
     if (!thread || !(*thread)) throw std::runtime_error("Thread.join: expected a Thread value");
+    VM::BlockingNativeCall blocked(g_currentNativeVm);
     (*thread)->join();
     return Value{};
 }
@@ -1242,6 +1335,7 @@ Value threadIsAlive(const std::vector<Value>& args) {
 Value timeSleep(const std::vector<Value>& args) {
     double seconds = toDouble(args[0]);
     if (seconds > 0.0) {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
         std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
     }
     return Value{};
@@ -1386,21 +1480,8 @@ Value typeBase(const std::vector<Value>& args) {
 
 // --- Reflection wrappers -------------------------------------------------
 
-std::string sharedRuntimeClassName(const Value& value) {
-    if (std::holds_alternative<std::int64_t>(value)) return "Shared<int>";
-    if (std::holds_alternative<double>(value)) return "Shared<double>";
-    if (std::holds_alternative<bool>(value)) return "Shared<bool>";
-    if (std::holds_alternative<std::string>(value)) return "Shared<string>";
-    if (auto obj = std::get_if<ObjectRef>(&value); obj && *obj)
-        return "Shared<" + (*obj)->className + ">";
-    if (std::holds_alternative<ListRef>(value)) return "Shared<list>";
-    if (std::holds_alternative<MapRef>(value)) return "Shared<map>";
-    if (std::holds_alternative<ClosureRef>(value)) return "Shared<func>";
-    return "Shared<object>";
-}
-
 Value sharedShare(const std::vector<Value>& args) {
-    if (args.size() != 1) throw std::runtime_error("Shared.share: expected one value");
+    if (args.size() != 1) throw std::runtime_error("share: expected one value");
     auto box = makeGCObject();
     // Runtime dispatch uses the canonical Shared class; the compiler retains
     // Shared<T> at the static type level for get()/setValue() typing.
@@ -1415,7 +1496,11 @@ Value sharedGet(const std::vector<Value>& args) {
     if (!obj || !*obj || (*obj)->className != "Shared")
         throw std::runtime_error("Shared.__get: expected a Shared value");
     auto mutex = ensureObjectState(*(*obj), &ObjectBox::sharedValueMutex, [] { return std::make_shared<std::recursive_mutex>(); });
-    std::lock_guard<std::recursive_mutex> lock(*mutex);
+    std::unique_lock<std::recursive_mutex> lock(*mutex, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+    }
     auto it = (*obj)->fields.find("__value");
     if (it == (*obj)->fields.end()) throw std::runtime_error("Shared.__get: invalid Shared value");
     return it->second;
@@ -1431,7 +1516,11 @@ Value sharedWithLock(const std::vector<Value>& args) {
         throw std::runtime_error("Shared.__withLock: expected a zero-argument func");
     if (!g_currentNativeVm) throw std::runtime_error("Shared.__withLock: no active VM");
     auto mutex = ensureObjectState(*(*obj), &ObjectBox::sharedValueMutex, [] { return std::make_shared<std::recursive_mutex>(); });
-    std::unique_lock<std::recursive_mutex> lock(*mutex);
+    std::unique_lock<std::recursive_mutex> lock(*mutex, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+    }
     return g_currentNativeVm->invokeTaskClosure(*closure);
 }
 
@@ -1441,8 +1530,20 @@ Value sharedSet(const std::vector<Value>& args) {
     if (!obj || !*obj || (*obj)->className != "Shared")
         throw std::runtime_error("Shared.__set: expected a Shared value");
     auto mutex = ensureObjectState(*(*obj), &ObjectBox::sharedValueMutex, [] { return std::make_shared<std::recursive_mutex>(); });
-    std::lock_guard<std::recursive_mutex> lock(*mutex);
-    (*obj)->fields["__value"] = args[1];
+    std::unique_lock<std::recursive_mutex> lock(*mutex, std::defer_lock);
+    {
+        VM::BlockingNativeCall blocked(g_currentNativeVm);
+        lock.lock();
+    }
+    if (!nativeChunk()) throw std::runtime_error("Shared.__set: no active VM");
+    Value replacement = args[1];
+    {
+        RuntimeTypeCheck types(nativeChunk());
+        types.require(replacement, runtimeFieldType(*nativeChunk(), (*obj)->className, "__value", obj->get()));
+        std::swap((*obj)->fields["__value"], replacement);
+        types.commit();
+    }
+    lock.unlock();
     return Value{};
 }
 
@@ -1506,7 +1607,8 @@ Value reflectionFunction(const std::vector<Value>& args) {
     auto params = makeGCList();
     for (const auto& type : (*closure)->parameterTypeNames) params->items.emplace_back(type);
     ref->fields["parameters"] = ListRef(std::move(params));
-    ref->fields["returnType"] = (*closure)->returnTypeName;
+    ref->fields["returnType"] = (*closure)->isAsync
+        ? "Task<" + (*closure)->returnTypeName + ">" : (*closure)->returnTypeName;
     ref->fields["async"] = (*closure)->isAsync;
     ref->fields["native"] = (*closure)->isNative;
     return ObjectRef(std::move(ref));

@@ -16,23 +16,28 @@
 // EXHAUSTIVENESS IS CHECKED AT COMPILE TIME. A match that can fail to match any
 // arm is rejected rather than falling through at runtime:
 //
-//   * int / double / string  need a wildcard (or an irrefutable variable
-//     pattern) - the value space is open, so a list of literals can never cover
-//     it
-//   * bool                   needs both true and false, or a wildcard
-//   * enum                   needs every member, or a wildcard
+//   * open scalar spaces need a catch-all or covering type pattern
+//   * bool needs true + false, a bool type pattern, or a catch-all
+//   * enums need every member, a covering type pattern, or a catch-all
+//   * unions need all alternatives; guards do not establish coverage
+//   * nullable references (including string) also need null or a catch-all
 //
-// Without that check the fallthrough value is the SUBJECT itself, which has a
-// different type from the arms - `match n { 1 => "one" }` yields the int 3 when
-// n is 3.
-//
-// Note that matching on Option / Result is NOT currently possible; see
-// examples/REVIEW.md (O21). Use `if (opt.isSome())` instead.
+// Type patterns narrow the subject and binding in their arm. Pattern bindings
+// are copies, not aliases of outer variables with the same spelling. A guard
+// that changes the subject invalidates narrowing of that original identifier.
 // ============================================================================
 
 enum Level { LOW MEDIUM HIGH }
 
 class MatchExpressions {
+    static func describe(int|string value): string {
+        return match value {
+            int _ => "number " + (value + 1)
+            string text => String.upper(text)
+            null => "missing"
+        }
+    }
+
     static func nameOf(int n): string {
         return match n {
             0 => "zero"
@@ -85,6 +90,9 @@ class MatchExpressions {
             v => "value " + v
         }
         log(described)
+        log("union " + MatchExpressions.describe(4))
+        log("union " + MatchExpressions.describe("hello"))
+        log("union " + MatchExpressions.describe(null))
     }
 }
 
@@ -98,4 +106,7 @@ class MatchExpressions {
 // medium
 // on
 // value 42
+// union number 5
+// union HELLO
+// union missing
 // --- End expected output ---

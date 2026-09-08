@@ -8,6 +8,65 @@ smaller ones that are recorded but left alone.
 Everything below was reproduced against a build of this tree. Each entry says
 what it is, how to see it, and whether it is fixed here or still open.
 
+## Stabilization update — 2026-09-08
+
+The findings below include the original reproductions. Subsequent hardening has
+closed **O4/F8, O5, and O6**:
+
+- GC now parks actual native waits (including lock acquisition), retains parked
+  roots until reactivation, and prevents resumption during a running collection.
+  Nested lock callbacks participate normally instead of postponing GC. A
+  controlled-collector regression rejects the former early-resumption protocol.
+- Native-driven callbacks restore the caller's execution/handler state on throw;
+  `MutexLocks.zl` checks one continuation and lock reuse after an exception.
+- Generic invocation frames and escaping closures carry lexical type bindings.
+  Method-built and literal collections retain their identity; declared parent
+  type arguments are substituted instead of copied by position. Argument and
+  return checks share the ordinary VM boundaries rather than skipping generic
+  signatures. `GenericRuntimeChecks.zl` also covers async callbacks and native
+  `share` factory metadata, including legitimate widening/base-class assignments.
+
+A subsequent compiler batch closes the local-reassignment and union-narrowing
+gaps. Unions now have a distinct semantic kind, preserve their alternatives
+through aliases/calls/generic instantiation, and use coverage-based match checking.
+Read refinements retain the original write contract and constness; guard writes,
+loop back edges and mutable captures invalidate unsafe assumptions. Unique local
+storage names fix shadowing across blocks, patterns, loops and catch clauses.
+The capture walk now binds callback-local declarations/counters instead of
+mistaking them for outer thread captures. `match` also no longer leaks its subject
+onto the surrounding value stack. Compiler and VM share type-name parsing and
+substitution rather than decoding different grammars.
+
+The heap-contract batch now checks stock native list/map/set/queue/stack writes
+against storage-owned contracts, including aliases, nested children and fixed
+array lengths. Type checks plan their changes and commit only after the whole
+boundary succeeds. Field writes use complete declaration metadata and the
+receiver's inherited generic bindings. This exposed and corrected the built-in
+containers' former hard-coded `int` backing declarations, a template-parent field
+substitution bug, and inherited field-name collisions. Native signatures now
+describe element/key/value relationships; `String.split` returns `list<string>`
+and native reads/projections retain their arguments.
+
+The lifetime batch closes the static-root gap with program graph tracing: constants,
+current static values and cached failures survive collection through active/suspended
+VMs and reachable closures. It does not globally pin static stores, so unreachable
+static/closure/failure cycles are reclaimed. A direct ASan reproduction previously
+freed a static list still in use; the strengthened `StaticMembers.zl` now preserves
+both values and cached failures across pressure.
+
+Reclamation occurs after tracing, outside collector/coordinator locks. Implicit thread
+joins run at stable VM boundaries instead of inside container/frame destruction.
+In-flight exceptions root their object; cached failures use traced storage and native
+diagnostics instead of permanent exception pins. Async entry failures propagate, and
+pending channel tasks retain their operation owner. `gc_lifetime_tests.cpp` controls
+retirement so another collection must complete while a retired thread is joined;
+`type_boundaries.py` also checks async failure propagation.
+
+The remaining stabilization gate includes external FFI callback quiescence/ownership,
+channel cancellation/progress interactions, other blocking native-resource finalizers
+and the remaining exception/Shared audit. Library expansion, the large type-checker
+split and native lowering remain deferred.
+
 ## Fixed in this branch
 
 ### 1. Every generic in the language was unusable at runtime
@@ -418,7 +477,7 @@ Also worth noting: `stdlib/zl/lang/Atomic.zl` and `Mutex.zl` are empty class
 bodies. Their entire API is native statics, so there is no instance surface at
 all.
 
-### O4 - Locked critical sections deadlock under contention
+### O4 - Locked critical sections deadlock under contention **(fixed)**
 
 2 x 50 locked increments completes and prints `total=100`. 2 x 100 hangs
 forever with no output, 4/4 runs. Both threads are joined by `main`, so it
@@ -429,7 +488,7 @@ threshold (2 x 100 hangs, exit 124) while `Shared.withLock` at 2 x 50 is stable
 5/5, so the fault is in the locked-closure path they share, not in either
 wrapper.
 
-### O5 - An exception escaping `Mutex.withLock` corrupts the continuation
+### O5 - An exception escaping `Mutex.withLock` corrupts the continuation **(fixed)**
 
 ```zl
 try {
@@ -442,7 +501,7 @@ prints the catch, then runs the rest of `main` **twice**, then dies with
 the `try` entirely. The lock's value is in the closure, so keep bodies
 non-throwing until this is fixed.
 
-### O6 - A generic collection loses its instantiated identity
+### O6 - A generic collection loses its instantiated identity **(fixed)**
 
 A list built inside a generic method - the result of `transform`, `filter`, or
 `reversed` - is erased to `List`, so it cannot be passed to a `List<int>`
@@ -597,7 +656,7 @@ versions are `any`, `all`, and `filter`.
 (`Expected '(' after func name -- got "<"`). Only generic *classes* exist, so
 `Generics.zl` writes the helper per element type.
 
-### O17 - The repository's `tests/` directory is missing
+### O17 - The legacy regression corpus is missing
 
 `CMakeLists.txt` declares 15+ test executables whose sources are not in the
 tree, so `cmake -S . -B build` fails at the generate step:
@@ -742,8 +801,8 @@ own.
 
 F6 and F8 were not reachable at all before fix 1: `Shared<int>` could not be
 constructed, so no thread or lock example could even start. Both were re-verified
-after the fix. F6 and F7 have since been fixed (fixes 3 and 5); F8 and F9 remain
-open.
+after the fix. F6 and F7 have since been fixed (fixes 3 and 5), and F8 was closed
+by the later safepoint work described above. F9 remains open.
 
 ## Three features that existed but were documented nowhere
 

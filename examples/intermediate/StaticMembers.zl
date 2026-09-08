@@ -12,6 +12,34 @@
 
 class StaticMembers {
     public static int instances
+    static list<int> retained = [17]
+    static list<int> failed = StaticMembers.failOnce()
+    static int attempts = 0
+
+    static func failOnce(): list<int> {
+        StaticMembers.attempts = StaticMembers.attempts + 1
+        throw new Exception("cached failure")
+    }
+
+    static func failureMessage(): string {
+        try { log(StaticMembers.failed) }
+        catch Exception error { return error.message }
+        return "unexpected success"
+    }
+
+    static func pressure(): void {
+        for i in 0..1200 { var garbage = [i, i + 1] }
+    }
+
+    static func valueAfterChild(): list<int> {
+        var child = Thread.start(func() { StaticMembers.pressure() })
+        return [23]
+    }
+
+    static func spawnThenThrow(): void {
+        var child = Thread.start(func() { StaticMembers.pressure() })
+        throw new Exception("unwind safely")
+    }
 
     public static func clamp(int value, int lo, int hi): int {
         if (value < lo) { return lo }
@@ -42,6 +70,24 @@ class StaticMembers {
 
         StaticMembers.instances = 3
         log(StaticMembers.instances)
+
+        // No local keeps the static list/exception alive across this pressure.
+        log("static before " + Collection.get(StaticMembers.retained, 0))
+        log(StaticMembers.failureMessage())
+        StaticMembers.pressure()
+        log("static after " + Collection.get(StaticMembers.retained, 0))
+        log(StaticMembers.failureMessage())
+        log("initializer attempts " + StaticMembers.attempts)
+
+        var done = new Shared<int>(0)
+        Thread.start(func() {
+            StaticMembers.pressure()
+            done.setValue(1)
+        })
+        log("implicit join " + done.get())
+        log("return across join " + Collection.get(StaticMembers.valueAfterChild(), 0))
+        try { StaticMembers.spawnThenThrow() }
+        catch Exception error { log(error.message) }
     }
 }
 
@@ -52,4 +98,12 @@ class StaticMembers {
 // true
 // false
 // 3
+// static before 17
+// cached failure
+// static after 17
+// cached failure
+// initializer attempts 1
+// implicit join 1
+// return across join 23
+// unwind safely
 // --- End expected output ---

@@ -22,24 +22,7 @@ std::string describeArg(const ResolvedTypeArg& arg) {
         result += arg.functionReturnType ? describeArg(*arg.functionReturnType) : "void";
         return result;
     }
-    if (arg.type == ZlType::OBJECT && !arg.className.empty()) return arg.className;
-    switch (arg.type) {
-        case ZlType::INT: return "int";
-        case ZlType::DOUBLE: return "double";
-        case ZlType::STRING: return "string";
-        case ZlType::BOOL: return "bool";
-        case ZlType::VOID_TYPE: return "void";
-        case ZlType::NIL: return "nil";
-        case ZlType::LIST: return "list";
-        case ZlType::MAP: return "map";
-        case ZlType::SET: return "set";
-        case ZlType::ARRAY: return "array";
-        case ZlType::FUNCTION: return "func";
-        case ZlType::UNKNOWN: return "unknown";
-        case ZlType::TASK: return "Task";
-        case ZlType::OBJECT: return "object";
-    }
-    return "unknown";
+    return arg.className.empty() ? zlTypeName(arg.type) : arg.className;
 }
 
 } // namespace

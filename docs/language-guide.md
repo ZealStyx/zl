@@ -113,6 +113,79 @@ log(c())  // 2
 `func`-typed slot — are not checked yet. Calling a `func`-typed value with the wrong
 number of arguments is caught at runtime, not at compile time.
 
+## Union types and narrowing
+
+A union is a set of alternatives, not the dynamic `unknown` type. Every
+alternative must fit a typed assignment, argument or return. Use `match` to
+refine it before an operation that only accepts one member:
+
+```zl
+static func describe(int|string value): string {
+    return match value {
+        int _ => "number " + (value + 1)
+        string text => String.upper(text)
+        null => "missing"
+    }
+}
+```
+
+A type arm refines both its binding and the original subject identifier while
+that identifier remains unchanged. The catch-all binding carries the remaining
+alternatives. Guards do not establish exhaustive coverage. ZL reference types,
+including `string`, remain nullable: cover `null` or use a wildcard as well.
+Enums and primitive numbers/bools are not nullable.
+
+The subject is evaluated once. If a guard reassigns it, subsequent patterns still
+inspect the original snapshot; use the pattern binding to read that snapshot.
+Reassignment invalidates read refinements, and does not change the variable's
+original declaration or constness. Mutable closure captures and loop back edges
+cannot keep a refinement that their writes may invalidate.
+
+Locals, loop counters, catch variables and pattern bindings have distinct lexical
+storage, even when they reuse a spelling. Closures capture the selected bindings
+by value. Typed reassignment is checked before storing a dynamic value, so a
+rejected write leaves the old slot intact (RHS side effects are not rolled back).
+The same expected-type handling supports reassigned lambdas and typed literals.
+
+The focused regression can be run with:
+
+```sh
+python3 tests/type_boundaries.py /path/to/zl
+```
+
+## Heap write contracts
+
+Native `list<T>`, `map<K,V>`, `set<T>` and `array[N]<T>` values carry contracts
+on their shared storage, not just on the variable that first names them. Typed
+initialization (including inferred locals), calls, returns, fields and successful
+type patterns establish those contracts. An erased alias cannot bypass them:
+
+```zl
+list<int> numbers = [1, 2]
+unknown alias = numbers
+Collection.push(alias, "wrong")   // runtime error; numbers is unchanged
+```
+
+Nested containers are checked and constrained as one transaction. If a type
+check fails, it does not leave partially constrained children behind. New children
+inserted later acquire the required contract too. Containers are invariant:
+`list<int>` cannot become `list<double>` through an erased alias, while an `int`
+can still be stored in a fresh `list<double>`. Bare/`unknown` views do not erase an
+existing contract. A native container's first successful typed view establishes
+its storage contract; use a fresh container when a different contract is needed.
+Fixed-array aliases cannot grow or shrink the array through list, queue, stack
+or set operations. These checks do not replace the explicit synchronization
+required for shared mutable program state.
+
+Instance/data/static field writes enforce their complete declarations, including
+inherited generic parameters. Class and data fields cannot redeclare an inherited
+name: the object layout has one storage slot per field name.
+
+Native return inference also preserves element types: `String.split` returns
+`list<string>`, `Collection.get/pop` return the source element type, and map
+keys/values and set copies preserve the relevant type argument. The rules live in
+the native signature catalog rather than in library-specific compiler branches.
+
 ## Generic collections
 
 `List<T>`, `Map<K,V>`, and `Set<T>` are real generic classes, not native tags.
@@ -339,6 +412,37 @@ Type.base(object)      // direct base class name, or nil for a root class
 
 Reflection metadata is intentionally small. Generic type arguments, method signatures,
 annotations, and writable reflection are reserved for future phases.
+
+## Runtime lifetimes and GC roots
+
+Active executions, queued/suspended async invocations and reachable closures keep
+their programs reachable. The collector follows program constants, current
+static values and cached initialization failures at trace time. A parked VM does
+not keep a stale copy of a static slot, and an unreachable static/closure cycle
+is collectible rather than permanently pinned.
+
+A thrown ZL exception retains its payload while C++ unwinds. A failure cached in
+a Task or static field instead stores a traced edge and an owned diagnostic;
+rethrowing it establishes a new in-flight root. Destructors do not read reclaimed
+exception objects. Failures of an async `main` propagate to the entry point.
+
+Collection separates tracing from destruction. Unreachable allocations leave the
+registry while mutators are stopped, but their native owners are destroyed after
+reactivation. Implicit `Thread` joins also wait at a stable VM instruction
+boundary, not inside a vector/map update or frame unwind. Explicit `Thread.join`
+remains synchronous. Values being returned or caught stay rooted while these
+waits run. Pending native channel tasks retain their operation owner until a
+terminal transition.
+
+C++ embedders participate explicitly: `GCRoots` contains value snapshots and
+borrowed program roots whose owners must outlive the root lease. `TracingGC::collect`
+returns a move-only `Collection`; reclaim it only after the stop-the-world phase
+has ended. The coordinator performs this ordering for VM collections.
+
+The focused `gc_lifetime_tests.cpp` target checks program/static/closure cycles,
+exception lifetimes, pending operation roots and blocking reclamation across
+consecutive collections. `StaticMembers.zl` exercises the corresponding language
+paths under allocation pressure.
 
 ## Memory-model direction
 

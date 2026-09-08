@@ -1,6 +1,7 @@
 #include "zl/vm/gc_safepoint.hpp"
 #include "zl/vm/gc.hpp"
 
+#include <algorithm>
 #include <condition_variable>
 #include <mutex>
 #include <unordered_map>
@@ -10,8 +11,8 @@ namespace {
 
 struct CoordinatorState {
     struct Participant {
-        bool atSafePoint{false};
-        std::vector<Value> roots;
+        bool parked{false};
+        GCRoots roots;
     };
 
     std::mutex mutex;
@@ -20,6 +21,11 @@ struct CoordinatorState {
     GCSafepointCoordinator::ParticipantId nextId{1};
     bool collectionRequested{false};
     bool collectionRunning{false};
+
+    bool allParked() const {
+        return std::all_of(participants.begin(), participants.end(),
+                           [](const auto& entry) { return entry.second.parked; });
+    }
 };
 
 CoordinatorState& state() {
@@ -37,7 +43,9 @@ GCSafepointCoordinator& GCSafepointCoordinator::instance() {
 GCSafepointCoordinator::ParticipantId GCSafepointCoordinator::registerParticipant() {
     auto& s = state();
     std::unique_lock<std::mutex> lock(s.mutex);
-    s.cv.wait(lock, [&] { return !s.collectionRunning && !s.collectionRequested; });
+    // A pending rendezvous must not stop an active participant from creating
+    // another VM. Only an actual trace/sweep excludes new mutators.
+    s.cv.wait(lock, [&] { return !s.collectionRunning; });
     const auto id = s.nextId++;
     s.participants.emplace(id, CoordinatorState::Participant{});
     return id;
@@ -46,67 +54,103 @@ GCSafepointCoordinator::ParticipantId GCSafepointCoordinator::registerParticipan
 void GCSafepointCoordinator::unregisterParticipant(ParticipantId id) {
     auto& s = state();
     std::unique_lock<std::mutex> lock(s.mutex);
-    auto it = s.participants.find(id);
-    if (it == s.participants.end()) return;
-    s.participants.erase(it);
-    if (s.collectionRequested) s.cv.notify_all();
+    s.cv.wait(lock, [&] { return !s.collectionRunning; });
+    GCRoots released;
+    const auto it = s.participants.find(id);
+    if (it != s.participants.end()) {
+        released = std::move(it->second.roots);
+        s.participants.erase(it);
+    }
+    // The last running participant may exit rather than poll. Waiting pollers
+    // must re-evaluate the rendezvous and elect a collector in that case too.
+    s.cv.notify_all();
+    lock.unlock();
 }
 
-void GCSafepointCoordinator::poll(ParticipantId id, std::vector<Value> roots) {
+void GCSafepointCoordinator::poll(ParticipantId id, GCRoots roots) {
+    auto& s = state();
+    std::unique_lock<std::mutex> lock(s.mutex);
+    if (!s.participants.count(id)) return;
+    if (!s.collectionRequested && TracingGC::instance().shouldCollect()) {
+        s.collectionRequested = true;
+    }
+    if (!s.collectionRequested) return;
+
+    auto& participant = s.participants.at(id);
+    participant.roots = std::move(roots);
+    participant.parked = true;
+    s.cv.notify_all();
+    while (s.collectionRequested) {
+        if (s.collectionRunning || !s.allParked()) {
+            s.cv.wait(lock);
+            continue;
+        }
+        std::exception_ptr failure;
+        TracingGC::Collection collection;
+        try {
+            GCRoots allRoots;
+            for (const auto& entry : s.participants) {
+                allRoots.append(entry.second.roots);
+            }
+            s.collectionRunning = true;
+            lock.unlock();
+            collection = TracingGC::instance().collect(allRoots);
+        } catch (...) {
+            failure = std::current_exception();
+        }
+        if (!lock.owns_lock()) lock.lock();
+        s.collectionRunning = false;
+        s.collectionRequested = false;
+        s.cv.notify_all();
+        if (failure) {
+            // collect allocates before detaching entries, so a failed trace
+            // has no retirement work. Reactivate atomically before another
+            // participant can start a new trace in the unlocked interval.
+            participant.parked = false;
+            auto released = std::move(participant.roots);
+            lock.unlock();
+            std::rethrow_exception(failure);
+        }
+        // Native owners may block during destruction. Peers are runnable and
+        // this collector stays parked with its roots until reclamation ends.
+        lock.unlock();
+        collection.reclaim();
+        lock.lock();
+    }
+    // A collector never clears another participant's snapshot or parked flag.
+    // Until that participant actually resumes, its roots must also survive a
+    // second collection started by a faster participant.
+    participant.parked = false;
+    auto released = std::move(participant.roots);
+    lock.unlock();
+}
+
+void GCSafepointCoordinator::beginBlockingNative(ParticipantId id, GCRoots roots) {
     auto& s = state();
     std::unique_lock<std::mutex> lock(s.mutex);
     auto it = s.participants.find(id);
     if (it == s.participants.end()) return;
-
-    // Do not initiate a GC for the first few allocations. Allocation pressure
-    // is sampled only at VM safe points, never in the middle of an instruction.
-    if (!s.collectionRequested && !s.collectionRunning && TracingGC::instance().shouldCollect()) {
-        s.collectionRequested = true;
-    }
-
-    if (!s.collectionRequested) return;
-
+    auto released = std::move(it->second.roots);
     it->second.roots = std::move(roots);
-    it->second.atSafePoint = true;
+    it->second.parked = true;
     s.cv.notify_all();
+    lock.unlock();
+}
 
-    auto allAtSafePoint = [&] {
-        for (const auto& [participantId, participant] : s.participants) {
-            (void)participantId;
-            if (!participant.atSafePoint) return false;
-        }
-        return true;
-    };
-
-    if (allAtSafePoint()) {
-        std::vector<Value> allRoots;
-        for (auto& [participantId, participant] : s.participants) {
-            (void)participantId;
-            allRoots.insert(allRoots.end(), participant.roots.begin(), participant.roots.end());
-        }
-        s.collectionRunning = true;
-        lock.unlock();
-
-        (void)TracingGC::instance().collect(allRoots);
-
-        lock.lock();
-        s.collectionRequested = false;
-        s.collectionRunning = false;
-        for (auto& [participantId, participant] : s.participants) {
-            (void)participantId;
-            participant.atSafePoint = false;
-            participant.roots.clear();
-        }
-        s.cv.notify_all();
-        return;
-    }
-
-    s.cv.wait(lock, [&] {
-        return !s.collectionRequested || s.collectionRunning;
-    });
-    // If another participant became collector leader, remain blocked until the
-    // collection has fully completed and state is released.
+void GCSafepointCoordinator::endBlockingNative(ParticipantId id) {
+    auto& s = state();
+    std::unique_lock<std::mutex> lock(s.mutex);
+    // The native operation may have completed during tracing. Its thread must
+    // not touch managed memory until the collector is finished. Do not wait
+    // for a merely requested collection: the native may have acquired a lock
+    // needed by a participant that has not yet parked.
     s.cv.wait(lock, [&] { return !s.collectionRunning; });
+    auto it = s.participants.find(id);
+    if (it == s.participants.end()) return;
+    it->second.parked = false;
+    auto released = std::move(it->second.roots);
+    s.cv.notify_all();
+    lock.unlock();
 }
 
 } // namespace zl

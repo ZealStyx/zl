@@ -79,7 +79,7 @@ CompilationPlan buildCompilationPlan(const Program& program) {
             info.id = nextRuntimeTypeId++;
             info.isDataType = true;
             info.baseClassName = data->extendsName;
-            for (const auto& field : data->fields) { RuntimeFieldInfo rf; rf.name = field.name; rf.typeName = field.type.name; rf.access = "public"; rf.isStatic = false; rf.ownership = field.ownership; info.fields.push_back(std::move(rf)); }
+            for (const auto& field : data->fields) { RuntimeFieldInfo rf; rf.name = field.name; rf.ownerClassName = data->name; rf.typeName = describeTypeAnnotation(field.type); rf.access = "public"; rf.isStatic = false; rf.ownership = field.ownership; info.fields.push_back(std::move(rf)); }
             for (const auto& member : data->members) {
                 const auto* fn = static_cast<const FunctionDecl*>(member.get());
                 RuntimeMethodInfo method;
@@ -89,7 +89,7 @@ CompilationPlan buildCompilationPlan(const Program& program) {
                 method.dispatchSignature = dispatchSignatureForFunction(*fn, {}).describe();
                 const auto prefix = method.name;
                 if (method.dispatchSignature.rfind(prefix, 0) == 0) method.dispatchSignature.erase(0, prefix.size());
-                method.returnType = fn->returnType.name.empty() ? "void" : fn->returnType.name;
+                method.returnType = (fn->returnType.name.empty() && fn->returnType.unionOf.empty()) ? "void" : describeTypeAnnotation(fn->returnType);
                 method.access = "public";
                 method.isStatic = false;
                 method.isAsync = fn->isAsync;
@@ -102,6 +102,10 @@ CompilationPlan buildCompilationPlan(const Program& program) {
         auto& info = localReflection[cls->name];
         if (info.id == 0) info.id = nextRuntimeTypeId++;
         info.baseClassName = cls->extendsName;
+        TypeAnnotation baseType;
+        baseType.name = cls->extendsName;
+        baseType.typeArgs = cls->extendsTypeArgs;
+        info.baseTypeName = describeTypeAnnotation(baseType);
         info.typeParameters = cls->typeParams;
         info.interfaces = cls->implementsNames;
         for (const auto& member : cls->members) {
@@ -109,7 +113,8 @@ CompilationPlan buildCompilationPlan(const Program& program) {
                 const auto* field = static_cast<const VarDecl*>(member.get());
                 RuntimeFieldInfo rf;
                 rf.name = field->name;
-                rf.typeName = field->hasExplicitType ? field->type.name : "unknown";
+                rf.ownerClassName = cls->name;
+                rf.typeName = field->hasExplicitType ? describeTypeAnnotation(field->type) : "unknown";
                 rf.access = field->access == AccessModifier::PRIVATE ? "private" :
                             field->access == AccessModifier::PROTECTED ? "protected" : "public";
                 rf.isStatic = field->isStatic;
@@ -135,7 +140,7 @@ CompilationPlan buildCompilationPlan(const Program& program) {
                     method.dispatchSignature = dispatchSignatureForFunction(*fn, plan.classTypeParams.at(cls->name)).describe();
                     const auto prefix = method.name;
                     if (method.dispatchSignature.rfind(prefix, 0) == 0) method.dispatchSignature.erase(0, prefix.size());
-                    method.returnType = fn->returnType.name.empty() ? "void" : fn->returnType.name;
+                    method.returnType = (fn->returnType.name.empty() && fn->returnType.unionOf.empty()) ? "void" : describeTypeAnnotation(fn->returnType);
                     method.access = fn->access == AccessModifier::PRIVATE ? "private" :
                                     fn->access == AccessModifier::PROTECTED ? "protected" : "public";
                     method.isStatic = fn->isStatic;
@@ -175,6 +180,7 @@ CompilationPlan buildCompilationPlan(const Program& program) {
 
         const auto& direct = localReflection[className];
         merged.baseClassName = direct.baseClassName;
+        merged.baseTypeName = direct.baseTypeName;
         merged.interfaces = collectInterfaceClosure(direct.interfaces);
         merged.typeParameters = direct.typeParameters;
         merged.isDataType = direct.isDataType;

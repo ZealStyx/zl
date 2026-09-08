@@ -1,4 +1,5 @@
 #include "zl/compiler/dispatch_table.hpp"
+#include "zl/common/type_annotation.hpp"
 
 #include <algorithm>
 #include <unordered_set>
@@ -7,6 +8,10 @@ namespace zl {
 
 namespace {
 DispatchType dispatchTypeFor(const Param& param, const std::vector<std::string>& genericTypeParams) {
+    if (!param.type.unionOf.empty()) {
+        if (containsTypeParameter(param.type, genericTypeParams)) return {DispatchTypeKind::GENERIC_OBJECT, {}};
+        return {DispatchTypeKind::OBJECT, describeTypeAnnotation(param.type)};
+    }
     const std::string& name = param.type.name;
     if (name == "int") return {DispatchTypeKind::INT, {}};
     if (name == "double" || name == "float") return {DispatchTypeKind::DOUBLE, {}};

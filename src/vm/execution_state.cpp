@@ -80,10 +80,7 @@ void ExecutionState::appendGCRoots(std::vector<Value>& roots) const {
     roots.reserve(roots.size() + stack_.size() + globals_.size());
     roots.insert(roots.end(), stack_.begin(), stack_.end());
     for (const auto& [name, value] : globals_) roots.push_back(value);
-    for (const auto& frame : callStack_) {
-        if (frame.activeClosure) roots.emplace_back(frame.activeClosure);
-        for (const auto& [name, value] : frame.locals) roots.push_back(value);
-    }
+    for (const auto& frame : callStack_) frame.appendGCRoots(roots);
 }
 
 void ExecutionState::enterFrame(CallFrame frame) {
@@ -140,6 +137,26 @@ ExecutionState::Handler ExecutionState::popHandler() {
 void ExecutionState::discardHandlersForFinishedFrames() {
     while (!handlers_.empty() && handlers_.back().callStackSize > callStack_.size()) {
         handlers_.pop_back();
+    }
+}
+
+void ExecutionState::discardHandlersDeeperThan(std::size_t callStackSize) {
+    // A handler belongs to a nested execution when it was installed while the
+    // frame stack was DEEPER than the caller's top frame (the caller's own
+    // handlers live at exactly its frame depth and must be preserved so the
+    // caller's execute() run can still catch through them).
+    while (!handlers_.empty() && handlers_.back().callStackSize > callStackSize) {
+        handlers_.pop_back();
+    }
+}
+
+void ExecutionState::restoreToDepth(std::size_t valueStackSize, std::size_t callStackSize) {
+    discardHandlersDeeperThan(callStackSize);
+    if (callStack_.size() > callStackSize) {
+        callStack_.resize(callStackSize);
+    }
+    if (stack_.size() > valueStackSize) {
+        stack_.resize(valueStackSize);
     }
 }
 

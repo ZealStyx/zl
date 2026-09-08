@@ -5,6 +5,7 @@ VM, OS access, parsing engines, and storage primitives remain small native primi
 See [native.md](native.md) for the boundary rule.
 
 - [`zl.lang` (auto-imported)](#zllang-auto-imported)
+- [Generic collections](#generic-collections)
 - [Math](#math)
 - [`zl.test`](#zltest)
 - [`zl.logging`](#zllogging)
@@ -26,6 +27,38 @@ Everything else requires an explicit `import` — see [packages.md](packages.md)
 Beyond `zl.lang`, the bundled packages include reference queue and stack utilities
 (`zl.util.Queue`, `zl.util.Stack`), text and time helpers, task/channel/thread facades,
 serialization, filesystem access, and a small portable DNS network facade.
+
+## Generic collections
+
+`List<T>`, `Map<K,V>`, and `Set<T>` are ZL classes over native storage primitives.
+Their methods are compiled once; each invocation carries the receiver's concrete
+type bindings. Typed literals and collections built by methods such as `transform`,
+`filter`, `reversed`, `keys`, and `values` retain those bindings, including nested
+instantiations and empty results.
+
+```zl
+List<int> numbers = [1, 2, 3]
+List<int> doubled = numbers.transform(func(x) => x * 2)
+Map<string,int> ages = {"ada": 36}
+List<string> names = ages.keys()
+```
+
+The returned collections can be passed to typed parameters normally; there is no
+need to keep them in untyped locals. Runtime argument, return, and explicit-local
+checks also apply when values arrive through callbacks or reflection. Closures
+retain their lexical type bindings after the creating method returns, including
+across async suspension. A scalar `int` may still widen to `double`; different
+mutable collection instantiations are not interchangeable.
+
+The lowercase native `list`/`map` storage values are distinct from these generic
+class instances. Their heap contracts also survive erased aliases and protect
+nested writes; fixed-array views prevent resizing through native aliases.
+`String.split` returns `list<string>`, and native element reads and key/value
+projections retain their type arguments. See `examples/intermediate/GenericRuntimeChecks.zl`
+and `tests/type_boundaries.py` for typed factories and rejected dynamic writes.
+
+The generic wrappers declare their backing storage as `list<T>`, `map<K,V>` and
+`set<T>`; backing primitives do not bypass the public element contract.
 
 ## Math
 
@@ -233,8 +266,13 @@ from worker threads. The reference operation is `Time.sleepAsync(milliseconds)`,
 can be awaited from an `async func` without blocking the VM scheduler.
 
 `Shared<T>` is an explicit generic wrapper. Construct it with `new Shared<T>(value)` and
-access it with `get()` / `setValue()`. CPU-worker and raw-thread closures may carry only
-`Shared`-wrapped object captures; ordinary captures are rejected.
+access it with `get()` / `setValue()`, or construct a cell with `share(value)`.
+CPU-worker and raw-thread captures must use `Shared` or the supported synchronization
+handles; ordinary mutable captures are rejected. Individual cell operations are
+synchronized, but read-modify-write sequences need `withLock` or an atomic operation.
 
-`Shared<T>` does **not** imply thread safety. The top-level `share()` helper and
-compile-time confinement checks remain pending.
+Explicit `Thread.join` blocks cooperatively. Dropping the last thread handle retains
+its implicit-join behavior, with the native wait deferred to a stable VM boundary so
+GC can continue. Cached task failures keep their managed exception as a traced edge;
+an in-flight rethrow roots the payload during unwinding. Async entry-point failures
+are reported rather than silently returning success.

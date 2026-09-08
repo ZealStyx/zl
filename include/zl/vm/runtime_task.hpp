@@ -10,6 +10,7 @@
 #include <string>
 
 #include "value.hpp"
+#include "runtime_exception.hpp"
 
 namespace zl {
 
@@ -25,8 +26,8 @@ enum class TaskStatus {
 
 class RuntimeTaskState {
 public:
-    explicit RuntimeTaskState(std::string valueTypeName = {})
-        : valueTypeName_(std::move(valueTypeName)) {}
+    explicit RuntimeTaskState(std::string valueTypeName = {}, std::vector<Value> operationRoots = {})
+        : valueTypeName_(std::move(valueTypeName)), operationRoots_(std::move(operationRoots)) {}
     ~RuntimeTaskState() noexcept;
     RuntimeTaskState(const RuntimeTaskState&) = delete;
     RuntimeTaskState& operator=(const RuntimeTaskState&) = delete;
@@ -61,10 +62,11 @@ private:
     std::condition_variable condition_;
     TaskStatus status_{TaskStatus::Pending};
     std::optional<Value> result_;
-    std::exception_ptr error_;
+    StoredException error_;
     bool cancellationRequested_{false};
     bool failureObserved_{false};
-    std::string valueTypeName_;
+    const std::string valueTypeName_;
+    std::vector<Value> operationRoots_;
     std::vector<std::function<void()>> continuations_;
     std::vector<std::function<void()>> cancellationContinuations_;
 };
