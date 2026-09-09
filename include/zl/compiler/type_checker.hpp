@@ -10,6 +10,7 @@
 
 #include "zl/parser/ast.hpp"
 #include "zl/compiler/semantic_types.hpp"
+#include "zl/compiler/inferred_type.hpp"
 
 namespace zl {
 
@@ -120,9 +121,44 @@ private:
 class TypeChecker {
     friend class OverloadResolver;
 public:
+    // The public, backend-consumable form of the checker's inference result.
+    // Kept as a nested alias so every existing `TypeChecker::InferredType`
+    // spelling keeps compiling while the definition itself lives in
+    // zl/compiler/inferred_type.hpp, where MIR lowering can reach it.
+    using InferredType = ::zl::InferredType;
+
     // Analyses the entire program. Throws TypeCheckError if any type rule is
     // violated; does nothing (returns normally) if the program is well-typed.
     void check(const Program& program, bool requireMain = true);
+
+    // --- backend seam (MIR lowering) ---------------------------------------
+    //
+    // Semantic analysis already resolves a static type for every expression it
+    // visits. Backend stages used to have no way to see that work, so each one
+    // either re-derived types from the untyped AST or gave up on typing
+    // altogether. The checker now records what it inferred, keyed by AST node
+    // identity, and these accessors expose that record.
+    //
+    // These are read-only views over state that is only meaningful once
+    // `check()` has run over the program that owns the queried nodes.
+
+    // The inferred type recorded for `node`, or nullptr when semantic analysis
+    // never inferred that node (unreachable code, or a node kind the checker
+    // does not type). Never returns a dangling pointer: the record lives as
+    // long as this TypeChecker does.
+    [[nodiscard]] const InferredType* expressionType(const AstNode* node) const;
+
+    // The full inference record: AST node -> resolved static type.
+    [[nodiscard]] const std::unordered_map<const AstNode*, InferredType>& expressionTypes() const {
+        return expressionTypes_;
+    }
+
+    // Declaration shapes (classes, interfaces, fields, methods, inheritance).
+    [[nodiscard]] const SemanticModel& semanticModel() const { return semanticModel_; }
+
+    // Members of a union type as rendered by the checker (e.g. "int|string"),
+    // empty when `unionName` is not a union this checker resolved.
+    [[nodiscard]] const std::vector<ResolvedTypeArg>& unionMembers(const std::string& unionName) const;
 
 private:
     // --- declarations ---
@@ -192,32 +228,13 @@ private:
     void checkExprStmt(const ExprStmt* node);
     void checkLogStmt(const LogStmt* node);
 
-    struct InferredType {
-        ZlType type{ZlType::UNKNOWN};
-        std::string className;
-        std::vector<ZlType> functionParamTypes;
-        std::vector<std::string> functionParamClassNames;
-        ZlType functionReturnType{ZlType::UNKNOWN};
-        std::string functionReturnClassName;
-        bool functionIsAsync{false};
-        ZlType taskValueType{ZlType::UNKNOWN};
-        std::string taskValueClassName;
-        std::vector<std::string> functionCaptureNames;
-        bool functionUsesThis{false};
-        bool functionHasSignature{false};
-        OwnershipKind ownership{OwnershipKind::GC};
-        std::string borrowSource;
-        bool functionIsNamedReference{false};
-        std::string functionReferenceOwner;
-        DispatchSignature functionReferenceDispatch;
-
-        InferredType() = default;
-        InferredType(ZlType value, std::string cls = {}) : type(value), className(std::move(cls)) {}
-        operator ZlType() const { return type; }
-    };
 
     // --- expressions: returns the inferred type and its object identity ---
+    // inferExpr records the result in expressionTypes_ for the backend seam;
+    // inferExprInner is the actual per-node dispatch and must not be called
+    // directly by anything that wants the result to be visible downstream.
     [[nodiscard]] InferredType inferExpr(const AstNode* node);
+    [[nodiscard]] InferredType inferExprInner(const AstNode* node);
     [[nodiscard]] InferredType inferExpected(const AstNode* node, ZlType type,
                                              const std::string& className, const TypeAnnotation& annotation);
     void analyzeLambdaCaptures(LambdaExpr* node);
@@ -429,6 +446,12 @@ private:
 
     SymbolTable symbols_;
     SemanticModel semanticModel_;
+
+    // Every static type inferred during `check()`, keyed by AST node identity.
+    // This is the single inference record shared with backend stages (see the
+    // backend seam above); it is append-only during a check and never consulted
+    // by the checker itself.
+    std::unordered_map<const AstNode*, InferredType> expressionTypes_;
 
     // Source-level named functions indexed before body checking so a
     // boundary call can recursively inspect a function declared later (or
