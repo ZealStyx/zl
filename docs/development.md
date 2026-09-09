@@ -60,12 +60,32 @@ program, and `zlpkg run` verifies that the adjacent runtime reports a matching v
 - Errors are reported in three categories: `syntax error`, `compile error`, and
   `runtime error`.
 - `stdlib/` is copied next to the built binary so a development build can find it.
+- `src/mir/` and `include/zl/mir/` hold MIR, the mid-level IR. It is a side
+  pipeline off the type checker, reached with `zl --emit-mir`; the bytecode
+  compiler and the VM do not depend on it. See [`mir.md`](mir.md) for its
+  invariants and design decisions.
+- `src/compiler/ir.cpp` is the older, untyped `zl::ir` that feeds the native
+  subset backends. It is separate from `zl::mir` and is not being grown further.
 
 ## Testing
 
-C++ unit tests cover the lexer, parser, compiler, VM, IR, regex engine, scheduler,
-native compiler, and FFI layers; they are declared as separate executables in
-`CMakeLists.txt`. If you extend the language, add tests for the affected layer.
+C++ unit tests cover the lexer, parser, compiler, VM, IR, MIR, regex engine,
+scheduler, native compiler, and FFI layers; they are declared as separate
+executables in `CMakeLists.txt`. If you extend the language, add tests for the
+affected layer.
+
+MIR has two targets, split by what they link:
+
+```bash
+cmake --build build --target zl-mir-tests            # verifier regressions
+cmake --build build --target zl-mir-lowering-tests   # end-to-end lowering
+./build/zl-mir-tests && ./build/zl-mir-lowering-tests
+```
+
+`zl-mir-tests` builds MIR by hand and checks the verifier rejects each class of
+malformed module; it links only the MIR sources. `zl-mir-lowering-tests` drives
+`ModuleLoader` → `TypeChecker` → `lowerProgram` → `verifyModule` on small
+programs, so it links the whole compiler minus `main()`.
 
 The ZL-level corpus is split in two:
 

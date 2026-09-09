@@ -1,0 +1,2169 @@
+#include "zl/mir/lowering.hpp"
+
+#include <algorithm>
+#include <sstream>
+#include <unordered_map>
+#include <unordered_set>
+
+#include "zl/common/type_annotation.hpp"
+#include "zl/common/type_name.hpp"
+#include "zl/compiler/dispatch_table.hpp"
+#include "zl/compiler/native_catalog.hpp"
+#include "zl/compiler/operator_rules.hpp"
+#include "zl/compiler/semantic_types.hpp"
+#include "zl/lexer/token.hpp"
+#include "zl/mir/builder.hpp"
+
+namespace zl::mir {
+namespace {
+
+// ---------------------------------------------------------------------------
+// Type conversion
+// ---------------------------------------------------------------------------
+//
+// MIR types are built from the *structured* type-name parse (`zl::TypeName`),
+// not by re-scanning rendered strings. The rendered form still matters, because
+// that is how the type checker records a collection or generic identity, but it
+// is parsed once by the language's own grammar so `List<int>` and `list<int>`
+// are distinguished exactly as the checker distinguishes them.
+
+struct TypeConverter {
+    const TypeArena& arena;
+    // Type parameters in scope for the function being lowered. A bare reference
+    // to one of these names is a TypeParam, not a class.
+    const std::vector<std::string>& typeParams;
+
+    [[nodiscard]] TypeId fromName(const zl::TypeName& name) const {
+        if (!name.unionMembers.empty()) {
+            std::vector<TypeId> members;
+            members.reserve(name.unionMembers.size());
+            for (const auto& member : name.unionMembers) members.push_back(fromName(member));
+            return arena.unionType(std::move(members));
+        }
+        const std::string& base = name.name;
+        std::vector<TypeId> arguments;
+        arguments.reserve(name.args.size());
+        for (const auto& argument : name.args) arguments.push_back(fromName(argument));
+
+        if (base == "int") return arena.intType();
+        if (base == "double" || base == "float" || base == "decimal") return arena.doubleType();
+        if (base == "bool") return arena.boolType();
+        if (base == "string") return arena.stringType();
+        if (base == "void") return arena.voidType();
+        if (base == "nil" || base == "null") return arena.nilType();
+        if (base == "unknown") return arena.unknownType();
+        if (base == "list") return arena.listType(arguments.empty() ? arena.unknownType() : arguments.front());
+        if (base == "set") return arena.setType(arguments.empty() ? arena.unknownType() : arguments.front());
+        if (base == "map") {
+            return arena.mapType(arguments.size() > 0 ? arguments[0] : arena.unknownType(),
+                                 arguments.size() > 1 ? arguments[1] : arena.unknownType());
+        }
+        if (base == "array") {
+            return arena.arrayType(arguments.empty() ? arena.unknownType() : arguments.front(),
+                                   name.fixedSize);
+        }
+        if (base == "Task") return arena.taskType(arguments.empty() ? arena.voidType() : arguments.front());
+        if (base == "Shared") return arena.sharedType(arguments.empty() ? arena.unknownType() : arguments.front());
+        if (base == "func") {
+            FunctionSignature signature;
+            // A bare `func` has no signature. Recording it as `func():void`
+            // would invent an arity the source never stated and let a backend
+            // reject a call the type checker accepted.
+            if (arguments.empty()) {
+                signature.hasSignature = false;
+                signature.returnType = arena.unknownType();
+                return arena.functionType(std::move(signature));
+            }
+            // `func(A,B):R` parses with the return type as the last argument.
+            for (std::size_t i = 0; i + 1 < arguments.size(); ++i) {
+                signature.parameterTypes.push_back(arguments[i]);
+            }
+            signature.returnType = arguments.back();
+            return arena.functionType(std::move(signature));
+        }
+        if (std::find(typeParams.begin(), typeParams.end(), base) != typeParams.end()) {
+            return arena.typeParam(base);
+        }
+        return arena.objectType(base, std::move(arguments));
+    }
+
+    [[nodiscard]] TypeId fromRendered(const std::string& rendered) const {
+        if (rendered.empty()) return arena.unknownType();
+        return fromName(zl::parseTypeName(rendered));
+    }
+
+    [[nodiscard]] TypeId fromAnnotation(const zl::TypeAnnotation& annotation) const {
+        if (annotation.name.empty() && annotation.unionOf.empty()) return arena.voidType();
+        return fromRendered(zl::describeTypeAnnotation(annotation));
+    }
+
+    // Converts a checker inference result. `className` carries the identity that
+    // the coarse ZlType tag erases, so it is authoritative whenever present.
+    [[nodiscard]] TypeId fromInferred(const zl::InferredType* inferred) const {
+        if (!inferred) return arena.unknownType();
+        switch (inferred->type) {
+            case zl::ZlType::INT: return arena.intType();
+            case zl::ZlType::DOUBLE: return arena.doubleType();
+            case zl::ZlType::BOOL: return arena.boolType();
+            case zl::ZlType::STRING: return arena.stringType();
+            case zl::ZlType::NIL: return arena.nilType();
+            case zl::ZlType::VOID_TYPE: return arena.voidType();
+            case zl::ZlType::UNKNOWN: return arena.unknownType();
+            case zl::ZlType::FUNCTION:
+                // Prefer the preserved callable shape over the rendered name so
+                // an unparameterised `func` does not lose its signature.
+                if (inferred->functionHasSignature) {
+                    FunctionSignature signature;
+                    signature.hasSignature = true;
+                    for (std::size_t i = 0; i < inferred->functionParamTypes.size(); ++i) {
+                        const std::string rendered = i < inferred->functionParamClassNames.size()
+                                                         ? inferred->functionParamClassNames[i]
+                                                         : std::string{};
+                        signature.parameterTypes.push_back(
+                            rendered.empty() ? primitiveFor(inferred->functionParamTypes[i])
+                                             : fromRendered(rendered));
+                    }
+                    const std::string returnRendered = inferred->functionReturnClassName;
+                    signature.returnType = returnRendered.empty()
+                                               ? primitiveFor(inferred->functionReturnType)
+                                               : fromRendered(returnRendered);
+                    signature.isAsync = inferred->functionIsAsync;
+                    return arena.functionType(std::move(signature));
+                }
+                if (inferred->className.empty()) {
+                    FunctionSignature signature;
+                    signature.hasSignature = false;
+                    signature.returnType = arena.unknownType();
+                    return arena.functionType(std::move(signature));
+                }
+                return fromRendered(inferred->className);
+            default:
+                // LIST/MAP/SET/ARRAY/OBJECT/TASK/UNION all keep their identity in
+                // className as a rendered type name.
+                if (!inferred->className.empty()) return fromRendered(inferred->className);
+                return primitiveFor(inferred->type);
+        }
+    }
+
+    [[nodiscard]] TypeId primitiveFor(zl::ZlType type) const {
+        switch (type) {
+            case zl::ZlType::INT: return arena.intType();
+            case zl::ZlType::DOUBLE: return arena.doubleType();
+            case zl::ZlType::BOOL: return arena.boolType();
+            case zl::ZlType::STRING: return arena.stringType();
+            case zl::ZlType::NIL: return arena.nilType();
+            case zl::ZlType::VOID_TYPE: return arena.voidType();
+            case zl::ZlType::TASK: return arena.taskType(arena.voidType());
+            default: return arena.unknownType();
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Lowering context
+// ---------------------------------------------------------------------------
+
+const std::vector<std::string> kNoTypeParams{};
+
+struct LoweringContext {
+    const zl::Program& program;
+    const zl::TypeChecker& checker;
+    const LoweringOptions& options;
+    ModuleBuilder builder;
+    LoweringResult result;
+
+    // Qualified function name -> MIR id.
+    std::unordered_map<std::string, FunctionId> functionIds;
+    // Lambda body -> the MIR function that holds it.
+    std::unordered_map<const zl::LambdaExpr*, FunctionId> lambdaIds;
+    // The same lambdas in discovery order. `lambdaIds` is a hash map, so its
+    // iteration order is arbitrary - and the passes that walk it need a real
+    // order: an enclosing lambda must be handled before the lambdas nested
+    // inside it, because the outer body is what fills in an inner closure's
+    // capture types.
+    std::vector<const zl::LambdaExpr*> lambdaOrder;
+    // The generic parameters in scope where each lambda was written. A lambda
+    // inside `class Box<T>` closes over values of type `T`, so its MIR function
+    // is generic over `T` too - without this the closure's captured parameters
+    // would carry an unsubstituted type parameter in a function that is not a
+    // template, which the verifier rightly rejects.
+    std::unordered_map<const zl::LambdaExpr*, std::vector<std::string>> lambdaTypeParams;
+    std::unordered_map<std::string, std::vector<std::string>> classTypeParams;
+    std::unordered_map<std::string, std::string> classParents;
+    std::size_t lambdaCounter{0};
+    const zl::FunctionDecl* mainFunction{nullptr};
+
+    LoweringContext(const zl::Program& p, const zl::TypeChecker& c, const LoweringOptions& o)
+        : program(p), checker(c), options(o), builder("zl") {}
+
+    [[nodiscard]] std::vector<std::string> typeParamsFor(const std::string& className) const {
+        const auto it = classTypeParams.find(className);
+        return it == classTypeParams.end() ? std::vector<std::string>{} : it->second;
+    }
+
+    void note(const std::string& message) { result.diagnostics.push_back(message); }
+
+    [[nodiscard]] std::string qualifiedName(const zl::FunctionDecl& function) const {
+        const auto signature = zl::dispatchSignatureForFunction(function, typeParamsFor(function.ownerClassName));
+        return function.ownerClassName.empty() ? signature.describe()
+                                               : function.ownerClassName + "." + signature.describe();
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Per-function lowering
+// ---------------------------------------------------------------------------
+
+struct LoopContext {
+    BlockId continueTarget{kNoBlock};
+    BlockId breakTarget{kNoBlock};
+};
+
+// A name in scope resolves either to a mutable slot or directly to a parameter.
+//
+// A parameter that the body never reassigns stays an SSA value: promoting every
+// parameter to a slot would add a store and a load around values that are
+// already immutable, and - worse - would need the slot to be writable, which
+// contradicts `this` and every `let`-like binding.
+// How a name in the current scope resolves. Exactly one of the three kinds is
+// set: a mutable local is a slot; a read-only binding is an SSA value, held
+// either as the parameter it already is or as the operand its initialiser
+// produced (a temp, a constant, or another parameter).
+struct LocalRef {
+    SlotId slot{0};
+    ParamId param{0};
+    bool isParameter{false};
+    Operand value;
+    bool isValue{false};
+
+    [[nodiscard]] bool valid() const { return slot != 0 || isParameter || isValue; }
+
+    [[nodiscard]] static LocalRef slotRef(SlotId id) {
+        LocalRef ref{};
+        ref.slot = id;
+        return ref;
+    }
+    [[nodiscard]] static LocalRef parameterRef(ParamId id) {
+        LocalRef ref{};
+        ref.param = id;
+        ref.isParameter = true;
+        return ref;
+    }
+    [[nodiscard]] static LocalRef valueRef(Operand operand) {
+        LocalRef ref{};
+        ref.value = operand;
+        ref.isValue = true;
+        return ref;
+    }
+};
+
+struct FunctionLowerer {
+    LoweringContext& ctx;
+    FunctionBuilder fb;
+    std::vector<std::string> typeParams;
+    TypeConverter types;
+    std::string ownerClass;
+    bool isStaticContext{false};
+    LocalRef thisRef;
+    std::uint32_t thisType{0};
+    std::vector<std::unordered_map<std::string, LocalRef>> scopes;
+    std::vector<LoopContext> loops;
+    // Dynamic handler chain for blocks created from here on.
+    std::vector<ExceptionHandler> activeHandlers;
+    // Names this body assigns to or moves out of (storage keys). A binding that
+    // is in here needs real storage; one that is not can stay an SSA value.
+    std::unordered_set<std::string> writtenLocals;
+    bool failed{false};
+
+    FunctionLowerer(LoweringContext& context, FunctionId id, std::vector<std::string> params)
+        : ctx(context), fb(context.builder.functionBuilder(id)), typeParams(std::move(params)),
+          types{context.builder.types(), typeParams} {
+        scopes.emplace_back();
+    }
+
+    // --- diagnostics ------------------------------------------------------
+    void unsupported(const zl::AstNode* node, const std::string& what) {
+        if (failed) return;
+        failed = true;
+        std::ostringstream out;
+        out << "MIR lowering: unsupported " << what;
+        if (node) out << " at line " << node->line;
+        fb.markIncomplete(out.str());
+        ctx.note(out.str() + " in " + fb.function().name);
+    }
+
+    [[nodiscard]] SourceLocation location(const zl::AstNode* node) const {
+        SourceLocation loc;
+        if (node) loc.line = static_cast<std::uint32_t>(node->line);
+        return loc;
+    }
+
+    // --- blocks -----------------------------------------------------------
+    [[nodiscard]] BlockId newBlock(zl::AstNode* node = nullptr, BlockKind kind = BlockKind::Normal) {
+        const BlockId id = fb.addBlock(kind, location(node));
+        // A new block inherits the handler chain that is dynamically active
+        // where it was created, which is exactly how nested try/catch nests.
+        fb.block(id).exceptionHandlers = activeHandlers;
+        return id;
+    }
+
+    void gotoBlock(BlockId id) { fb.setCurrentBlock(id); }
+
+    // True when the current block already ends, so further statements in it are
+    // dead and must not be emitted.
+    [[nodiscard]] bool isDead() {
+        return fb.block(fb.currentBlock()).terminator.kind != TerminatorKind::None;
+    }
+
+    // --- scopes and locals ------------------------------------------------
+    void pushScope() { scopes.emplace_back(); }
+    void popScope() { scopes.pop_back(); }
+
+    [[nodiscard]] LocalRef lookupLocal(const std::string& name) const {
+        for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+            const auto found = it->find(name);
+            if (found != it->end()) return found->second;
+        }
+        return LocalRef{};
+    }
+
+    [[nodiscard]] SlotId lookupSlot(const std::string& name) const {
+        const LocalRef local = lookupLocal(name);
+        // Only a slot is addressable storage; parameters and SSA lets are not.
+        return local.slot;
+    }
+
+    void bindLocal(const std::string& name, LocalRef local) { scopes.back()[name] = local; }
+
+    // A binding is reachable under both its source name and the unique storage
+    // name semantic analysis gave it. The two are not always the same string -
+    // a parameter's `storageName` can be empty while an assignment to it carries
+    // one - and looking a binding up under the wrong one reads as "unbound".
+    void bindLocalBoth(const std::string& name, const std::string& storageName, LocalRef local) {
+        if (!name.empty()) bindLocal(name, local);
+        if (!storageName.empty() && storageName != name) bindLocal(storageName, local);
+    }
+
+    [[nodiscard]] static const std::string& storageKey(const std::string& storageName, const std::string& name) {
+        return storageName.empty() ? name : storageName;
+    }
+
+    SlotId defineSlot(const std::string& storageName, const std::string& name, TypeId type, bool isMutable,
+                      zl::OwnershipKind ownership, const zl::AstNode* node) {
+        const SlotId slot = fb.addSlot(storageKey(storageName, name), type, isMutable, ownership, {},
+                                       location(node));
+        bindLocalBoth(name, storageName, LocalRef::slotRef(slot));
+        return slot;
+    }
+
+    // --- types ------------------------------------------------------------
+    [[nodiscard]] TypeId typeOfNode(const zl::AstNode* node) const {
+        return types.fromInferred(ctx.checker.expressionType(node));
+    }
+
+    // --- operands ---------------------------------------------------------
+    [[nodiscard]] Operand constOperand(const zl::Literal& literal) {
+        const TypeId type = typeOfNode(&literal);
+        const SourceLocation loc = location(&literal);
+        switch (literal.literalType) {
+            case zl::TokenType::INT_LITERAL: {
+                std::int64_t value = 0;
+                try { value = std::stoll(literal.raw); } catch (...) { value = 0; }
+                return Operand::constant(ctx.builder.constantInt(value), ctx.builder.types().intType());
+            }
+            case zl::TokenType::DECIMAL_LITERAL:
+            case zl::TokenType::FLOAT_LITERAL: {
+                double value = 0.0;
+                try { value = std::stod(literal.raw); } catch (...) { value = 0.0; }
+                return Operand::constant(ctx.builder.constantDouble(value), ctx.builder.types().doubleType());
+            }
+            case zl::TokenType::BOOL_LITERAL:
+                return Operand::constant(ctx.builder.constantBool(literal.raw == "true"),
+                                         ctx.builder.types().boolType());
+            case zl::TokenType::STRING_LITERAL: {
+                std::string text = literal.raw;
+                if (text.size() >= 2 && (text.front() == '"' || text.front() == '\'')) text = text.substr(1, text.size() - 2);
+                return Operand::constant(ctx.builder.constantString(std::move(text)),
+                                         ctx.builder.types().stringType());
+            }
+            case zl::TokenType::KW_NULL: {
+                // A bare null literal has type nil; assigned to a reference it
+                // keeps the nil constant and takes the target's type.
+                return Operand::constant(ctx.builder.constantNil(), type ? type : ctx.builder.types().nilType());
+            }
+            default:
+                unsupported(&literal, "literal '" + literal.raw + "'");
+                return Operand::none();
+        }
+        (void)loc;
+    }
+
+    // --- expressions ------------------------------------------------------
+    [[nodiscard]] Operand expression(const zl::AstNode* node) {
+        if (!node) {
+            unsupported(nullptr, "null expression");
+            return Operand::none();
+        }
+        if (failed) return Operand::none();
+        switch (node->kind) {
+            case zl::NodeKind::Literal:
+                return constOperand(static_cast<const zl::Literal&>(*node));
+            case zl::NodeKind::Identifier:
+                return identifier(static_cast<const zl::Identifier&>(*node));
+            case zl::NodeKind::ThisExpr:
+                return thisOperand(static_cast<const zl::ThisExpr&>(*node));
+            case zl::NodeKind::UnaryExpr:
+                return unary(static_cast<const zl::UnaryExpr&>(*node));
+            case zl::NodeKind::BinaryExpr:
+                return binary(static_cast<const zl::BinaryExpr&>(*node));
+            case zl::NodeKind::AssignExpr:
+                return assign(static_cast<const zl::AssignExpr&>(*node));
+            case zl::NodeKind::MoveExpr:
+                return move(static_cast<const zl::MoveExpr&>(*node));
+            case zl::NodeKind::CallExpr:
+                return call(static_cast<const zl::CallExpr&>(*node));
+            case zl::NodeKind::MethodCallExpr:
+                return methodCall(static_cast<const zl::MethodCallExpr&>(*node));
+            case zl::NodeKind::SuperMethodCallExpr:
+                return superMethodCall(static_cast<const zl::SuperMethodCallExpr&>(*node));
+            case zl::NodeKind::SuperCallExpr:
+                return superCall(static_cast<const zl::SuperCallExpr&>(*node), node);
+            case zl::NodeKind::NewExpr:
+                return newExpression(static_cast<const zl::NewExpr&>(*node));
+            case zl::NodeKind::FieldAccessExpr:
+                return fieldAccess(static_cast<const zl::FieldAccessExpr&>(*node));
+            case zl::NodeKind::IndexAccessExpr:
+                return indexAccess(static_cast<const zl::IndexAccessExpr&>(*node));
+            case zl::NodeKind::FieldAssignExpr:
+                return fieldAssign(static_cast<const zl::FieldAssignExpr&>(*node));
+            case zl::NodeKind::CollectionLiteral:
+                return collectionLiteral(static_cast<const zl::CollectionLiteral&>(*node));
+            case zl::NodeKind::AwaitExpr:
+                return await(static_cast<const zl::AwaitExpr&>(*node));
+            case zl::NodeKind::DataLiteralExpr:
+                return dataLiteral(static_cast<const zl::DataLiteralExpr&>(*node));
+            case zl::NodeKind::MatchExpr:
+                return matchExpr(static_cast<const zl::MatchExpr&>(*node));
+            case zl::NodeKind::LambdaExpr:
+                return lambda(static_cast<const zl::LambdaExpr&>(*node));
+            case zl::NodeKind::LogExpr: {
+                const auto& log = static_cast<const zl::LogExpr&>(*node);
+                Operand value = expression(log.argument.get());
+                if (value.isNone()) return Operand::none();
+                fb.emitLog(value, location(node));
+                return Operand::constant(ctx.builder.constantNil(), ctx.builder.types().voidType());
+            }
+            default:
+                unsupported(node, "expression");
+                return Operand::none();
+        }
+    }
+
+    [[nodiscard]] Operand identifier(const zl::Identifier& node) {
+        const LocalRef local = lookupLocal(storageKey(node.storageName, node.name));
+        if (!local.valid()) {
+            unsupported(&node, "reference to unbound local '" + node.name + "'");
+            return Operand::none();
+        }
+        if (local.isParameter) return fb.parameterOperand(local.param);
+        if (local.isValue) return local.value;
+        return Operand::temp(fb.emitLoad(local.slot, location(&node)), fb.function().slot(local.slot)->type);
+    }
+
+    [[nodiscard]] Operand thisOperand(const zl::ThisExpr& node) {
+        if (isStaticContext || !thisRef.valid()) {
+            unsupported(&node, "'this' outside an instance method");
+            return Operand::none();
+        }
+        if (thisRef.isParameter) return fb.parameterOperand(thisRef.param);
+        return Operand::temp(fb.emitLoad(thisRef.slot, location(&node)), thisType);
+    }
+
+    [[nodiscard]] Operand unary(const zl::UnaryExpr& node) {
+        Operand operand = expression(node.operand.get());
+        if (operand.isNone()) return Operand::none();
+        const SourceLocation loc = location(&node);
+        const TypeArena& arena = ctx.builder.types();
+
+        // An overloaded operator is a method call in ZL, not a builtin.
+        if (node.isOperatorOverload) {
+            const TypeId resultType = typeOfNode(&node);
+            const Type* overloadReceiver = ctx.builder.types().find(operand.type);
+            const std::string overloadClass = operandTypeName(operand);
+            if (overloadClass.empty()) {
+                unsupported(&node, "overloaded operator on a receiver whose class could not be resolved");
+                return Operand::none();
+            }
+            return Operand::temp(fb.emitInvokeMethod(operand, overloadClass,
+                                                     node.resolvedOperatorDispatch.name, {}, resultType, loc,
+                                                     overloadReceiver ? overloadReceiver->arguments
+                                                                      : std::vector<TypeId>{}),
+                                 resultType);
+        }
+        switch (node.op) {
+            case zl::TokenType::MINUS: {
+                const auto result = zl::OperatorRules::unaryResult(zl::TokenType::MINUS, zlTypeOf(operand.type));
+                if (!result) { unsupported(&node, "unary '-'"); return Operand::none(); }
+                const TypeId type = typeIdFor(*result);
+                return Operand::temp(fb.emitUnary(Opcode::Neg, operand, type, loc), type);
+            }
+            case zl::TokenType::PLUS:
+                // Unary plus is the identity; no MIR instruction is needed.
+                return operand;
+            case zl::TokenType::NOT: {
+                const TypeId type = arena.boolType();
+                return Operand::temp(fb.emitUnary(Opcode::Not, operand, type, loc), type);
+            }
+            case zl::TokenType::BIT_NOT: {
+                const TypeId type = arena.intType();
+                return Operand::temp(fb.emitUnary(Opcode::BitNot, operand, type, loc), type);
+            }
+            default:
+                unsupported(&node, "unary operator");
+                return Operand::none();
+        }
+    }
+
+    [[nodiscard]] Operand binary(const zl::BinaryExpr& node) {
+        // `&&` and `||` short-circuit in ZL, so they are control flow here
+        // rather than a boolean instruction: the right-hand side must not be
+        // evaluated at all when the left decides the result.
+        if (node.op == zl::TokenType::AND || node.op == zl::TokenType::OR) {
+            return logical(node);
+        }
+
+        Operand left = expression(node.left.get());
+        if (left.isNone()) return Operand::none();
+        Operand right = expression(node.right.get());
+        if (right.isNone()) return Operand::none();
+        const SourceLocation loc = location(&node);
+
+        if (node.isOperatorOverload) {
+            const TypeId resultType = typeOfNode(&node);
+            const Operand receiver = left;
+            const Type* overloadReceiver = ctx.builder.types().find(receiver.type);
+            const std::string overloadClass = operandTypeName(receiver);
+            if (overloadClass.empty()) {
+                unsupported(&node, "overloaded operator on a receiver whose class could not be resolved");
+                return Operand::none();
+            }
+            return Operand::temp(fb.emitInvokeMethod(receiver, overloadClass,
+                                                     node.resolvedOperatorDispatch.name, {right}, resultType, loc,
+                                                     overloadReceiver ? overloadReceiver->arguments
+                                                                      : std::vector<TypeId>{}),
+                                 resultType);
+        }
+
+        const Opcode opcode = binaryOpcode(node.op);
+        if (opcode == Opcode::Nop) {
+            unsupported(&node, "binary operator");
+            return Operand::none();
+        }
+        const auto result = zl::OperatorRules::binaryResult(tokenFor(opcode), zlTypeOf(left.type),
+                                                            zlTypeOf(right.type));
+        if (!result) {
+            unsupported(&node, "binary operator on " + ctx.builder.types().render(left.type) + " and " +
+                                   ctx.builder.types().render(right.type));
+            return Operand::none();
+        }
+        const TypeId type = typeIdFor(*result);
+        // `1 + 2.5` is legal ZL, and OperatorRules types it as double. Left as
+        // written, though, the MIR would carry an `add` of an int and a double,
+        // so every backend would have to re-derive the promotion rule. Widen the
+        // int operand instead: arithmetic in MIR is homogeneous, and the
+        // conversion the language performs implicitly is visible in the graph.
+        left = coerce(left, type, loc);
+        right = coerce(right, type, loc);
+        if (left.isNone() || right.isNone()) return Operand::none();
+        return Operand::temp(fb.emitBinary(opcode, left, right, type, loc), type);
+    }
+
+    [[nodiscard]] Operand logical(const zl::BinaryExpr& node) {
+        const SourceLocation loc = location(&node);
+        const TypeArena& arena = ctx.builder.types();
+        Operand left = asCondition(expression(node.left.get()), node.left.get());
+        if (left.isNone()) return Operand::none();
+
+        // The result lives in a slot so both arms can write it and the join can
+        // read one stable value. This is the same shape the existing IR uses.
+        const SlotId resultSlot = fb.addSlot("__logical", arena.boolType(), true, zl::OwnershipKind::GC, {}, loc);
+        const bool isAnd = node.op == zl::TokenType::AND;
+        const Operand shortCircuitValue = Operand::constant(ctx.builder.constantBool(!isAnd), arena.boolType());
+        fb.emitStore(resultSlot, shortCircuitValue, loc);
+
+        const BlockId rhsBlock = newBlock(const_cast<zl::BinaryExpr*>(&node));
+        const BlockId shortCircuitBlock = newBlock(const_cast<zl::BinaryExpr*>(&node));
+        const BlockId joinBlock = newBlock(const_cast<zl::BinaryExpr*>(&node));
+
+        fb.emitBranch(left, isAnd ? rhsBlock : shortCircuitBlock, isAnd ? shortCircuitBlock : rhsBlock, loc);
+
+        gotoBlock(shortCircuitBlock);
+        fb.emitJump(joinBlock, loc);
+
+        gotoBlock(rhsBlock);
+        Operand right = asCondition(expression(node.right.get()), node.right.get());
+        if (right.isNone()) return Operand::none();
+        fb.emitStore(resultSlot, right, loc);
+        fb.emitJump(joinBlock, loc);
+
+        gotoBlock(joinBlock);
+        return Operand::temp(fb.emitLoad(resultSlot, loc), arena.boolType());
+    }
+
+    [[nodiscard]] Operand assign(const zl::AssignExpr& node) {
+        const SlotId slot = lookupSlot(storageKey(node.storageName, node.name));
+        if (slot == 0) {
+            unsupported(&node, "assignment to unbound local '" + node.name + "'");
+            return Operand::none();
+        }
+        Operand value = expression(node.value.get());
+        if (value.isNone()) return Operand::none();
+        const SourceLocation loc = location(&node);
+        value = coerce(value, fb.function().slot(slot)->type, loc);
+        if (value.isNone()) return Operand::none();
+        fb.emitStore(slot, value, loc);
+        return value;
+    }
+
+    [[nodiscard]] Operand move(const zl::MoveExpr& node) {
+        const SlotId slot = lookupSlot(storageKey(node.storageName, node.name));
+        if (slot == 0) {
+            unsupported(&node, "move of unbound local '" + node.name + "'");
+            return Operand::none();
+        }
+        const TypeId type = fb.function().slot(slot)->type;
+        return Operand::temp(fb.emitMove(slot, location(&node)), type);
+    }
+
+    [[nodiscard]] Operand call(const zl::CallExpr& node) {
+        const SourceLocation loc = location(&node);
+
+        // A call through a variable holding a closure is an indirect call.
+        if (node.isValueCall) {
+            const LocalRef local = lookupLocal(storageKey(node.calleeStorageName, node.calleeName));
+            if (!local.valid()) {
+                unsupported(&node, "indirect call through unbound local '" + node.calleeName + "'");
+                return Operand::none();
+            }
+            Operand callee = local.isParameter
+                                 ? fb.parameterOperand(local.param)
+                                 : Operand::temp(fb.emitLoad(local.slot, loc),
+                                                 fb.function().slot(local.slot)->type);
+            std::vector<Operand> arguments;
+            for (const auto& argument : node.arguments) {
+                Operand value = expression(argument.get());
+                if (value.isNone()) return Operand::none();
+                arguments.push_back(value);
+            }
+            const TypeId resultType = typeOfNode(&node);
+            const bool returnsVoid = isVoid(resultType);
+            const TempId temp = fb.emitCallIndirect(callee, std::move(arguments),
+                                                    returnsVoid ? 0 : resultType, loc);
+            return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
+        }
+
+        std::vector<Operand> arguments;
+        for (const auto& argument : node.arguments) {
+            Operand value = expression(argument.get());
+            if (value.isNone()) return Operand::none();
+            arguments.push_back(value);
+        }
+        const TypeId resultType = typeOfNode(&node);
+        const bool returnsVoid = isVoid(resultType);
+
+        if (!node.namespaceName.empty()) {
+            // A qualified call is either a native catalog entry or a static
+            // method on another class.
+            const std::string qualifiedName = node.namespaceName + "." + node.calleeName;
+            if (const auto native = zl::findNativeSignature(qualifiedName)) {
+                const TempId temp = fb.emitCallNative(qualifiedName, static_cast<std::int32_t>((*native)->id),
+                                                      std::move(arguments), returnsVoid ? 0 : resultType,
+                                                      (*native)->taskValueType != zl::ZlType::UNKNOWN, loc);
+                return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
+            }
+            const std::string target = node.namespaceName + "." + node.resolvedDispatch.describe();
+            const FunctionId callee = lookupFunction(target);
+            if (callee == kNoFunction) {
+                unsupported(&node, "call to '" + target + "' which was not lowered");
+                return Operand::none();
+            }
+            const TempId temp = fb.emitInvokeStatic(callee, std::move(arguments), returnsVoid ? 0 : resultType, loc);
+            return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
+        }
+
+        // A bare call can still be a global native. `share(x)` is spelled with
+        // no namespace and the catalog keys it by its bare name, so consulting
+        // only qualified names misses it - the call then reads as an implicit
+        // self-call to a method that does not exist, and the note names an empty
+        // dispatch. Checking the catalog by the bare name is what the bytecode
+        // compiler does too; it special-cases `share` by hand, and this is the
+        // same test without the hardcoding.
+        if (node.namespaceName.empty()) {
+            if (const auto native = zl::findNativeSignature(node.calleeName)) {
+                const TempId temp = fb.emitCallNative(node.calleeName, static_cast<std::int32_t>((*native)->id),
+                                                     std::move(arguments), returnsVoid ? 0 : resultType,
+                                                     (*native)->taskValueType != zl::ZlType::UNKNOWN, loc);
+                return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
+            }
+        }
+
+        // A bare call is an implicit self-call.
+        const std::string owner = ownerClass.empty() ? node.namespaceName : ownerClass;
+        const std::string target = owner + "." + node.resolvedDispatch.describe();
+        const FunctionId callee = lookupFunction(target);
+        if (callee == kNoFunction) {
+            unsupported(&node, "call to '" + target + "' which was not lowered");
+            return Operand::none();
+        }
+        std::vector<Operand> callArguments;
+        const Function* calleeFunction = ctx.builder.module().function(callee);
+        if (calleeFunction && calleeFunction->hasThisParameter) {
+            Operand self = thisOperand(zl::ThisExpr{} , loc);
+            if (self.isNone()) return Operand::none();
+            callArguments.push_back(self);
+        }
+        for (auto& argument : arguments) callArguments.push_back(std::move(argument));
+        const TempId temp = fb.emitCall(callee, std::move(callArguments), returnsVoid ? 0 : resultType, loc,
+                                        callArguments.empty() ? std::vector<TypeId>{}
+                                                              : typeArgumentsFor(callee, callArguments.front()));
+        return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
+    }
+
+    [[nodiscard]] Operand thisOperand(const zl::ThisExpr& node, SourceLocation loc) {
+        (void)loc;
+        return thisOperand(node);
+    }
+
+    [[nodiscard]] Operand methodCall(const zl::MethodCallExpr& node) {
+        const SourceLocation loc = location(&node);
+        Operand receiver = expression(node.object.get());
+        if (receiver.isNone()) return Operand::none();
+        std::vector<Operand> arguments;
+        for (const auto& argument : node.arguments) {
+            Operand value = expression(argument.get());
+            if (value.isNone()) return Operand::none();
+            arguments.push_back(value);
+        }
+        const TypeId resultType = typeOfNode(&node);
+        const bool returnsVoid = isVoid(resultType);
+        const Type* receiverType = ctx.builder.types().find(receiver.type);
+        // A virtual dispatch names the class it dispatches on. When semantic
+        // analysis could not resolve the receiver to a class - which happens
+        // where a generic's own type parameter comes back out, as with
+        // `Shared<T>.get()` - there is no class to name, and emitting the
+        // instruction anyway would hand the verifier a malformed call. Say so
+        // instead and leave the function incomplete.
+        const std::string className = operandTypeName(receiver);
+        if (className.empty()) {
+            unsupported(&node, "method call on a receiver whose class could not be resolved");
+            return Operand::none();
+        }
+        const TempId temp = fb.emitInvokeMethod(receiver, className, node.methodName,
+                                                std::move(arguments), returnsVoid ? 0 : resultType, loc,
+                                                receiverType ? receiverType->arguments : std::vector<TypeId>{});
+        return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
+    }
+
+    [[nodiscard]] Operand superMethodCall(const zl::SuperMethodCallExpr& node) {
+        const SourceLocation loc = location(&node);
+        Operand self = thisOperand(zl::ThisExpr{}, loc);
+        if (self.isNone()) return Operand::none();
+        std::vector<Operand> arguments;
+        for (const auto& argument : node.arguments) {
+            Operand value = expression(argument.get());
+            if (value.isNone()) return Operand::none();
+            arguments.push_back(value);
+        }
+        const std::string parent = ctx.classParents.count(ownerClass) ? ctx.classParents.at(ownerClass) : ownerClass;
+        const std::string target = parent + "." + node.resolvedDispatch.describe();
+        const FunctionId callee = lookupFunction(target);
+        if (callee == kNoFunction) {
+            unsupported(&node, "super call to '" + target + "' which was not lowered");
+            return Operand::none();
+        }
+        const TypeId resultType = typeOfNode(&node);
+        const bool returnsVoid = isVoid(resultType);
+        const TempId temp = fb.emitInvokeSuper(self, callee, std::move(arguments),
+                                               returnsVoid ? 0 : resultType, loc,
+                                               typeArgumentsFor(callee, self));
+        return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
+    }
+
+    // `super(args)` as a constructor's first statement: a direct, non-virtual
+    // call to the parent constructor with this receiver. It produces no value.
+    [[nodiscard]] Operand superCall(const zl::SuperCallExpr& node, const zl::AstNode* site) {
+        const SourceLocation loc = location(site);
+        Operand self = thisOperand(zl::ThisExpr{}, loc);
+        if (self.isNone()) return Operand::none();
+        std::vector<Operand> arguments{self};
+        for (const auto& argument : node.arguments) {
+            Operand value = expression(argument.get());
+            if (value.isNone()) return Operand::none();
+            arguments.push_back(value);
+        }
+        const std::string parent = ctx.classParents.count(ownerClass) ? ctx.classParents.at(ownerClass) : std::string{};
+        if (parent.empty()) {
+            unsupported(site, "super(...) in a class with no parent");
+            return Operand::none();
+        }
+        zl::DispatchSignature signature = node.resolvedDispatch;
+        if (signature.name.empty()) signature.name = parent;
+        const std::string target = parent + "." + signature.describe();
+        const FunctionId constructor = lookupFunctionIn(parent, signature.describe());
+        if (constructor == kNoFunction) {
+            unsupported(site, "super constructor '" + target + "' which was not lowered");
+            return Operand::none();
+        }
+        (void)fb.emitCall(constructor, std::move(arguments), 0, loc,
+                          typeArgumentsFor(constructor, Operand::temp(kNoTemp, thisType)));
+        return Operand::none();
+    }
+
+    [[nodiscard]] Operand newExpression(const zl::NewExpr& node) {
+        const SourceLocation loc = location(&node);
+        const TypeId objectType = typeOfNode(&node);
+        std::vector<Operand> arguments;
+        for (const auto& argument : node.arguments) {
+            Operand value = expression(argument.get());
+            if (value.isNone()) return Operand::none();
+            arguments.push_back(value);
+        }
+        std::vector<TypeId> typeArguments;
+        for (const auto& argument : node.typeArgs) typeArguments.push_back(types.fromAnnotation(argument));
+
+        const TempId instance = fb.emitAlloc(node.className, std::move(typeArguments), objectType, loc);
+        const Operand receiver = Operand::temp(instance, objectType);
+
+        // Constructors are direct calls whose first parameter is the receiver.
+        zl::DispatchSignature signature = node.resolvedDispatch;
+        if (signature.name.empty()) signature.name = node.className;
+        const std::string target = node.className + "." + signature.describe();
+        const FunctionId constructor = lookupFunction(target);
+        if (constructor != kNoFunction) {
+            std::vector<Operand> callArguments{receiver};
+            for (auto& argument : arguments) callArguments.push_back(std::move(argument));
+            (void)fb.emitCall(constructor, std::move(callArguments), 0, loc,
+                              typeArgumentsFor(constructor, receiver));
+        } else if (!arguments.empty()) {
+            // No lowered constructor to call: the allocation alone cannot honour
+            // the constructor's arguments.
+            unsupported(&node, "constructor '" + target + "' which was not lowered");
+            return Operand::none();
+        }
+        return receiver;
+    }
+
+    // `Point { x: 10, y: 20 }`. A data record has no constructor to run, so
+    // this is an allocation followed by a write per field - the same shape the
+    // reference produces, and the reason a record literal needs no lookup into
+    // the function table the way `new C(...)` does.
+    [[nodiscard]] Operand dataLiteral(const zl::DataLiteralExpr& node) {
+        const SourceLocation loc = location(&node);
+        const TypeId objectType = typeOfNode(&node);
+        const Operand instance = Operand::temp(fb.emitAlloc(node.typeName, {}, objectType, loc), objectType);
+        for (const auto& field : node.fields) {
+            Operand value = expression(field.second.get());
+            if (value.isNone()) return Operand::none();
+            fb.emitFieldStore(instance, field.first, value, loc);
+        }
+        return instance;
+    }
+
+    [[nodiscard]] Operand fieldAccess(const zl::FieldAccessExpr& node) {
+        const SourceLocation loc = location(&node);
+        if (node.isEnumMemberAccess) {
+            // `Color.RED`. The runtime represents a member as its name, but its
+            // static type is the enum - so the constant carries the enum's name
+            // and the operand is typed as that enum, not as string. Typing it as
+            // string would make every `x == Color.RED` comparison and every call
+            // taking an enum member read as a type mismatch.
+            const std::string enumTypeName =
+                node.object && node.object->kind == zl::NodeKind::Identifier
+                    ? static_cast<const zl::Identifier&>(*node.object).name
+                    : std::string{};
+            if (enumTypeName.empty()) {
+                unsupported(&node, "enum member access whose enum name could not be resolved");
+                return Operand::none();
+            }
+            return Operand::constant(ctx.builder.constantEnumMember(enumTypeName, node.fieldName),
+                                     ctx.builder.types().objectType(enumTypeName));
+        }
+        if (node.isMathConstantAccess) {
+            // `Math.PI` and friends are namespace values, not fields on an
+            // object - there is no receiver to load from, so the value is the
+            // whole expression.
+            double value = 0.0;
+            if (!zl::mathConstantValue(node.fieldName, value)) {
+                unsupported(&node, "unknown Math constant '" + node.fieldName + "'");
+                return Operand::none();
+            }
+            return Operand::constant(ctx.builder.constantDouble(value),
+                                     ctx.builder.types().doubleType());
+        }
+        if (node.isFunctionReference) {
+            unsupported(&node, "function reference");
+            return Operand::none();
+        }
+        if (node.isStaticFieldAccess) {
+            const TypeId type = typeOfNode(&node);
+            return Operand::temp(fb.emitStaticLoad(node.staticFieldClassName, node.fieldName, type, loc), type);
+        }
+        Operand base = expression(node.object.get());
+        if (base.isNone()) return Operand::none();
+        const TypeId type = typeOfNode(&node);
+        return Operand::temp(fb.emitFieldLoad(base, node.fieldName, type, loc), type);
+    }
+
+    [[nodiscard]] Operand fieldAssign(const zl::FieldAssignExpr& node) {
+        const SourceLocation loc = location(&node);
+        Operand value = expression(node.value.get());
+        if (value.isNone()) return Operand::none();
+        if (node.isStaticFieldAssign) {
+            fb.emitStaticStore(node.staticFieldClassName, node.fieldName, value, loc);
+            return value;
+        }
+        Operand base = expression(node.object.get());
+        if (base.isNone()) return Operand::none();
+        fb.emitFieldStore(base, node.fieldName, value, loc);
+        return value;
+    }
+
+    [[nodiscard]] Operand indexAccess(const zl::IndexAccessExpr& node) {
+        const SourceLocation loc = location(&node);
+        Operand base = expression(node.object.get());
+        if (base.isNone()) return Operand::none();
+        Operand index = expression(node.index.get());
+        if (index.isNone()) return Operand::none();
+        const TypeId type = typeOfNode(&node);
+        return Operand::temp(fb.emitIndexLoad(base, index, type, loc), type);
+    }
+
+    [[nodiscard]] Operand collectionLiteral(const zl::CollectionLiteral& node) {
+        const SourceLocation loc = location(&node);
+        const TypeId type = typeOfNode(&node);
+        const Type* collection = ctx.builder.types().find(type);
+        if (!collection || !isCollectionType(*collection)) {
+            unsupported(&node, "collection literal of type " + ctx.builder.types().render(type));
+            return Operand::none();
+        }
+        const TempId collection_ = fb.emitNewCollection(type, loc);
+        const Operand result = Operand::temp(collection_, type);
+
+        if (node.isMap) {
+            for (const auto& entry : node.entries) {
+                Operand key = expression(entry.first.get());
+                if (key.isNone()) return Operand::none();
+                Operand value = expression(entry.second.get());
+                if (value.isNone()) return Operand::none();
+                fb.emitIndexStore(result, key, value, loc);
+            }
+            return result;
+        }
+        for (std::size_t i = 0; i < node.elements.size(); ++i) {
+            Operand value = expression(node.elements[i].get());
+            if (value.isNone()) return Operand::none();
+            const Operand index = Operand::constant(ctx.builder.constantInt(static_cast<std::int64_t>(i)),
+                                                    ctx.builder.types().intType());
+            fb.emitIndexStore(result, index, value, loc);
+        }
+        return result;
+    }
+
+    [[nodiscard]] Operand await(const zl::AwaitExpr& node) {
+        const SourceLocation loc = location(&node);
+        Operand task = expression(node.operand.get());
+        if (task.isNone()) return Operand::none();
+        const TypeId resultType = typeOfNode(&node);
+        if (isVoid(resultType)) {
+            (void)fb.emitAwait(task, 0, loc);
+            return Operand::none();
+        }
+        return Operand::temp(fb.emitAwait(task, resultType, loc), resultType);
+    }
+
+    [[nodiscard]] Operand lambda(const zl::LambdaExpr& node) {
+        const SourceLocation loc = location(&node);
+        const auto it = ctx.lambdaIds.find(&node);
+        if (it == ctx.lambdaIds.end()) {
+            unsupported(&node, "lambda that was not pre-declared");
+            return Operand::none();
+        }
+        std::vector<Operand> captures;
+        for (const auto& captureName : node.captureStorageNames) {
+            const LocalRef local = lookupLocal(captureName);
+            if (!local.valid()) {
+                unsupported(&node, "capture of local that is not in scope");
+                return Operand::none();
+            }
+            captures.push_back(local.isParameter
+                                   ? fb.parameterOperand(local.param)
+                                   : Operand::temp(fb.emitLoad(local.slot, loc),
+                                                   fb.function().slot(local.slot)->type));
+        }
+        // Now that the captured locals are known, the closure function can
+        // record their real types instead of the unknown placeholders its
+        // declaration needed.
+        if (Function* body = ctx.builder.mutableModule().function(it->second)) {
+            for (std::size_t i = 0; i < captures.size() && i < body->captures.size(); ++i) {
+                body->captures[i].type = captures[i].type;
+            }
+        }
+        const TypeId type = typeOfNode(&node);
+        return Operand::temp(fb.emitMakeClosure(it->second, std::move(captures), type, loc), type);
+    }
+
+    // --- statements -------------------------------------------------------
+    void statement(const zl::AstNode* node) {
+        if (!node || failed) return;
+        if (isDead()) return; // code after a terminator is unreachable; skip it
+        switch (node->kind) {
+            case zl::NodeKind::BlockStmt: {
+                const auto& block = static_cast<const zl::BlockStmt&>(*node);
+                pushScope();
+                for (const auto& child : block.statements) statement(child.get());
+                popScope();
+                return;
+            }
+            case zl::NodeKind::VarDecl:
+                varDecl(static_cast<const zl::VarDecl&>(*node));
+                return;
+            case zl::NodeKind::LogStmt: {
+                const auto& log = static_cast<const zl::LogStmt&>(*node);
+                Operand value = expression(log.argument.get());
+                if (!value.isNone()) fb.emitLog(value, location(node));
+                return;
+            }
+            case zl::NodeKind::ExprStmt: {
+                const auto& statement_ = static_cast<const zl::ExprStmt&>(*node);
+                (void)expression(statement_.expression.get());
+                return;
+            }
+            case zl::NodeKind::IfStmt:
+                ifStatement(static_cast<const zl::IfStmt&>(*node));
+                return;
+            case zl::NodeKind::WhileStmt:
+                whileStatement(static_cast<const zl::WhileStmt&>(*node));
+                return;
+            case zl::NodeKind::RepeatStmt:
+                repeatStatement(static_cast<const zl::RepeatStmt&>(*node));
+                return;
+            case zl::NodeKind::ForStmt:
+                forStatement(static_cast<const zl::ForStmt&>(*node));
+                return;
+            case zl::NodeKind::BreakStmt:
+                breakStatement(static_cast<const zl::BreakStmt&>(*node));
+                return;
+            case zl::NodeKind::ContinueStmt:
+                continueStatement(static_cast<const zl::ContinueStmt&>(*node));
+                return;
+            case zl::NodeKind::ReturnStmt:
+                returnStatement(static_cast<const zl::ReturnStmt&>(*node));
+                return;
+            case zl::NodeKind::ThrowStmt:
+                throwStatement(static_cast<const zl::ThrowStmt&>(*node));
+                return;
+            case zl::NodeKind::TryStmt:
+                tryStatement(static_cast<const zl::TryStmt&>(*node));
+                return;
+            default:
+                unsupported(node, "statement");
+                return;
+        }
+    }
+
+    void varDecl(const zl::VarDecl& node) {
+        const SourceLocation loc = location(&node);
+        TypeId type = 0;
+        if (node.hasExplicitType) type = types.fromAnnotation(node.type);
+        Operand initial;
+        if (node.initializer) {
+            initial = expression(node.initializer.get());
+            if (initial.isNone()) return;
+            if (type == 0) type = initial.type;
+        } else {
+            // `var x` with no initialiser holds nil until assigned.
+            if (type == 0) type = ctx.builder.types().nilType();
+            initial = Operand::constant(ctx.builder.constantNil(), type);
+        }
+        // A borrow declaration establishes a region claim rather than copying a
+        // value, so its slot is created before the owning value is stored.
+        const bool isBorrow = node.ownership == zl::OwnershipKind::BORROW;
+        initial = coerce(initial, type, loc);
+        if (initial.isNone()) return;
+
+        // A `let` that is never moved out is just a name for the value its
+        // initialiser produced - the same rule as a read-only parameter. Giving
+        // it a slot would mean storing into storage the language says can never
+        // be written to, which the verifier is right to reject. A `let` that IS
+        // moved still needs a slot, because move state is tracked per slot.
+        const std::string& key = storageKey(node.storageName, node.name);
+        if (node.isConst && !isBorrow && writtenLocals.count(key) == 0) {
+            bindLocalBoth(node.name, node.storageName, LocalRef::valueRef(initial));
+            return;
+        }
+
+        const SlotId slot = defineSlot(node.storageName, node.name, type, !node.isConst, node.ownership, &node);
+        if (isBorrow) {
+            fb.emitBorrow(slot, initial, loc);
+            return;
+        }
+        fb.emitStore(slot, initial, loc);
+    }
+
+    void ifStatement(const zl::IfStmt& node) {
+        const SourceLocation loc = location(&node);
+        const BlockId exitBlock = newBlock(const_cast<zl::IfStmt*>(&node));
+        const BlockId elseBody = node.elseBody ? newBlock(const_cast<zl::IfStmt*>(&node)) : kNoBlock;
+
+        for (std::size_t i = 0; i < node.branches.size(); ++i) {
+            const BlockId bodyBlock = newBlock(const_cast<zl::IfStmt*>(&node));
+            // The false arm is the next condition's own block, so an if/elif
+            // chain stays a plain sequence of two-way branches.
+            const BlockId falseTarget = (i + 1 < node.branches.size())
+                                            ? newBlock(const_cast<zl::IfStmt*>(&node))
+                                            : (elseBody != kNoBlock ? elseBody : exitBlock);
+            Operand condition = asCondition(expression(node.branches[i].condition.get()),
+                                            node.branches[i].condition.get());
+            if (failed || condition.isNone()) return;
+            fb.emitBranch(condition, bodyBlock, falseTarget, loc);
+
+            gotoBlock(bodyBlock);
+            statement(node.branches[i].body.get());
+            if (!isDead()) fb.emitJump(exitBlock, loc);
+            gotoBlock(falseTarget);
+        }
+        if (elseBody != kNoBlock) {
+            statement(node.elseBody.get());
+            if (!isDead()) fb.emitJump(exitBlock, loc);
+        }
+        gotoBlock(exitBlock);
+    }
+
+    void whileStatement(const zl::WhileStmt& node) {
+        const SourceLocation loc = location(&node);
+        const BlockId conditionBlock = newBlock(const_cast<zl::WhileStmt*>(&node));
+        const BlockId bodyBlock = newBlock(const_cast<zl::WhileStmt*>(&node));
+        const BlockId exitBlock = newBlock(const_cast<zl::WhileStmt*>(&node));
+
+        fb.emitJump(conditionBlock, loc);
+        gotoBlock(conditionBlock);
+        Operand condition = asCondition(expression(node.condition.get()), node.condition.get());
+        if (failed || condition.isNone()) return;
+        fb.emitBranch(condition, bodyBlock, exitBlock, loc);
+
+        gotoBlock(bodyBlock);
+        loops.push_back(LoopContext{conditionBlock, exitBlock});
+        statement(node.body.get());
+        loops.pop_back();
+        if (!isDead()) fb.emitJump(conditionBlock, loc);
+        gotoBlock(exitBlock);
+    }
+
+    void repeatStatement(const zl::RepeatStmt& node) {
+        const SourceLocation loc = location(&node);
+        const BlockId bodyBlock = newBlock(const_cast<zl::RepeatStmt*>(&node));
+        const BlockId conditionBlock = newBlock(const_cast<zl::RepeatStmt*>(&node));
+        const BlockId exitBlock = newBlock(const_cast<zl::RepeatStmt*>(&node));
+
+        fb.emitJump(bodyBlock, loc);
+        gotoBlock(bodyBlock);
+        loops.push_back(LoopContext{conditionBlock, exitBlock});
+        statement(node.body.get());
+        loops.pop_back();
+        if (!isDead()) fb.emitJump(conditionBlock, loc);
+
+        gotoBlock(conditionBlock);
+        Operand condition = asCondition(expression(node.condition.get()), node.condition.get());
+        if (failed || condition.isNone()) return;
+        // repeat/while runs the body again while the condition holds.
+        fb.emitBranch(condition, bodyBlock, exitBlock, loc);
+        gotoBlock(exitBlock);
+    }
+
+    void forStatement(const zl::ForStmt& node) {
+        const SourceLocation loc = location(&node);
+        Operand start = expression(node.start.get());
+        if (start.isNone()) return;
+        Operand end = expression(node.end.get());
+        if (end.isNone()) return;
+        Operand step = expression(node.step.get());
+        if (step.isNone()) return;
+
+        const TypeArena& arena = ctx.builder.types();
+        const SlotId counter = defineSlot(node.storageName, node.varName, arena.intType(), true,
+                                          zl::OwnershipKind::GC, &node);
+        const SlotId endSlot = fb.addSlot("__for_end", arena.intType(), true, zl::OwnershipKind::GC, {}, loc);
+        const SlotId stepSlot = fb.addSlot("__for_step", arena.intType(), true, zl::OwnershipKind::GC, {}, loc);
+        fb.emitStore(counter, coerce(start, arena.intType(), loc), loc);
+        fb.emitStore(endSlot, coerce(end, arena.intType(), loc), loc);
+        fb.emitStore(stepSlot, coerce(step, arena.intType(), loc), loc);
+        if (failed) return;
+
+        const BlockId conditionBlock = newBlock(const_cast<zl::ForStmt*>(&node));
+        const BlockId bodyBlock = newBlock(const_cast<zl::ForStmt*>(&node));
+        const BlockId stepBlock = newBlock(const_cast<zl::ForStmt*>(&node));
+        const BlockId exitBlock = newBlock(const_cast<zl::ForStmt*>(&node));
+
+        fb.emitJump(conditionBlock, loc);
+        gotoBlock(conditionBlock);
+        const Operand current = Operand::temp(fb.emitLoad(counter, loc), arena.intType());
+        const Operand endValue = Operand::temp(fb.emitLoad(endSlot, loc), arena.intType());
+        const Operand stepValue = Operand::temp(fb.emitLoad(stepSlot, loc), arena.intType());
+        // Direction is a runtime property of the step in ZL, and a zero step is
+        // an error rather than an infinite loop. One instruction carries both.
+        const Operand keepGoing = Operand::temp(fb.emitRangeInBounds(current, endValue, stepValue, loc),
+                                                arena.boolType());
+        fb.emitBranch(keepGoing, bodyBlock, exitBlock, loc);
+
+        gotoBlock(bodyBlock);
+        loops.push_back(LoopContext{stepBlock, exitBlock});
+        statement(node.body.get());
+        loops.pop_back();
+        if (!isDead()) fb.emitJump(stepBlock, loc);
+
+        gotoBlock(stepBlock);
+        const Operand counterValue = Operand::temp(fb.emitLoad(counter, loc), arena.intType());
+        const Operand advanced = Operand::temp(fb.emitBinary(Opcode::Add, counterValue, stepValue,
+                                                             arena.intType(), loc), arena.intType());
+        fb.emitStore(counter, advanced, loc);
+        fb.emitJump(conditionBlock, loc);
+        gotoBlock(exitBlock);
+    }
+
+    void breakStatement(const zl::BreakStmt& node) {
+        if (loops.empty()) {
+            unsupported(&node, "break outside a loop");
+            return;
+        }
+        fb.emitJump(loops.back().breakTarget, location(&node));
+    }
+
+    void continueStatement(const zl::ContinueStmt& node) {
+        if (loops.empty()) {
+            unsupported(&node, "continue outside a loop");
+            return;
+        }
+        fb.emitJump(loops.back().continueTarget, location(&node));
+    }
+
+    void returnStatement(const zl::ReturnStmt& node) {
+        const SourceLocation loc = location(&node);
+        const TypeId returnType = fb.function().returnType;
+        if (!node.value) {
+            fb.emitReturn(Operand::none(), loc);
+            return;
+        }
+        Operand value = expression(node.value.get());
+        if (value.isNone()) return;
+        value = coerce(value, returnType, loc);
+        if (value.isNone()) return;
+        fb.emitReturn(value, loc);
+    }
+
+    void throwStatement(const zl::ThrowStmt& node) {
+        Operand value = expression(node.value.get());
+        if (value.isNone()) return;
+        fb.emitThrow(value, location(&node));
+    }
+
+    void tryStatement(const zl::TryStmt& node) {
+        const SourceLocation loc = location(&node);
+        if (node.finallyBlock) {
+            // `finally` needs cleanup on every exit path, including break,
+            // continue and return. Getting that wrong would silently drop
+            // cleanup, so it is explicitly out of scope for this phase.
+            unsupported(&node, "try/finally");
+            return;
+        }
+        if (node.catches.empty()) {
+            unsupported(&node, "try without a catch clause");
+            return;
+        }
+
+        const BlockId afterBlock = newBlock(const_cast<zl::TryStmt*>(&node));
+        std::vector<BlockId> catchBlocks;
+        std::vector<ExceptionHandler> handlers;
+        for (const auto& clause : node.catches) {
+            TypeId catchType = 0;
+            if (clause.type) catchType = types.fromAnnotation(*clause.type);
+            // A catch-all binds the stringified message; a typed catch binds the
+            // exception object. Both are immutable bindings.
+            const TypeId bindingType = clause.type ? catchType : ctx.builder.types().stringType();
+            const SlotId binding = fb.addSlot(storageKey(clause.storageName, clause.varName), bindingType,
+                                              false, zl::OwnershipKind::GC, {}, loc);
+            fb.function().slots[static_cast<std::size_t>(binding - 1)].isCatchBinding = true;
+            const BlockId catchBlock = fb.addBlock(BlockKind::Catch, loc);
+            catchBlocks.push_back(catchBlock);
+            handlers.push_back(ExceptionHandler{catchType, catchBlock, binding});
+        }
+
+        // Handlers are searched in source order, which is the order the chain
+        // is stored in.
+        const std::vector<ExceptionHandler> savedHandlers = activeHandlers;
+        activeHandlers = savedHandlers;
+        for (const auto& handler : handlers) activeHandlers.push_back(handler);
+        // The try body runs with the new chain installed.
+        const BlockId tryBlock = newBlock(const_cast<zl::TryStmt*>(&node));
+        fb.emitJump(tryBlock, loc);
+        gotoBlock(tryBlock);
+        statement(node.tryBlock.get());
+        if (!isDead()) fb.emitJump(afterBlock, loc);
+        activeHandlers = savedHandlers;
+
+        for (std::size_t i = 0; i < node.catches.size(); ++i) {
+            gotoBlock(catchBlocks[i]);
+            pushScope();
+            bindLocal(storageKey(node.catches[i].storageName, node.catches[i].varName),
+                      LocalRef::slotRef(handlers[i].catchSlot));
+            statement(node.catches[i].block.get());
+            popScope();
+            if (!isDead()) fb.emitJump(afterBlock, loc);
+        }
+        gotoBlock(afterBlock);
+    }
+
+    // --- helpers ----------------------------------------------------------
+    [[nodiscard]] FunctionId lookupFunction(const std::string& qualifiedName) const {
+        const auto it = ctx.functionIds.find(qualifiedName);
+        if (it != ctx.functionIds.end()) return it->second;
+        // Inherited methods resolve through the parent chain, the same way the
+        // bytecode compiler resolves them.
+        std::string current = ownerClass;
+        std::size_t guard = 0;
+        while (!current.empty() && guard++ < 64) {
+            const auto parent = ctx.classParents.find(current);
+            if (parent == ctx.classParents.end()) break;
+            current = parent->second;
+            const auto dot = qualifiedName.find('.');
+            const std::string candidate = current + (dot == std::string::npos ? "" : qualifiedName.substr(dot));
+            const auto found = ctx.functionIds.find(candidate);
+            if (found != ctx.functionIds.end()) return found->second;
+        }
+        return kNoFunction;
+    }
+
+    [[nodiscard]] FunctionId lookupFunctionIn(const std::string& className,
+                                              const std::string& signatureSuffix) const {
+        const auto found = ctx.functionIds.find(className + "." + signatureSuffix);
+        return found == ctx.functionIds.end() ? kNoFunction : found->second;
+    }
+
+    // The instantiation a call site selected. A MIR function stays a generic
+    // template, so a call into a generic class has to say which arguments it
+    // used; the receiver's own type is where the source recorded them.
+    [[nodiscard]] std::vector<TypeId> typeArgumentsFor(FunctionId callee, const Operand& receiver) const {
+        const Function* function = ctx.builder.module().function(callee);
+        if (!function || function->typeParameters.empty()) return {};
+        const Type* type = ctx.builder.types().find(receiver.type);
+        if (!type || type->arguments.size() != function->typeParameters.size()) return {};
+        return type->arguments;
+    }
+
+    [[nodiscard]] std::string operandTypeName(const Operand& operand) const {
+        const Type* type = ctx.builder.types().find(operand.type);
+        return type ? type->name : std::string{};
+    }
+
+    [[nodiscard]] zl::ZlType zlTypeOf(TypeId id) const {
+        const Type* type = ctx.builder.types().find(id);
+        if (!type) return zl::ZlType::UNKNOWN;
+        switch (type->kind) {
+            case TypeKind::Bool: return zl::ZlType::BOOL;
+            case TypeKind::Int: return zl::ZlType::INT;
+            case TypeKind::Double: return zl::ZlType::DOUBLE;
+            case TypeKind::String: return zl::ZlType::STRING;
+            case TypeKind::Nil: return zl::ZlType::NIL;
+            case TypeKind::Void: return zl::ZlType::VOID_TYPE;
+            case TypeKind::List: return zl::ZlType::LIST;
+            case TypeKind::Map: return zl::ZlType::MAP;
+            case TypeKind::Set: return zl::ZlType::SET;
+            case TypeKind::Array: return zl::ZlType::ARRAY;
+            case TypeKind::Task: return zl::ZlType::TASK;
+            case TypeKind::Function: return zl::ZlType::FUNCTION;
+            case TypeKind::Union: return zl::ZlType::UNION;
+            default: return zl::ZlType::OBJECT;
+        }
+    }
+
+    [[nodiscard]] TypeId typeIdFor(zl::ZlType type) const {
+        return types.primitiveFor(type);
+    }
+
+    [[nodiscard]] bool isVoid(TypeId id) const {
+        const Type* type = ctx.builder.types().find(id);
+        return type && type->kind == TypeKind::Void;
+    }
+
+    [[nodiscard]] static Opcode binaryOpcode(zl::TokenType token) {
+        switch (token) {
+            case zl::TokenType::PLUS: return Opcode::Add;
+            case zl::TokenType::MINUS: return Opcode::Sub;
+            case zl::TokenType::STAR: return Opcode::Mul;
+            case zl::TokenType::SLASH: return Opcode::Div;
+            case zl::TokenType::PERCENT: return Opcode::Mod;
+            case zl::TokenType::POW: return Opcode::Pow;
+            case zl::TokenType::BIT_AND: return Opcode::BitAnd;
+            case zl::TokenType::BIT_OR: return Opcode::BitOr;
+            case zl::TokenType::BIT_XOR: return Opcode::BitXor;
+            case zl::TokenType::SHL: return Opcode::Shl;
+            case zl::TokenType::SHR: return Opcode::Shr;
+            case zl::TokenType::USHR: return Opcode::Ushr;
+            case zl::TokenType::EQ: return Opcode::Eq;
+            case zl::TokenType::NEQ: return Opcode::Ne;
+            case zl::TokenType::LT: return Opcode::Lt;
+            case zl::TokenType::LTE: return Opcode::Le;
+            case zl::TokenType::GT: return Opcode::Gt;
+            case zl::TokenType::GTE: return Opcode::Ge;
+            default: return Opcode::Nop;
+        }
+    }
+
+    [[nodiscard]] static zl::TokenType tokenFor(Opcode opcode) {
+        switch (opcode) {
+            case Opcode::Add: return zl::TokenType::PLUS;
+            case Opcode::Sub: return zl::TokenType::MINUS;
+            case Opcode::Mul: return zl::TokenType::STAR;
+            case Opcode::Div: return zl::TokenType::SLASH;
+            case Opcode::Mod: return zl::TokenType::PERCENT;
+            case Opcode::Pow: return zl::TokenType::POW;
+            case Opcode::BitAnd: return zl::TokenType::BIT_AND;
+            case Opcode::BitOr: return zl::TokenType::BIT_OR;
+            case Opcode::BitXor: return zl::TokenType::BIT_XOR;
+            case Opcode::Shl: return zl::TokenType::SHL;
+            case Opcode::Shr: return zl::TokenType::SHR;
+            case Opcode::Ushr: return zl::TokenType::USHR;
+            case Opcode::Eq: return zl::TokenType::EQ;
+            case Opcode::Ne: return zl::TokenType::NEQ;
+            case Opcode::Lt: return zl::TokenType::LT;
+            case Opcode::Le: return zl::TokenType::LTE;
+            case Opcode::Gt: return zl::TokenType::GT;
+            case Opcode::Ge: return zl::TokenType::GTE;
+            default: return zl::TokenType::UNKNOWN;
+        }
+    }
+
+    // Every condition position in ZL takes a bool. When semantic analysis
+    // resolved the expression to bool this is a no-op; when it left the type
+    // unknown - which happens for a call through an unparameterised `func` -
+    // the MIR records the required type with an explicit refine rather than
+    // branching on a value with no type at all.
+    // A match arm's literal, as an operand. Patterns carry the token text
+    // rather than a Literal node, so this is the same parsing `constOperand`
+    // does, keyed off the arm instead of off an AST node.
+    [[nodiscard]] Operand patternLiteral(const zl::MatchExpr::Arm& arm, TypeId subjectType) {
+        switch (arm.literalType) {
+            case zl::TokenType::INT_LITERAL: {
+                std::int64_t value = 0;
+                try { value = std::stoll(arm.raw); } catch (...) { value = 0; }
+                return Operand::constant(ctx.builder.constantInt(value), ctx.builder.types().intType());
+            }
+            case zl::TokenType::DECIMAL_LITERAL:
+            case zl::TokenType::FLOAT_LITERAL: {
+                double value = 0.0;
+                try { value = std::stod(arm.raw); } catch (...) { value = 0.0; }
+                return Operand::constant(ctx.builder.constantDouble(value), ctx.builder.types().doubleType());
+            }
+            case zl::TokenType::BOOL_LITERAL:
+                return Operand::constant(ctx.builder.constantBool(arm.raw == "true"),
+                                         ctx.builder.types().boolType());
+            case zl::TokenType::STRING_LITERAL: {
+                std::string text = arm.raw;
+                if (text.size() >= 2 && (text.front() == '"' || text.front() == '\''))
+                    text = text.substr(1, text.size() - 2);
+                return Operand::constant(ctx.builder.constantString(std::move(text)),
+                                         ctx.builder.types().stringType());
+            }
+            case zl::TokenType::KW_NULL:
+                // Typed as the subject rather than as bare nil: `null` in a
+                // pattern is a value of whatever the subject is, and typing it
+                // nil would make the arm's comparison read as comparing
+                // different types.
+                return Operand::constant(ctx.builder.constantNil(),
+                                         subjectType ? subjectType : ctx.builder.types().nilType());
+            default:
+                unsupported(nullptr, "match literal '" + arm.raw + "'");
+                return Operand::none();
+        }
+    }
+
+    // `match` lowers to a chain of two-way branches, one test block per arm:
+    // test the arm, run it on success, fall through to the next arm's test on
+    // failure. That is the shape the bytecode compiler produces, kept here so
+    // the two backends cannot drift apart on which arm wins.
+    [[nodiscard]] Operand matchExpr(const zl::MatchExpr& node) {
+        const SourceLocation loc = location(&node);
+        // The subject is evaluated exactly once, before any arm runs. A guard
+        // that reassigns the variable the subject was read from therefore
+        // cannot change what a later arm compares against, and an arm cannot
+        // observe a side effect of another arm's test.
+        Operand subject = expression(node.subject.get());
+        if (subject.isNone()) return Operand::none();
+
+        const TypeId resultType = typeOfNode(&node);
+        // Arms produce their value in different blocks, so the result travels
+        // through a slot - the same join mechanism `try` uses. There is no phi
+        // in this IR, and inventing one for one construct would leave every
+        // other join still going through a slot.
+        // Mutable because every arm writes it, even though the source cannot
+        // observe an intermediate value: the join block reads it only after
+        // exactly one arm has stored.
+        const SlotId resultSlot = fb.addSlot("", resultType, true, zl::OwnershipKind::GC, {}, loc);
+        const BlockId joinBlock = newBlock(const_cast<zl::MatchExpr*>(&node));
+        // Where the last arm's failed test lands. The checker proves static
+        // coverage, so only a value it could not classify reaches here; the
+        // reference raises rather than yielding an undefined result, and so
+        // does this.
+        const BlockId noMatchBlock = newBlock(const_cast<zl::MatchExpr*>(&node));
+        const TypeId boolType = ctx.builder.types().boolType();
+
+        BlockId nextTest = newBlock(const_cast<zl::MatchExpr*>(&node));
+        fb.emitJump(nextTest, loc);
+
+        for (std::size_t i = 0; i < node.arms.size(); ++i) {
+            const auto& arm = node.arms[i];
+            SourceLocation armLoc;
+            armLoc.line = static_cast<std::uint32_t>(arm.line);
+            const bool lastArm = i + 1 == node.arms.size();
+            const BlockId bodyBlock = newBlock(const_cast<zl::MatchExpr*>(&node));
+            const BlockId following = lastArm ? noMatchBlock : newBlock(const_cast<zl::MatchExpr*>(&node));
+
+            // --- the arm's test ------------------------------------------
+            gotoBlock(nextTest);
+            Operand test;
+            // The type a binding pattern narrows the subject to.
+            TypeId narrowed = subject.type;
+            switch (arm.patternKind) {
+                case zl::MatchExpr::PatternKind::Wildcard:
+                    break;
+                case zl::MatchExpr::PatternKind::Variable:
+                    break;
+                case zl::MatchExpr::PatternKind::Literal: {
+                    Operand literal = patternLiteral(arm, subject.type);
+                    if (literal.isNone()) return Operand::none();
+                    test = Operand::temp(fb.emitBinary(Opcode::Eq, subject, literal, boolType, armLoc), boolType);
+                    break;
+                }
+                case zl::MatchExpr::PatternKind::EnumMember: {
+                    if (arm.enumTypeName.empty()) {
+                        unsupported(&node, "enum pattern whose enum name could not be resolved");
+                        return Operand::none();
+                    }
+                    Operand member = Operand::constant(
+                        ctx.builder.constantEnumMember(arm.enumTypeName, arm.enumMemberName),
+                        ctx.builder.types().objectType(arm.enumTypeName));
+                    test = Operand::temp(fb.emitBinary(Opcode::Eq, subject, member, boolType, armLoc), boolType);
+                    break;
+                }
+                case zl::MatchExpr::PatternKind::Type: {
+                    narrowed = types.fromAnnotation(arm.typePattern);
+                    if (narrowed == 0) {
+                        unsupported(&node, "type pattern '" + arm.typePattern.name + "'");
+                        return Operand::none();
+                    }
+                    test = Operand::temp(fb.emitTypeTest(subject, narrowed, armLoc), boolType);
+                    break;
+                }
+                default:
+                    // Data, list and map patterns destructure. They need field
+                    // and element tests this IR does not spell out yet.
+                    unsupported(&node, "structural match pattern");
+                    return Operand::none();
+            }
+            if (failed) return Operand::none();
+            // A wildcard or variable pattern cannot fail, so its arm needs no
+            // test at all - branching on a constant true would only add a block
+            // the next pass would have to remove.
+            if (test.isNone()) fb.emitJump(bodyBlock, armLoc);
+            else fb.emitBranch(test, bodyBlock, following, armLoc);
+
+            // --- the arm's body ------------------------------------------
+            gotoBlock(bodyBlock);
+            pushScope();
+            if (!arm.bindingName.empty() && arm.bindingName != "_") {
+                Operand value = subject;
+                if (arm.patternKind == zl::MatchExpr::PatternKind::Type && narrowed != subject.type) {
+                    // The test above proved the runtime type, so retyping is
+                    // what lets the arm use the narrowed member instead of the
+                    // whole union.
+                    value = Operand::temp(fb.emitRefine(subject, narrowed, armLoc), narrowed);
+                }
+                const auto storage = arm.storageBindings.find(arm.bindingName);
+                bindLocalBoth(arm.bindingName,
+                              storage == arm.storageBindings.end() ? std::string{} : storage->second,
+                              LocalRef::valueRef(value));
+            }
+            if (arm.patternKind == zl::MatchExpr::PatternKind::Type && narrowed != subject.type &&
+                node.subject && node.subject->kind == zl::NodeKind::Identifier) {
+                // `int _ => ... value ...` narrows the *subject* too, not just
+                // the arm's own binding - the arm body keeps spelling the
+                // subject's name and means the narrowed member. Without this
+                // the body would still see the whole union.
+                const auto& subjectId = static_cast<const zl::Identifier&>(*node.subject);
+                bindLocalBoth(subjectId.name, subjectId.storageName, LocalRef::valueRef(
+                    Operand::temp(fb.emitRefine(subject, narrowed, armLoc), narrowed)));
+            }
+            if (arm.guard) {
+                Operand guard = asCondition(expression(arm.guard.get()), arm.guard.get());
+                if (failed || guard.isNone()) { popScope(); return Operand::none(); }
+                const BlockId passed = newBlock(const_cast<zl::MatchExpr*>(&node));
+                fb.emitBranch(guard, passed, following, armLoc);
+                gotoBlock(passed);
+            }
+            Operand value = expression(arm.result.get());
+            if (failed || value.isNone()) { popScope(); return Operand::none(); }
+            fb.emitStore(resultSlot, coerce(value, resultType, armLoc), armLoc);
+            fb.emitJump(joinBlock, armLoc);
+            popScope();
+
+            gotoBlock(following);
+            nextTest = following;
+        }
+
+        // No arm matched.
+        const TypeId exceptionType = ctx.builder.types().objectType("Exception");
+        const Operand instance = Operand::temp(fb.emitAlloc("Exception", {}, exceptionType, loc), exceptionType);
+        const FunctionId constructor = lookupFunctionIn("Exception", "Exception(string)");
+        if (constructor != kNoFunction) {
+            Operand message = Operand::constant(ctx.builder.constantString("non-exhaustive match"),
+                                                ctx.builder.types().stringType());
+            (void)fb.emitCall(constructor, {instance, message}, 0, loc, {});
+        }
+        fb.emitThrow(instance, loc);
+
+        gotoBlock(joinBlock);
+        return Operand::temp(fb.emitLoad(resultSlot, loc), resultType);
+    }
+
+    [[nodiscard]] Operand asCondition(Operand value, const zl::AstNode* node) {
+        if (value.isNone()) return Operand::none();
+        const Type* type = ctx.builder.types().find(value.type);
+        if (!type) return value;
+        if (type->kind == TypeKind::Bool) return value;
+        if (type->kind == TypeKind::Unknown) {
+            return Operand::temp(fb.emitRefine(value, ctx.builder.types().boolType(), location(node)),
+                                 ctx.builder.types().boolType());
+        }
+        unsupported(node, "condition of type " + ctx.builder.types().render(value.type) + " (expected bool)");
+        return Operand::none();
+    }
+
+    // Inserts the language's implicit int -> double widening so MIR arithmetic
+    // never has to model a mixed-type operation the source did not write.
+    [[nodiscard]] Operand coerce(Operand value, TypeId target, SourceLocation loc) {
+        if (value.isNone() || value.type == target) return value;
+        const Type* from = ctx.builder.types().find(value.type);
+        const Type* to = ctx.builder.types().find(target);
+        if (!from || !to) return value;
+        if (from->kind == TypeKind::Int && to->kind == TypeKind::Double) {
+            return Operand::temp(fb.emitWiden(value, loc), target);
+        }
+        if (from->kind == TypeKind::Nil && isNullableKind(to->kind)) return value;
+        // Anything else is the checker's business, not the lowerer's: it already
+        // accepted the program, so the value is usable where the target expects.
+        return value;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Program-level lowering
+// ---------------------------------------------------------------------------
+
+// True when `needle` occurs anywhere inside `haystack`. Used to attribute a
+// lambda to the class whose method body contains it.
+bool containsNode(const zl::AstNode* haystack, const zl::AstNode* needle) {
+    if (!haystack) return false;
+    if (haystack == needle) return true;
+    switch (haystack->kind) {
+        case zl::NodeKind::BlockStmt: {
+            const auto& block = static_cast<const zl::BlockStmt&>(*haystack);
+            for (const auto& child : block.statements) {
+                if (containsNode(child.get(), needle)) return true;
+            }
+            return false;
+        }
+        case zl::NodeKind::LambdaExpr: {
+            const auto& lambda = static_cast<const zl::LambdaExpr&>(*haystack);
+            return containsNode(lambda.hasExprBody ? lambda.exprBody.get() : lambda.blockBody.get(), needle);
+        }
+        case zl::NodeKind::FunctionDecl: {
+            const auto& function = static_cast<const zl::FunctionDecl&>(*haystack);
+            return containsNode(function.body.get(), needle);
+        }
+        default:
+            return false;
+    }
+}
+
+void collectLambdas(const zl::AstNode* node, LoweringContext& ctx, const std::string& ownerClass) {
+    if (!node) return;
+    if (node->kind == zl::NodeKind::LambdaExpr) {
+        const auto& lambda = static_cast<const zl::LambdaExpr&>(*node);
+        if (!ctx.lambdaIds.count(&lambda)) {
+            std::ostringstream name;
+            name << (ownerClass.empty() ? std::string("$") : ownerClass + ".") << "$lambda" << ctx.lambdaCounter++;
+            const FunctionId id = ctx.builder.addFunction(name.str()).function().id;
+            ctx.lambdaIds[&lambda] = id;
+            ctx.lambdaOrder.push_back(&lambda);
+            ctx.lambdaTypeParams[&lambda] = ctx.typeParamsFor(ownerClass);
+        }
+    }
+    // Every container kind, at every depth: a lambda passed straight into a call
+    // (`Thread.start(func() => ...)`) sits inside a CallExpr, not inside a
+    // BlockStmt, and a closure body can contain further closures.
+    zl::forEachChild(node, [&](const zl::AstNode* child) { collectLambdas(child, ctx, ownerClass); });
+}
+
+void declareLayouts(LoweringContext& ctx) {
+    for (const auto& declaration : ctx.program.declarations) {
+        if (declaration->kind == zl::NodeKind::ClassDecl) {
+            const auto& cls = static_cast<const zl::ClassDecl&>(*declaration);
+            ClassLayout& layout = ctx.builder.addClassLayout(cls.name);
+            layout.typeParameters = cls.typeParams;
+            layout.parent = cls.extendsName;
+            layout.interfaces = cls.implementsNames;
+            layout.location.line = static_cast<std::uint32_t>(cls.line);
+            TypeConverter converter{ctx.builder.types(), cls.typeParams};
+            for (const auto& member : cls.members) {
+                if (member->kind != zl::NodeKind::VarDecl) continue;
+                const auto& field = static_cast<const zl::VarDecl&>(*member);
+                FieldLayout fieldLayout;
+                fieldLayout.name = field.name;
+                fieldLayout.type = field.hasExplicitType ? converter.fromAnnotation(field.type)
+                                                         : ctx.builder.types().unknownType();
+                fieldLayout.ownership = field.ownership;
+                fieldLayout.isStatic = field.isStatic;
+                layout.fields.push_back(fieldLayout);
+                // A `static` member is module-level storage, not per-instance
+                // state, so it is also declared as a MIR static. Without this the
+                // verifier can only warn that a static_load names a field the
+                // module never declared.
+                if (field.isStatic) {
+                    (void)ctx.builder.addStatic(cls.name, field.name, fieldLayout.type, kNoFunction,
+                                                SourceLocation{{}, static_cast<std::uint32_t>(field.line), 0});
+                }
+            }
+        } else if (declaration->kind == zl::NodeKind::DataDecl) {
+            const auto& data = static_cast<const zl::DataDecl&>(*declaration);
+            ClassLayout& layout = ctx.builder.addClassLayout(data.name);
+            layout.parent = data.extendsName;
+            layout.isData = true;
+            layout.location.line = static_cast<std::uint32_t>(data.line);
+            TypeConverter converter{ctx.builder.types(), kNoTypeParams};
+            for (const auto& field : data.fields) {
+                FieldLayout fieldLayout;
+                fieldLayout.name = field.name;
+                fieldLayout.type = converter.fromAnnotation(field.type);
+                fieldLayout.ownership = field.ownership;
+                layout.fields.push_back(std::move(fieldLayout));
+            }
+        } else if (declaration->kind == zl::NodeKind::EnumDecl) {
+            const auto& enumeration = static_cast<const zl::EnumDecl&>(*declaration);
+            ClassLayout& layout = ctx.builder.addClassLayout(enumeration.name);
+            layout.isEnum = true;
+            layout.enumMembers = enumeration.members;
+            layout.location.line = static_cast<std::uint32_t>(enumeration.line);
+        }
+    }
+}
+
+void declareFunction(LoweringContext& ctx, const zl::FunctionDecl& function, const std::string& ownerClass) {
+    if (!ctx.options.lowerGenericTemplates && !ctx.typeParamsFor(ownerClass).empty()) return;
+
+    FunctionBuilder fb = ctx.builder.addFunction(ctx.qualifiedName(function));
+    const std::vector<std::string> typeParams = ctx.typeParamsFor(ownerClass);
+    TypeConverter converter{ctx.builder.types(), typeParams};
+
+    fb.setAsync(function.isAsync);
+    fb.setConstructor(function.isConstructor);
+    fb.setStatic(function.isStatic);
+    fb.setOperator(function.isOperator);
+    fb.setLocation(SourceLocation{{}, static_cast<std::uint32_t>(function.line), 0});
+    if (!typeParams.empty()) fb.setGenericTemplate(typeParams);
+    for (const auto& annotation : function.annotations) {
+        if (annotation.name == "native") fb.setNative(true);
+    }
+    fb.setReturnType(converter.fromAnnotation(function.returnType));
+
+    const bool instanceContext = !function.isStatic && !ownerClass.empty();
+    if (instanceContext) {
+        // `this` is parameter 0, so a direct call's arity is just the parameter
+        // count and no call convention is implicit.
+        //
+        // Inside `class Set<T>`, `this` is `Set<T>` - the self-parameterized
+        // form - not a bare `Set`. Typing it bare would lose the instantiation
+        // and make every `this`-passing self-call look like a type error.
+        //
+        // The name is rendered and re-parsed through the shared converter rather
+        // than assembled with objectType() directly, because not every class is
+        // a plain Object: `Shared<T>` and `Task<T>` have their own kinds, and
+        // building `this` as Object "Shared" would make it unassignable to the
+        // Shared<int> a call site actually passes.
+        std::string selfName = ownerClass;
+        if (!typeParams.empty()) {
+            selfName += "<";
+            for (std::size_t i = 0; i < typeParams.size(); ++i) {
+                if (i) selfName += ",";
+                selfName += typeParams[i];
+            }
+            selfName += ">";
+        }
+        (void)fb.addParameter("this", converter.fromRendered(selfName), zl::OwnershipKind::GC, {},
+                              SourceLocation{{}, static_cast<std::uint32_t>(function.line), 0});
+        fb.function().hasThisParameter = true;
+    }
+    for (const auto& parameter : function.params) {
+        (void)fb.addParameter(parameter.name, converter.fromAnnotation(parameter.type), parameter.ownership,
+                              {}, SourceLocation{{}, static_cast<std::uint32_t>(parameter.type.line), 0});
+    }
+
+    ctx.functionIds[fb.function().name] = fb.function().id;
+    if (function.body) collectLambdas(function.body.get(), ctx, ownerClass);
+}
+
+// Declares a lambda's MIR function: its flags and its capture list.
+//
+// Parameters are deliberately NOT added here. Captures become the closure body's
+// leading parameters, and their types are only knowable once the enclosing body
+// has been lowered (that is where the captured locals, and so their types, are
+// in scope). Declaring them too early would mean declaring them as unknown and
+// throwing the information away.
+void lowerLambda(LoweringContext& ctx, const zl::LambdaExpr& lambda) {
+    const FunctionId id = ctx.lambdaIds.at(&lambda);
+    FunctionBuilder fb = ctx.builder.functionBuilder(id);
+    fb.setLambda(true);
+    fb.setAsync(lambda.isAsync);
+    fb.setLocation(SourceLocation{{}, static_cast<std::uint32_t>(lambda.line), 0});
+    // A lambda written inside a generic class is generic over that class's
+    // parameters: it closes over `this` and over locals whose types mention
+    // them. Declaring the closure as a template is what makes those types legal
+    // inside it rather than an unsubstituted parameter in a concrete function.
+    const auto typeParams = ctx.lambdaTypeParams.find(&lambda);
+    if (typeParams != ctx.lambdaTypeParams.end() && !typeParams->second.empty()) {
+        fb.setGenericTemplate(typeParams->second);
+    }
+    for (const auto& captureName : lambda.captureNames) {
+        fb.addCapture(captureName, ctx.builder.types().unknownType(), lambda.usesThis);
+    }
+}
+
+// Adds a lambda's parameters (captures first, then the declared ones), fixes its
+// return type, and lowers its body.
+void lowerLambdaBody(LoweringContext& ctx, const zl::LambdaExpr& lambda) {
+    const FunctionId id = ctx.lambdaIds.at(&lambda);
+    const auto typeParamsEntry = ctx.lambdaTypeParams.find(&lambda);
+    const std::vector<std::string> lambdaTypeParams =
+        typeParamsEntry == ctx.lambdaTypeParams.end() ? std::vector<std::string>{} : typeParamsEntry->second;
+    FunctionLowerer lowerer(ctx, id, lambdaTypeParams);
+    // One builder handle for the whole body. A FunctionBuilder is a lightweight
+    // handle over the shared Function, but "which block am I appending to" is
+    // per-handle state - so a second handle obtained from the module builder
+    // starts with no current block, and anything emitted through it either
+    // trips the builder's assertion or, worse, reads a block that is not there.
+    FunctionBuilder& fb = lowerer.fb;
+    // The lambda's own generic parameters, so an annotation like `T item`
+    // resolves to the type parameter rather than to a class named "T".
+    TypeConverter converter{ctx.builder.types(), lambdaTypeParams};
+    const SourceLocation loc{{}, static_cast<std::uint32_t>(lambda.line), 0};
+
+    // Captures are leading parameters, so the callable's own arity is the
+    // parameter count minus the capture count. This keeps a closure a real
+    // function a backend can call, with its environment made explicit rather
+    // than implicit.
+    for (const auto& capture : fb.function().captures) {
+        (void)fb.addParameter(capture.usesThis && capture.name == "this" ? "this" : capture.name,
+                              capture.type, zl::OwnershipKind::GC, {}, loc);
+    }
+    const std::size_t captureCount = fb.function().captures.size();
+    for (std::size_t i = 0; i < lambda.params.size(); ++i) {
+        TypeId type = converter.fromAnnotation(lambda.params[i].type);
+        if (i < lambda.inferredParameterTypeNames.size() && !lambda.inferredParameterTypeNames[i].empty()) {
+            type = converter.fromRendered(lambda.inferredParameterTypeNames[i]);
+        }
+        (void)fb.addParameter(lambda.params[i].name.empty() ? "arg" + std::to_string(i) : lambda.params[i].name,
+                              type, lambda.params[i].ownership, {}, loc);
+    }
+    TypeId returnType = ctx.builder.types().unknownType();
+    if (lambda.hasDeclaredReturnType) returnType = converter.fromAnnotation(lambda.declaredReturnType);
+    else if (!lambda.inferredReturnTypeName.empty()) returnType = converter.fromRendered(lambda.inferredReturnTypeName);
+    // A lambda with no `return` infers a nil result. ZL has no nil-returning
+    // function - the spelling for "produces nothing" is void - so a nil return
+    // type is the checker's way of saying the same thing and is recorded as
+    // void here.
+    if (const Type* resolved = ctx.builder.types().find(returnType);
+        resolved && resolved->kind == TypeKind::Nil) {
+        returnType = ctx.builder.types().voidType();
+    }
+    fb.setReturnType(returnType);
+
+    (void)fb.addBlock(BlockKind::Normal, loc);
+
+    // Captured values arrive as parameters and are copied into slots so the body
+    // can treat them like any other local.
+    for (std::size_t i = 0; i < captureCount; ++i) {
+        const Parameter* parameter = fb.function().parameter(static_cast<ParamId>(i));
+        if (!parameter) continue;
+        const SlotId slot = fb.addSlot(parameter->name, parameter->type, true, zl::OwnershipKind::GC, {}, loc);
+        fb.emitStore(slot, fb.parameterOperand(static_cast<ParamId>(i)), loc);
+        const std::string sourceName = i < lambda.captureNames.size() ? lambda.captureNames[i] : parameter->name;
+        const std::string storageName = i < lambda.captureStorageNames.size() ? lambda.captureStorageNames[i]
+                                                                              : sourceName;
+        lowerer.bindLocalBoth(sourceName, storageName, LocalRef::slotRef(slot));
+        // A lambda that closed over `this` gets the receiver back as its
+        // receiver. Inside the body `this` is not an ordinary identifier - the
+        // AST spells it ThisExpr, and ThisExpr is answered from thisRef, not
+        // from the scope - so capturing it is not enough on its own: the
+        // captured slot has to become the body's `this` as well.
+        if (sourceName == "this") {
+            lowerer.thisType = parameter->type;
+            lowerer.thisRef = LocalRef::slotRef(slot);
+        }
+    }
+    for (std::size_t i = 0; i < lambda.params.size(); ++i) {
+        const ParamId paramId = static_cast<ParamId>(captureCount + i);
+        const Parameter* parameter = fb.function().parameter(paramId);
+        if (!parameter) continue;
+        // Bind the source name and the storage name, exactly as a named
+        // function's parameters are bound: the body's Identifier nodes carry the
+        // storage name, and binding only the source name reads `x` as unbound.
+        lowerer.bindLocalBoth(lambda.params[i].name, lambda.params[i].storageName,
+                              LocalRef::parameterRef(paramId));
+    }
+
+    if (lambda.hasExprBody) {
+        Operand value = lowerer.expression(lambda.exprBody.get());
+        const Type* declared = ctx.builder.types().find(fb.function().returnType);
+        const bool returnsNothing = !declared || declared->kind == TypeKind::Void;
+        if (returnsNothing) {
+            // `func(x) => log(x)` has an expression body that produces nothing.
+            // The value is still evaluated for its side effect, but the block
+            // ends in a bare return - returning a value from a void function is
+            // not a thing the MIR allows.
+            if (!lowerer.isDead()) fb.emitReturn(Operand::none(), loc);
+        } else if (!value.isNone()) {
+            value = lowerer.coerce(value, fb.function().returnType, loc);
+            if (!value.isNone() && !lowerer.isDead()) fb.emitReturn(value, loc);
+        }
+    } else if (lambda.blockBody) {
+        lowerer.statement(lambda.blockBody.get());
+    }
+
+    // Falling off the end of a lambda body. When the body was not lowered - an
+    // unsupported construct inside it - there is no honest terminator to
+    // synthesise, so the block is left unterminated and FunctionBuilder::finish
+    // ends it in `unreachable`. Synthesising a `return` there would describe
+    // control flow the source does not have.
+    if (!lowerer.isDead() && !lowerer.failed) {
+        const Type* returnTypePtr = ctx.builder.types().find(fb.function().returnType);
+        if (returnTypePtr && returnTypePtr->kind == TypeKind::Void) {
+            fb.emitReturn(Operand::none(), loc);
+        } else {
+            fb.emitUnreachable(loc);
+        }
+    }
+    fb.finish();
+    if (lowerer.failed) ctx.result.incompleteFunctions.push_back(fb.function().name);
+}
+
+// Collects the storage names a body writes to, or moves out of. A parameter
+// needs a mutable slot only when one of these happens; otherwise it stays an
+// SSA value.
+//
+// The walk covers the whole body, because a write is only reachable from the
+// top-level statements once you follow every container node: `if (a < 0)
+// { a = -a }` writes `a` from inside an IfStmt, and a walker that stops at
+// BlockStmt never sees it - which then reads the assignment as one to a binding
+// that does not exist.
+//
+// LambdaExpr is a hard stop: a lambda's parameters and locals are its own
+// bindings, not the enclosing function's, and lambda bodies are lowered
+// separately with their own parameter list.
+void collectWrittenLocals(const zl::AstNode* node, std::unordered_set<std::string>& out) {
+    if (!node) return;
+    switch (node->kind) {
+        case zl::NodeKind::AssignExpr: {
+            const auto& assign = static_cast<const zl::AssignExpr&>(*node);
+            out.insert(assign.storageName.empty() ? assign.name : assign.storageName);
+            break;
+        }
+        case zl::NodeKind::MoveExpr: {
+            const auto& move = static_cast<const zl::MoveExpr&>(*node);
+            out.insert(move.storageName.empty() ? move.name : move.storageName);
+            break;
+        }
+        // A lambda body is a separate function with its own parameter list.
+        case zl::NodeKind::LambdaExpr:
+            return;
+        default:
+            break;
+    }
+    zl::forEachChild(node, [&](const zl::AstNode* child) { collectWrittenLocals(child, out); });
+}
+
+void lowerFunctionBody(LoweringContext& ctx, const zl::FunctionDecl& function, const std::string& ownerClass) {
+    const auto found = ctx.functionIds.find(ctx.qualifiedName(function));
+    if (found == ctx.functionIds.end()) return;
+    const std::vector<std::string> typeParams = ctx.typeParamsFor(ownerClass);
+
+    FunctionLowerer lowerer(ctx, found->second, typeParams);
+    lowerer.ownerClass = ownerClass;
+    lowerer.isStaticContext = function.isStatic;
+    FunctionBuilder& fb = lowerer.fb;
+
+    collectWrittenLocals(function.body.get(), lowerer.writtenLocals);
+
+    (void)fb.addBlock(BlockKind::Normal, fb.function().location);
+
+    if (fb.function().hasThisParameter) {
+        // `this` is never reassigned in ZL, so it stays the parameter it already
+        // is rather than being copied into a slot that would have to be
+        // writable to exist at all.
+        lowerer.thisType = fb.function().parameters[0].type;
+        lowerer.thisRef = LocalRef::parameterRef(0);
+        // `this` is also bound under its own name. A lambda written inside this
+        // method captures it as an ordinary name - semantic analysis puts
+        // "this" in captureStorageNames - and a capture is resolved by looking
+        // the name up in scope, not by asking whether the enclosing body happens
+        // to have a receiver. Keeping `this` only in thisRef would read every
+        // such capture as "not in scope".
+        lowerer.bindLocalBoth("this", "this", LocalRef::parameterRef(0));
+    }
+
+    const std::size_t firstParameter = fb.function().hasThisParameter ? 1 : 0;
+    for (std::size_t i = 0; i < function.params.size(); ++i) {
+        const ParamId paramId = static_cast<ParamId>(firstParameter + i);
+        const Parameter* parameter = fb.function().parameter(paramId);
+        if (!parameter) continue;
+        const std::string key = function.params[i].storageName.empty() ? function.params[i].name
+                                                                       : function.params[i].storageName;
+        const bool needsSlot =
+            function.params[i].ownership == zl::OwnershipKind::BORROW || lowerer.writtenLocals.count(key) != 0;
+        if (!needsSlot) {
+            lowerer.bindLocalBoth(function.params[i].name, function.params[i].storageName,
+                                  LocalRef::parameterRef(paramId));
+            continue;
+        }
+        const SlotId slot = fb.addSlot(key, parameter->type, true, function.params[i].ownership, {},
+                                       fb.function().location);
+        if (function.params[i].ownership == zl::OwnershipKind::BORROW) {
+            fb.emitBorrow(slot, fb.parameterOperand(paramId), fb.function().location);
+        } else {
+            fb.emitStore(slot, fb.parameterOperand(paramId), fb.function().location);
+        }
+        lowerer.bindLocalBoth(function.params[i].name, function.params[i].storageName,
+                              LocalRef::slotRef(slot));
+    }
+
+    if (function.body) lowerer.statement(function.body.get());
+
+    // A block that falls off the end needs an explicit terminator. A void
+    // function returns nothing; anything else is a lowering bug the verifier
+    // would catch, so end it in `unreachable` rather than inventing a value.
+    if (!lowerer.isDead()) {
+        const Type* returnType = ctx.builder.types().find(fb.function().returnType);
+        if (returnType && returnType->kind == TypeKind::Void) fb.emitReturn(Operand::none(), fb.function().location);
+        else fb.emitUnreachable(fb.function().location);
+    }
+    fb.finish();
+
+    if (lowerer.failed) ctx.result.incompleteFunctions.push_back(fb.function().name);
+}
+
+} // namespace
+
+LoweringResult lowerProgram(const zl::Program& program, const zl::TypeChecker& checker,
+                            const LoweringOptions& options) {
+    LoweringContext ctx(program, checker, options);
+
+    // Pass 0: class shape, so field access and inheritance resolve.
+    for (const auto& declaration : program.declarations) {
+        if (declaration->kind == zl::NodeKind::ClassDecl) {
+            const auto& cls = static_cast<const zl::ClassDecl&>(*declaration);
+            ctx.classTypeParams[cls.name] = cls.typeParams;
+            ctx.classParents[cls.name] = cls.extendsName;
+        }
+    }
+    if (options.emitLayouts) declareLayouts(ctx);
+
+    // Pass 1: declare every function so a call can name its target regardless of
+    // declaration order. Lambdas are discovered here too, because a closure body
+    // is a real MIR function that other instructions reference by id.
+    for (const auto& declaration : program.declarations) {
+        std::vector<const zl::FunctionDecl*> members;
+        std::string ownerClass;
+        if (declaration->kind == zl::NodeKind::ClassDecl) {
+            const auto& cls = static_cast<const zl::ClassDecl&>(*declaration);
+            ownerClass = cls.name;
+            for (const auto& member : cls.members) {
+                if (member->kind == zl::NodeKind::FunctionDecl) {
+                    members.push_back(static_cast<const zl::FunctionDecl*>(member.get()));
+                }
+            }
+        } else if (declaration->kind == zl::NodeKind::DataDecl) {
+            const auto& data = static_cast<const zl::DataDecl&>(*declaration);
+            ownerClass = data.name;
+            for (const auto& member : data.members) {
+                if (member->kind == zl::NodeKind::FunctionDecl) {
+                    members.push_back(static_cast<const zl::FunctionDecl*>(member.get()));
+                }
+            }
+        } else {
+            continue;
+        }
+        for (const zl::FunctionDecl* function : members) {
+            declareFunction(ctx, *function, ownerClass);
+            if (!ctx.mainFunction && function->name == "main") ctx.mainFunction = function;
+        }
+    }
+
+    // Pass 2: lambda function declarations. Bodies come in pass 4 so a closure
+    // can call a function declared after it, and so its capture types are
+    // already known by the time its parameters are added.
+    for (const zl::LambdaExpr* lambda : ctx.lambdaOrder) {
+        lowerLambda(ctx, *lambda);
+    }
+
+    // Pass 3: bodies.
+    for (const auto& declaration : program.declarations) {
+        std::string ownerClass;
+        std::vector<const zl::FunctionDecl*> members;
+        if (declaration->kind == zl::NodeKind::ClassDecl) {
+            const auto& cls = static_cast<const zl::ClassDecl&>(*declaration);
+            ownerClass = cls.name;
+            for (const auto& member : cls.members) {
+                if (member->kind == zl::NodeKind::FunctionDecl) {
+                    members.push_back(static_cast<const zl::FunctionDecl*>(member.get()));
+                }
+            }
+        } else if (declaration->kind == zl::NodeKind::DataDecl) {
+            const auto& data = static_cast<const zl::DataDecl&>(*declaration);
+            ownerClass = data.name;
+            for (const auto& member : data.members) {
+                if (member->kind == zl::NodeKind::FunctionDecl) {
+                    members.push_back(static_cast<const zl::FunctionDecl*>(member.get()));
+                }
+            }
+        } else {
+            continue;
+        }
+        for (const zl::FunctionDecl* function : members) lowerFunctionBody(ctx, *function, ownerClass);
+    }
+
+    // Pass 4: lambda bodies, in declaration order. An enclosing lambda is
+    // discovered before the lambdas nested inside it, so this order lets an
+    // outer body fill in an inner closure's capture types before that inner
+    // closure's parameters are added.
+    for (const zl::LambdaExpr* lambda : ctx.lambdaOrder) {
+        lowerLambdaBody(ctx, *lambda);
+    }
+
+    if (ctx.mainFunction) {
+        const auto entry = ctx.functionIds.find(ctx.qualifiedName(*ctx.mainFunction));
+        if (entry != ctx.functionIds.end()) ctx.builder.setEntryPoint(entry->second);
+    }
+
+    ctx.result.module = ctx.builder.take();
+    ctx.result.success = true;
+    return std::move(ctx.result);
+}
+
+} // namespace zl::mir
