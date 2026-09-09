@@ -96,6 +96,7 @@ See [docs/development.md](docs/development.md#stdlib-lookup) for the lookup prec
 ```text
 include/zl/    Public headers for the runtime and compiler
 src/           C++ implementation of the compiler, VM, and natives
+               src/mir/ is the mid-level IR (see docs/mir.md)
 zlpkg/         C++ implementation of the zlpkg CLI (separate target)
 stdlib/        Standard-library packages beyond auto-imported zl.lang
 tools/         Developer tooling, including zl-lsp, zl-test, and the zl-bind binding generator
@@ -130,6 +131,7 @@ Full syntax and semantics: **[docs/language-guide.md](docs/language-guide.md)**.
 | [docs/stdlib.md](docs/stdlib.md) | `zl.lang`, `Math`, `zl.test`, `zl.logging`, `zl.text`, `zl.serialize`, `zl.time`, `zl.crypto` |
 | [docs/packages.md](docs/packages.md) | Imports, the stdlib root, and `zlpkg` dependency management |
 | [docs/native.md](docs/native.md) | Native boundary, `@native` compilation, `zl-bind`, FFI, async |
+| [docs/mir.md](docs/mir.md) | MIR — the typed mid-level IR: structures, invariants, verifier, lowering |
 | [docs/tooling.md](docs/tooling.md) | Editor/test tooling, `zl-lsp`, `zl-test`, fast diagnostics, document symbols |
 | [docs/development.md](docs/development.md) | Build details, stdlib lookup, testing, packaging |
 | [examples/](examples/README.md) | 46 runnable examples, basics through async, each with verified output |

@@ -2,6 +2,128 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-09 — MIR: a typed mid-level IR with a verifier
+
+ZL now has a real mid-level intermediate representation, in `zl::mir`
+(`include/zl/mir/`, `src/mir/`). It is reached with `zl --emit-mir <out|->
+<file.zl>` and is documented in [`docs/mir.md`](mir.md).
+
+**Why.** The compiler had one internal graph, `zl::ir`, and it could not carry
+what a backend needs: types were `std::string` names, terminators were mixed in
+with value-producing instructions, successors were duplicated separately from the
+terminator that implied them, and generics, unions, function types, exceptions,
+field access and indexing had no representation at all. Rather than retrofit
+that, MIR is a new layer beside it. `zl::ir` is unchanged and still feeds
+`--emit-native` and `--emit-machine-code`; the bytecode compiler and the VM are
+untouched, and no language semantics changed.
+
+**What it is.** Types are interned structural values, so a type *is* its id and
+`TypeId` equality is type equality. Nullability is derived from the kind rather
+than stored. Generic parameters, unions and function signatures are first-class
+kinds — nothing was erased to `object` to make a first version tractable.
+Functions are SSA over temps, with mutable locals as explicit slots and
+`Load`/`Store`; parameters stay SSA unless the body writes, moves or borrows
+them. `Instruction` and `Terminator` are separate types with exactly one
+terminator per block, which is the invariant everything else about the CFG rests
+on. Exceptions are unwind edges with handler chains; ownership is a dataflow
+problem the verifier solves over reverse postorder.
+
+**A generic function is a template, not a copy.** `class Set<T>`'s methods are
+lowered once with `this: Set<T>`, and the call site records which instantiation
+it selected. That keeps one source of truth instead of a function per
+instantiation, and it is what makes "passes `Shared<int>` but the parameter is
+`Shared<T>`" checkable rather than a false mismatch.
+
+**Verification.** `verifyModule` enforces 26 documented invariants — SSA
+uniqueness, dominance, block reachability, predecessor consistency, operand and
+result typing, call signatures, field and index legality, ownership flow, and
+the shape of exception edges. `FunctionBuilder::finish()` guarantees two of them
+structurally, so a function that was only partly lowered is still valid MIR and
+carries its caveat in `Function::incomplete` instead of as a broken graph.
+
+**Lowering** covers expressions, statements, classes and inheritance, generics,
+closures including nested ones and ones that capture `this`, `List`/`Map`/`Set`
+calls, `match`, `data` record literals, annotated collection literals,
+try/catch, async and await, and `Shared<T>`. Unsupported constructs produce a
+note and an incomplete function, never malformed MIR. Across `examples/`, 54 of
+57 files lower and verify completely and the rest verify with notes; none fail.
+
+A closure that captures `this` needed two things, not one. `this` is captured by
+name — semantic analysis puts `"this"` in `captureStorageNames` — so the
+enclosing body has to bind it under that name for the capture to resolve; and
+inside the closure the captured slot has to become the body's receiver, because
+`this` there is spelled `ThisExpr` and answered from the receiver rather than
+from the scope. Such a closure written inside `class Box<T>` also closes over
+`this: Box<T>`, and an unsubstituted type parameter is only legal inside a
+template, so the closure's MIR function is declared generic over its owner
+class's parameters.
+
+`match` lowers to a chain of two-way branches, one test block per arm in source
+order, with the subject evaluated exactly once before the first test — so a
+subject with a side effect cannot run once per arm, and a guard that reassigns
+the subject's variable cannot change what a later arm compares against. Arm
+bodies store into a result slot the join block reads back, since this IR has no
+phi. A type pattern emits the new `TypeTest` and then `Refine`s both the arm's
+binding and the subject identifier the body keeps spelling, which is what
+narrows `int|string` to `int` inside an `int n =>` arm.
+
+`TypeTest` was the gap that blocked it: MIR could *assert* a type (`Refine`, the
+typed form of the VM's `AssertType`) but not *ask* about one, and a match arm has
+to survive a "no" and fall through rather than raise. It is the typed form of the
+VM's `MatchType`.
+
+**Compiler fixes made along the way**, each at the layer that owned the problem
+rather than worked around in MIR: `zlTypeName` moved next to its declaration out
+of `type_checker.cpp`; the builtin `Math.PI`/`E`/`TAU` table unified into one
+place instead of three copies; `zl::forEachChild` added to the AST so passes
+scanning a body have one exhaustive answer to "what is inside this node" —
+hand-rolled walkers were silently missing anything nested inside a call
+argument; `array[N]` sizing made optional so a dynamic `array<int>` is not
+recorded as `array[0]<int>`; and nullability made a question for
+`TypeArena::isNullable` rather than for the top-level kind alone. The last was a
+real defect: `string` is nullable in ZL even though the VM holds it inline rather
+than behind a collector handle, and a union is nullable when any member is — so
+`int|string` admits `null` while `int|double` does not. Reading only the kind
+called every union non-nullable and rejected the `null` arm of a match over one.
+
+Two more surfaced once `match` and record literals were lowering. `TypeChecker`
+records each expression's type for the backend seam in one funnel, `inferExpr` —
+but a collection literal written under an annotation (`list<int> xs = [1, 2]`)
+took a special-case branch in `inferExpected` that bypassed it, so the checker
+proved the type and then never told anyone, and every backend saw UNKNOWN. And
+the verifier's `checkIndexAccess` handled lists and arrays but not maps, so it
+rejected `index_store` on a `map<K,V>` even though the instruction taxonomy has
+always said index access covers maps. Both are the kind of gap that only shows up
+once a second consumer starts asking.
+
+The same check turned out to have a third blind spot, found by writing a program
+the example corpus does not contain: `set<int> s = [1, 2, 3]`. The VM runs it
+fine, but MIR rejected it — a literal is built as `new_collection` plus one
+`index_store` per element, and the index check covered lists, arrays and maps
+while a set fell through to "indexed access requires a List<T>". Indexing also
+recognised the `List<T>` class spelling but not `Set<T>` or `Map<K,V>`, and
+`new_collection` recognised none of them, so a spelling could be indexable but
+not constructible. `isCollectionType` is now the single answer to "is this a
+collection" and both construction and indexing ask it, which is what stops the
+two spellings drifting apart again.
+
+One more came from the last two notes in the corpus. `share(x)` is a native with
+no namespace and the catalog keys it by its bare name, but the call lowerer only
+consulted the catalog for qualified names, so a bare `share` fell through to the
+implicit self-call path and reported `call to 'C.()' which was not lowered` —
+the empty dispatch being the giveaway that no method had ever been resolved. The
+bytecode compiler special-cases `share` by name; the lowerer now asks the
+catalog by the bare name instead, which is the same test without the
+hardcoding. That cleared the note and, with it, a downstream one: the value
+`share` produced had been unresolved, so a later method call on it could not
+name a class either.
+
+**Tests.** `tests/mir_tests.cpp` (`zl-mir-tests`) builds MIR by hand and checks
+the verifier rejects each class of malformed module — 47 cases.
+`tests/mir_lowering_tests.cpp` (`zl-mir-lowering-tests`) drives the real
+pipeline end to end and asserts on the specific properties an earlier lowerer
+got wrong — 29 cases.
+
 ## 2026-09-08 — Thread failures are catchable; `shared` usable as an identifier
 
 Adversarial probing of the runtime found three defects.
