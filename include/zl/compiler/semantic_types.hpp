@@ -14,6 +14,12 @@ enum class ZlType {
 
 [[nodiscard]] std::string zlTypeName(ZlType t);
 
+// The builtin `Math` namespace constants. These are namespace values rather
+// than instance fields: `Math` is never a variable, so nothing in the symbol
+// table backs them, and every layer that has to evaluate one needs the same
+// table. Returns false for a name that is not a Math constant.
+[[nodiscard]] bool mathConstantValue(const std::string& name, double& out);
+
 // Inverse of zlTypeName for a single *base* type name as it appears in a
 // rendered type name (e.g. the "int" inside "list<int>" or the "Task" inside
 // "Task<int>"). Lowercase keywords map to their builtin kinds (`int`, `list`,

@@ -142,6 +142,35 @@ if(TARGET zl-runtime-hardening-vm-tests AND WIN32)
     target_link_libraries(zl-runtime-hardening-vm-tests PRIVATE ws2_32)
 endif()
 
+# --- MIR (mid-level IR) -----------------------------------------------------
+# Two targets, split by what they need to link.
+#
+# zl-mir-tests builds MIR by hand and checks the verifier rejects each class of
+# malformed module. It only needs the MIR sources plus the two compiler
+# utilities the verifier delegates to, so it stays fast and does not depend on
+# the front end.
+zl_add_optional_test(zl-mir-tests tests/mir_tests.cpp
+    src/mir/analysis.cpp
+    src/mir/builder.cpp
+    src/mir/function.cpp
+    src/mir/instruction.cpp
+    src/mir/printer.cpp
+    src/mir/type.cpp
+    src/mir/verifier.cpp
+    src/compiler/operator_rules.cpp
+    src/compiler/semantic_types.cpp
+    src/common/type_name.cpp)
+
+# zl-mir-lowering-tests drives the real pipeline - ModuleLoader, TypeChecker,
+# lowerProgram, verifyModule - so it links the whole compiler minus main().
+zl_add_optional_test(zl-mir-lowering-tests tests/mir_lowering_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+if(TARGET zl-mir-lowering-tests AND WIN32)
+    target_link_libraries(zl-mir-lowering-tests PRIVATE ws2_32)
+endif()
+if(TARGET zl-mir-lowering-tests)
+    target_link_libraries(zl-mir-lowering-tests PRIVATE Threads::Threads)
+endif()
+
 
 # --- Installation (Phase 12A foundation) -----------------------------------
 # The installed runtime, package manager, and stdlib share one prefix-relative

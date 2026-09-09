@@ -23,6 +23,9 @@
 #include "zl/compiler/ir_lowering.hpp"
 #include "zl/compiler/ir_optimizer.hpp"
 #include "zl/compiler/machine_code.hpp"
+#include "zl/mir/lowering.hpp"
+#include "zl/mir/printer.hpp"
+#include "zl/mir/verifier.hpp"
 
 
 
@@ -165,6 +168,47 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
+        if (command == "--emit-mir") {
+            if (argc != 4) {
+                std::cerr << "usage: zl --emit-mir <output|-> <file.zl>\n";
+                return 2;
+            }
+            try {
+                std::vector<std::filesystem::path> roots;
+                if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
+                    if (*env != '\0') for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
+                const auto stdlibRoot = resolveStdlibRoot(argv[0]);
+                const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
+                if (!stdlibVersion.compatible) { std::cerr << "error: " << stdlibVersion.error << "\n"; return 3; }
+                roots.push_back(stdlibRoot);
+                zl::ModuleLoader loader(argv[3], roots);
+                auto program = loader.load();
+                // The MIR lowerer reads the checker's recorded expression types,
+                // so semantic analysis must run first and on the same program.
+                zl::TypeChecker typeChecker;
+                typeChecker.check(*program, /*requireMain=*/false);
+                const auto lowered = zl::mir::lowerProgram(*program, typeChecker);
+                for (const auto& diagnostic : lowered.diagnostics) std::cerr << "note: " << diagnostic << "\n";
+
+                const auto report = zl::mir::verifyModule(lowered.module);
+                if (!report.ok()) {
+                    std::cerr << report.describe();
+                    return 4;
+                }
+                const std::string text = zl::mir::printModule(lowered.module);
+                if (std::string(argv[2]) == "-") {
+                    std::cout << text;
+                    return std::cout.good() ? 0 : 5;
+                }
+                std::ofstream out(argv[2], std::ios::binary);
+                if (!out) { std::cerr << "error: cannot open MIR output '" << argv[2] << "'\n"; return 5; }
+                out << text;
+                return out.good() ? 0 : 5;
+            } catch (const std::exception& e) {
+                std::cerr << "MIR compile error: " << e.what() << "\n";
+                return 1;
+            }
+        }
         if (command == "--emit-native") {
             if (argc != 4) {
                 std::cerr << "usage: zl --emit-native <output.cpp> <file.zl>\n";
@@ -233,6 +277,7 @@ int main(int argc, char** argv) {
                          "  zl --parse-only <file.zl>\n"
                          "  zl --emit-native <output.cpp> <file.zl>\n"
                          "  zl --emit-machine-code <output.zlm> <file.zl>\n"
+                         "  zl --emit-mir <output|-> <file.zl>\n"
                          "  zl --version\n"
                          "  zl --help\n";
             return 0;
