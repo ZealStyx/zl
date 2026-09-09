@@ -26,6 +26,7 @@
 #include "zl/mir/lowering.hpp"
 #include "zl/mir/printer.hpp"
 #include "zl/mir/verifier.hpp"
+#include "zl/mir/vm_backend.hpp"
 
 
 
@@ -209,6 +210,69 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
+        if (command == "--mir-vm") {
+            // Run a program through the MIR -> bytecode backend path:
+            // source -> type analysis -> MIR -> verify -> bytecode -> VM.
+            // This is the differential sibling of the default AST -> bytecode
+            // path; both must produce identical observable behaviour.
+            if (argc < 3) {
+                std::cerr << "usage: zl --mir-vm <file.zl> [program args...]\n";
+                return 2;
+            }
+            try {
+                std::vector<std::filesystem::path> roots;
+                if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
+                    if (*env != '\0') for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
+                const auto stdlibRoot = resolveStdlibRoot(argv[0]);
+                const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
+                if (!stdlibVersion.compatible) { std::cerr << "error: " << stdlibVersion.error << "\n"; return 3; }
+                roots.push_back(stdlibRoot);
+                zl::ModuleLoader loader(argv[2], roots);
+                auto program = loader.load();
+                zl::TypeChecker typeChecker;
+                typeChecker.check(*program, /*requireMain=*/true);
+                const auto lowered = zl::mir::lowerProgram(*program, typeChecker);
+                const auto report = zl::mir::verifyModule(lowered.module);
+                if (!report.ok()) { std::cerr << report.describe(); return 4; }
+                const auto backend = zl::mir::compileModuleToBytecode(lowered.module);
+                if (!backend.ok()) {
+                    for (const auto& e : backend.errors) std::cerr << "MIR bytecode error: " << e << "\n";
+                    return 4;
+                }
+                if (backend.stubbed != 0) {
+                    std::cerr << "MIR bytecode: " << backend.stubbed
+                              << " function(s) not translatable (stubbed; reachable ones raise at runtime)\n";
+                }
+                for (std::size_t i = 0; i < backend.stubbedFunctions.size() && i < 400; ++i)
+                    std::cerr << "  stub: " << backend.stubbedFunctions[i] << "\n";
+                std::vector<std::string> programArgs;
+                for (int i = 3; i < argc; ++i) programArgs.emplace_back(argv[i]);
+                zl::VM vm;
+                return vm.run(backend.chunk, programArgs);
+            } catch (const zl::SystemExitException& ex) {
+                return ex.code;
+            } catch (const zl::ModuleError& e) {
+                std::cerr << "module error: " << e.what() << "\n";
+                return 1;
+            } catch (const zl::TypeCheckError& e) {
+                std::cerr << "compile error: " << e.what() << "\n";
+                return 1;
+            } catch (const zl::ZlThrownException& e) {
+                if (e.value()) {
+                    auto it = e.value()->fields.find("message");
+                    std::string msg = e.what();
+                    if (it != e.value()->fields.end() && std::holds_alternative<std::string>(it->second))
+                        msg = std::get<std::string>(it->second);
+                    std::cerr << "runtime error (" << e.value()->className << "): " << msg << "\n";
+                    return 1;
+                }
+                std::cerr << "runtime error: " << e.what() << "\n";
+                return 1;
+            } catch (const std::exception& e) {
+                std::cerr << "MIR bytecode error: " << e.what() << "\n";
+                return 1;
+            }
+        }
         if (command == "--emit-native") {
             if (argc != 4) {
                 std::cerr << "usage: zl --emit-native <output.cpp> <file.zl>\n";
@@ -277,6 +341,7 @@ int main(int argc, char** argv) {
                          "  zl --parse-only <file.zl>\n"
                          "  zl --emit-native <output.cpp> <file.zl>\n"
                          "  zl --emit-machine-code <output.zlm> <file.zl>\n"
+                         "  zl --mir-vm <file.zl> [program args...]\n"
                          "  zl --emit-mir <output|-> <file.zl>\n"
                          "  zl --version\n"
                          "  zl --help\n";
