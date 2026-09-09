@@ -421,7 +421,7 @@ errors, and a module with notes can still verify.
   and checks the verifier rejects each class of malformed module. A
   lowering-only test could never reach most of these shapes, because the builder
   refuses to produce them.
-- `tests/mir_lowering_tests.cpp` (`zl-mir-lowering-tests`) — 28 regressions.
+- `tests/mir_lowering_tests.cpp` (`zl-mir-lowering-tests`) — 29 regressions.
   Drives the real pipeline on small programs and asserts on the MIR that comes
   out — including the specific properties an earlier lowerer got wrong.
 
@@ -429,9 +429,9 @@ Lowering is also exercised across `examples/`: every file is lowered and
 verified. 54 of the 57 lower and verify completely; the other 3 verify with
 notes. That count is the measure of coverage.
 
-The 10 remaining notes are one root cause plus two constructs in a single
-example. Eight are a bare `func` parameter: `applyTwice(func f, int x)` carries
-no signature, so semantic analysis types a lambda's parameter as `unknown`, and
-MIR records `unknown` rather than inventing a type. The other two are a call
-through a function value that was never itself lowered, and a method call on a
-receiver whose class could not be resolved.
+The 8 remaining notes are all one root cause: a bare `func` parameter.
+`applyTwice(func f, int x)` carries no signature, so semantic analysis types a
+lambda's parameter as `unknown`, and MIR records `unknown` rather than inventing
+a type. That is the honest answer — the language genuinely does not know — and
+inventing `int` to make the count look better would be exactly the erasure this
+IR exists to avoid.

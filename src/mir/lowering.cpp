@@ -691,6 +691,22 @@ struct FunctionLowerer {
             return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
         }
 
+        // A bare call can still be a global native. `share(x)` is spelled with
+        // no namespace and the catalog keys it by its bare name, so consulting
+        // only qualified names misses it - the call then reads as an implicit
+        // self-call to a method that does not exist, and the note names an empty
+        // dispatch. Checking the catalog by the bare name is what the bytecode
+        // compiler does too; it special-cases `share` by hand, and this is the
+        // same test without the hardcoding.
+        if (node.namespaceName.empty()) {
+            if (const auto native = zl::findNativeSignature(node.calleeName)) {
+                const TempId temp = fb.emitCallNative(node.calleeName, static_cast<std::int32_t>((*native)->id),
+                                                     std::move(arguments), returnsVoid ? 0 : resultType,
+                                                     (*native)->taskValueType != zl::ZlType::UNKNOWN, loc);
+                return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
+            }
+        }
+
         // A bare call is an implicit self-call.
         const std::string owner = ownerClass.empty() ? node.namespaceName : ownerClass;
         const std::string target = owner + "." + node.resolvedDispatch.describe();

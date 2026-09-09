@@ -515,6 +515,37 @@ class GenericLiteral {
     std::cout << "mir lowering generic collection literal: PASS\n";
 }
 
+void testBareGlobalNativeCallLowers() {
+    // `share(x)` is a native with no namespace, and the catalog keys it by its
+    // bare name. Consulting only qualified names missed it, so the call read as
+    // an implicit self-call to a method that does not exist and the note named
+    // an empty dispatch: "call to 'C.()' which was not lowered".
+    const auto lowered = lower("BareNative", R"ZL(
+class Box {
+    int v
+    func Box(int v): void { this.v = v }
+    public func get(): int { return this.v }
+}
+
+class BareNative {
+    func main(): void {
+        var b = new Box(3)
+        var s = share(b)
+        s.setValue(new Box(9))
+        s.withLock(func() {
+            log(s.get().get())
+            return s.get()
+        })
+    }
+}
+)ZL");
+    requireClean(lowered, "a call to the global native `share`");
+    require(contains(lowered, "BareNative.main", "call_native native 'share'"),
+            "`share` was not lowered to a native call:\n" +
+                functionText(lowered, "BareNative.main"));
+    std::cout << "mir lowering bare global native: PASS\n";
+}
+
 // ---------------------------------------------------------------------------
 // data records
 // ---------------------------------------------------------------------------
@@ -840,6 +871,7 @@ int main() {
     testAnnotatedCollectionLiteralKeepsItsType();
     testSetLiteralLowers();
     testGenericClassCollectionLiteralLowers();
+    testBareGlobalNativeCallLowers();
     testRecordLiteralIsAllocPlusFieldStores();
 
     testMatchArmsAreBranches();

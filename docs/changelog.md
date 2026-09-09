@@ -107,11 +107,22 @@ not constructible. `isCollectionType` is now the single answer to "is this a
 collection" and both construction and indexing ask it, which is what stops the
 two spellings drifting apart again.
 
+One more came from the last two notes in the corpus. `share(x)` is a native with
+no namespace and the catalog keys it by its bare name, but the call lowerer only
+consulted the catalog for qualified names, so a bare `share` fell through to the
+implicit self-call path and reported `call to 'C.()' which was not lowered` —
+the empty dispatch being the giveaway that no method had ever been resolved. The
+bytecode compiler special-cases `share` by name; the lowerer now asks the
+catalog by the bare name instead, which is the same test without the
+hardcoding. That cleared the note and, with it, a downstream one: the value
+`share` produced had been unresolved, so a later method call on it could not
+name a class either.
+
 **Tests.** `tests/mir_tests.cpp` (`zl-mir-tests`) builds MIR by hand and checks
 the verifier rejects each class of malformed module — 47 cases.
 `tests/mir_lowering_tests.cpp` (`zl-mir-lowering-tests`) drives the real
 pipeline end to end and asserts on the specific properties an earlier lowerer
-got wrong — 28 cases.
+got wrong — 29 cases.
 
 ## 2026-09-08 — Thread failures are catchable; `shared` usable as an identifier
 
