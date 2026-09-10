@@ -113,6 +113,26 @@ The verifier enforces all of these. They are the contract a backend may rely on.
    dominator tree, not against textual order.
 9. **Mutable locals are slots, not temps.** `Load`/`Store` name a `SlotId`. This
    is what keeps SSA and ZL's reassignment semantics from fighting each other.
+   A slot is the *memory* form of a value, and MIR is valid with either that
+   form or the value form (9a) in use — they mean the same thing, and
+   `promoteSlotsToBlockParameters` converts the first into the second where it is
+   provably safe.
+9a. **A block parameter is the value form of a merge (the phi).** A
+   `BasicBlock::parameters` entry is defined once, on entry to its block, and the
+   *edge* supplies it: `Terminator::edgeArguments[i]` holds one operand per
+   parameter of successor `i`. This is the block-argument spelling of phi
+   placement, chosen over a list of `(value, predecessor)` pairs on the use side
+   because the merged value then has one definition and its own name.
+   `if c { x = 10 } else { x = 20 }` followed by a use of `x` is a block
+   parameter at the join taking `10` on one edge and `20` on the other.
+9b. **A block parameter is a value like any other.** Value space is
+   `ValueId` = parameter | block parameter | temp (`include/zl/mir/value.hpp`),
+   so def-use, liveness and constant analysis work over one kind of thing rather
+   than three. A use of a block parameter must be dominated by its block, and
+   every *normal* predecessor must supply one argument per parameter, of the
+   parameter's type. Unwind edges supply none: a catch block is entered by an
+   exception, not by a decision about what to pass it.
+9c. **The entry block has no parameters** — nothing can hand it a value.
 10. **Parameters stay SSA unless the body writes, moves, or borrows them.** A
     read-only parameter is a `Param` operand. Promoting every parameter to a
     slot would force `this` — and every read-only binding — through storage that
@@ -138,6 +158,20 @@ The verifier enforces all of these. They are the contract a backend may rely on.
 16. **Predecessor relationships are consistent.** A block named as a successor
     must list the edge, and vice versa. The verifier checks both directions.
 17. **The entry block has no predecessors.**
+17a. **Control flow is queryable, not just checkable.** `ControlFlowGraph`
+   (`include/zl/mir/analysis.hpp`) answers predecessors/successors (normal and
+   unwind, kept apart), reachability, reverse post-order, immediate dominators,
+   dominance, dominator-tree children, dominance frontiers and dead blocks.
+   Normal and unwind edges stay distinct throughout: an unwind target is
+   reachable but is *not* dominated by the block that names it, so mixing them
+   would make every catch block look like it dominates the code that catches.
+17b. **Data flow is derived, never stored in the IR.** `include/zl/mir/dataflow.hpp`
+   provides one definition of "a use" (`forEachValueUse`), def-use chains
+   (`DefUseInfo`), liveness over slots and values (`LivenessAnalysis`), a
+   value-based constant analysis (`ConstantAnalysis`), a generic monotone solver
+   (`solveForward`/`solveBackward`) and named reachability helpers. The analyses
+   live apart from the IR so a pass can ask a question without the answer being
+   cached in a structure that can go stale.
 18. **A branch condition is `bool`.** Where semantic analysis left a condition's
     type unknown — a call through a bare `func` — the lowerer records the
     required type with an explicit `Refine` rather than branching on an untyped
@@ -312,7 +346,8 @@ Notable choices:
   a subject with a side effect cannot run once per arm and a guard that
   reassigns the subject's variable cannot change what a later arm compares
   against. Arm bodies store into a result slot the join block reads back — the
-  same join mechanism `try` uses, since this IR has no phi. A type pattern emits
+  same join mechanism `try` uses, and the shape `promoteSlotsToBlockParameters`
+  rewrites into a block parameter once the arms are simple enough. A type pattern emits
   `TypeTest` and then `Refine`s both the arm's own binding and the subject
   identifier the body keeps spelling, which is what narrows `int|string` to
   `int` inside an `int n =>` arm. The non-exhaustive fallthrough raises
@@ -336,6 +371,58 @@ not guessing in the lowerer.
 
 ---
 
+## Explicit data flow
+
+Lowering emits the *memory* form of ZL's mutable locals — `store` on each path,
+`load` where the value is needed — because that is what the language means and it
+needs no analysis to be correct. It leaves the merge implicit. `ssa.hpp` turns
+that into the value form:
+
+```cpp
+SsaPromotionReport promoteSlotsToBlockParameters(Function& function);
+```
+
+The algorithm is the classic one, and it is built entirely out of the machinery
+in `analysis.hpp`:
+
+1. **Eligibility.** A slot is considered only when nothing but `Load`/`Store`
+   touches it (no `Move`, `Drop`, `Borrow`, `EndBorrow` — those are memory
+   management, not values), its storage is plain GC, it is not a catch binding,
+   and the function has no exception-handler chains at all. The last one is not
+   laziness: an unwind edge is a path the dominator tree does not model, so "the
+   value reaching a catch block" is not a question this construction can answer.
+2. **Definite assignment**, as a forward must-analysis over `solveForward`. A
+   read may be rewritten into a value only where the slot is written on *every*
+   path reaching it; otherwise the value form would name a value that does not
+   exist. (The fact has to be the two-valued "assigned on all paths", not "the
+   set of blocks that wrote" — the latter intersects to empty at a join reached
+   from two different writers, which is precisely the case being converted.)
+3. **Placement** at the iterated dominance frontier of the writing blocks — the
+   join points where two definitions meet. A parameter is kept only when its
+   block is definitely assigned on entry, i.e. when every incoming edge really
+   has something to pass; a loop header whose back edge defines a value but whose
+   entry edge does not is therefore declined, not given an unpassable parameter.
+4. **Renaming** by a depth-first walk of the dominator tree with explicit
+   enter/exit actions, so a block's pushes are popped when the walk leaves its
+   subtree and a sibling never sees a value that does not reach it. Each `Load`
+   becomes its current value (uses of the load's result are rewritten), each
+   `Store` updates it, and every successor's edge argument is filled in as the
+   predecessor is visited.
+
+Promotion runs on a **copy** and is committed only if it completes, so a shape
+the algorithm cannot handle leaves the function exactly as it was. It is
+fail-closed in the same sense the bytecode backend is: declining is always
+allowed, a half-rewrite never is.
+
+The bytecode backend consumes both forms. It has no phi instruction available, so
+a block parameter is lowered as the memory form of itself: each predecessor
+stores the argument into that parameter's own local before transferring, and the
+block reads it. Values and slots are interchangeable in meaning, so this is a
+faithful translation — and it is what makes `ZL_MIR_PROMOTE=1 zl --mir-vm` a
+differential check of the promotion itself.
+
+---
+
 ## Verifier
 
 `verifyModule(module)` checks a function in this order, because later stages
@@ -344,12 +431,23 @@ assume earlier ones held:
 1. `checkSignature` — parameters, return type, `this`, type parameters.
 2. `collectDefinitions` — SSA uniqueness and temp→slot provenance.
 3. `checkControlFlow` — terminators, block references, predecessor consistency,
-   reachability, entry-block shape.
+   reachability, entry-block shape, and the block-parameter rules:
+   one definition per parameter id, no parameters on the entry block, a
+   non-void typed parameter, exactly one argument per parameter per normal
+   incoming edge with an assignable type, and no arguments on a terminator that
+   transfers nowhere. An invalid SSA/data-flow structure is reported as an error
+   naming the block and the edge, so a bad merge is a deterministic diagnostic
+   rather than a backend surprise.
 4. `checkInstructions` — operand counts, operand types, result types, opcode
    shapes, call signatures, field and index access, ownership rules.
-5. `checkDominance` — every temp use is dominated by its definition.
+5. `checkDominance` — every temp use is dominated by its definition, and every
+   block-parameter use is dominated by the block that defines it.
 6. `checkOwnershipFlow` — a fixpoint over reverse postorder tracking
    `{moved, borrows}`.
+
+The verifier is also the safety net for the construction pass: `--emit-ssa`
+re-runs `verifyModule` after promoting and refuses to print MIR that does not
+verify.
 
 Module level, it additionally checks for duplicate function names, positional id
 consistency, the entry point, and static field layout.
@@ -359,6 +457,47 @@ private, and the two are not identical: MIR's does not model ZL's collection
 conversion rules (`Set<T>` against bare `set`, list/set interchangeability when
 generics agree). That is a known gap, not an oversight — widening it means
 exposing the checker's rules at the right layer rather than duplicating them.
+
+Subtyping is decided from the module's type tables, and it follows **all three**
+subtype edges the language has:
+
+| edge | recorded in |
+| --- | --- |
+| `class` → `class` (`extends`) | `ClassLayout::parent` |
+| `class` → `interface` (`implements`) | `ClassLayout::interfaces` |
+| `interface` → `interface` (`extends`) | `InterfaceInfo::bases` |
+
+Leaving any one out rejects a legal program rather than merely missing an
+optimisation. `Shape masked = new Circle(...)` is the ordinary way to write a
+polymorphic local and needs the second edge; `Named n = shape` for `interface
+Shape extends Named` needs the third, because the store's value type is an
+*interface* and there is no class to hang the relationship on. The search is a
+breadth-first walk with a visited set — either hierarchy can contain a diamond —
+and a step guard, since both tables are input data rather than a guarantee.
+
+### Interfaces are contracts, not classes
+
+An `interface` declaration gets no `ClassLayout`: it has no fields, no instance
+layout and no dispatch row, and putting it in `Module::classes` would make the
+backend build reflection metadata and vtable rows for a type that can never be
+instantiated. What it gets instead is an `InterfaceInfo`, which records the two
+things the rest of the IR actually needs:
+
+- **its bases**, for assignability (above); and
+- **its method signatures**, because a call through an interface-typed receiver
+  still has to be dispatched. Dispatching from the interface's own declaration
+  is the exact answer; inferring it from whichever class happens to implement
+  the interface would be a guess, and the interface is the only thing that fixes
+  the signature the call must match.
+
+Generics are not currently part of this: interfaces take no type parameters in
+this language, so the recorded signatures are concrete types.
+
+Member **visibility** is carried into MIR too (`MemberAccess` on `FieldLayout`
+and `Function`). It is not bookkeeping: `Type.fields()` prints each field's
+access, so a backend with nothing to consult prints `public` for a `private`
+field and the program's output changes. Reflection metadata is program output,
+which makes an omitted part of it a miscompile rather than a missing feature.
 
 An **unsubstituted generic parameter is compatible with anything**. Inside a
 template, `T` stands for some type that is not knowable at verification time, so
@@ -395,9 +534,25 @@ func Hello.main()($0 this:Hello): void
   edges: b1->b2 b2->b3 b2->b4 b3->b5 b4->b5
 ```
 
-`$n` is a parameter, `%n` a temp, `sn` a slot, `bn` a block. Generic templates
-are marked `; generic-template`, constructors `; constructor`, and an
-unlowered body `; incomplete`.
+`$n` is a parameter, `%n` a temp, `^n` a block parameter, `sn` a slot, `bn` a
+block. Generic templates are marked `; generic-template`, constructors
+`; constructor`, and an unlowered body `; incomplete`.
+
+With block parameters (after `--emit-ssa`, see below), the same function shows
+the merge as a value — a parameter on the join block and one argument per
+incoming edge:
+
+```
+  b2(^1 x$1:int):
+    %2:string = add "x=":string, ^1:int
+    return
+  b3:
+    jump b2(20:int)
+  b4:
+    jump b2(10:int)
+```
+
+---
 
 ---
 
@@ -406,7 +561,18 @@ unlowered body `; incomplete`.
 ```bash
 zl --emit-mir out.mir program.zl   # write the textual MIR
 zl --emit-mir - program.zl         # print it to stdout
+zl --emit-ssa out.mir program.zl   # promote locals to block parameters first
+zl --emit-ssa - program.zl         # and check what came out
 ```
+
+`--emit-ssa` runs `promoteSlotsToBlockParameters` over every function, then
+re-verifies before printing: a promotion that produced invalid MIR is reported
+rather than emitted. `ZL_MIR_SSA_VERBOSE=1` adds one line per declined slot
+saying why. `--mir-vm` runs the same pass when `ZL_MIR_PROMOTE=1` is set, which
+is how the backend is checked to behave identically on both forms - see
+`tools/mir_promotion_diff.sh`, which does exactly that comparison across the
+example corpus (27 identical, 0 differing; the programs the bytecode backend
+cannot run yet are skipped as uninformative).
 
 Exit codes: `0` verified, `2` bad usage, `3` stdlib version mismatch, `4`
 verification failed (the module is not written), `5` the output could not be
@@ -421,13 +587,24 @@ errors, and a module with notes can still verify.
   and checks the verifier rejects each class of malformed module. A
   lowering-only test could never reach most of these shapes, because the builder
   refuses to produce them.
-- `tests/mir_lowering_tests.cpp` (`zl-mir-lowering-tests`) — 29 regressions.
+- `tests/mir_lowering_tests.cpp` (`zl-mir-lowering-tests`) — 33 regressions.
   Drives the real pipeline on small programs and asserts on the MIR that comes
-  out — including the specific properties an earlier lowerer got wrong.
+  out — including the specific properties an earlier lowerer got wrong, and the
+  end-to-end merge (`if/else` writing one variable, then read) coming out as a
+  block parameter with one argument per edge, interface widening verifying, and
+  member visibility surviving into the module.
+- `tests/mir_ssa_tests.cpp` (`zl-mir-ssa-tests`) — 27 regressions. Covers the
+  CFG queries (predecessors/successors, reachability, dominance, dominator tree,
+  dominance frontiers, dead blocks), the data-flow layer (def-use, liveness,
+  constants), every way a block parameter or edge argument can be malformed, and
+  the promotion pass including the slots it must *decline* and the fact that a
+  declined promotion leaves the function untouched.
 
 Lowering is also exercised across `examples/`: every file is lowered and
-verified. 54 of the 57 lower and verify completely; the other 3 verify with
-notes. That count is the measure of coverage.
+verified. 56 of the 59 lower and verify completely; the other 3 verify with
+notes (8 notes between them). That count is the measure of coverage — and
+because `--emit-ssa` re-verifies after promoting, every one of the 59 also
+promotes and re-verifies clean.
 
 The 8 remaining notes are all one root cause: a bare `func` parameter.
 `applyTwice(func f, int x)` carries no signature, so semantic analysis types a

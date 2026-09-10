@@ -228,4 +228,9 @@ std::vector<BlockId> Terminator::successors() const {
     return out;
 }
 
+const std::vector<Operand>& Terminator::argumentsFor(std::size_t index) const {
+    static const std::vector<Operand> empty;
+    return index < edgeArguments.size() ? edgeArguments[index] : empty;
+}
+
 } // namespace zl::mir

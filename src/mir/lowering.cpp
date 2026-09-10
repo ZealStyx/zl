@@ -1715,7 +1715,32 @@ void collectLambdas(const zl::AstNode* node, LoweringContext& ctx, const std::st
 
 void declareLayouts(LoweringContext& ctx) {
     for (const auto& declaration : ctx.program.declarations) {
-        if (declaration->kind == zl::NodeKind::ClassDecl) {
+        if (declaration->kind == zl::NodeKind::InterfaceDecl) {
+            // Record the interface hierarchy and nothing else. An interface has
+            // no fields, no dispatch rows and no instance layout, so giving it a
+            // ClassLayout would put a phantom class in the backend's reflection
+            // and dispatch tables. The one fact the rest of the IR needs is
+            // which contract entails which other one, because that decides
+            // whether a value of one interface type may be used where another is
+            // expected: `Named n = shape` for `interface Shape extends Named`.
+            const auto& iface = static_cast<const zl::InterfaceDecl&>(*declaration);
+            InterfaceInfo& info = ctx.builder.addInterface(iface.name);
+            info.bases = iface.extendsNames;
+            info.location.line = static_cast<std::uint32_t>(iface.line);
+            // An interface declares signatures, not bodies. They are recorded so
+            // a call through an interface-typed receiver can be dispatched from
+            // the interface's own declaration.
+            TypeConverter ifaceConverter{ctx.builder.types(), kNoTypeParams};
+            for (const auto& signature : iface.methods) {
+                InterfaceMethod method;
+                method.name = signature.name;
+                for (const auto& param : signature.params) {
+                    method.parameterTypes.push_back(ifaceConverter.fromAnnotation(param.type));
+                }
+                method.returnType = ifaceConverter.fromAnnotation(signature.returnType);
+                info.methods.push_back(std::move(method));
+            }
+        } else if (declaration->kind == zl::NodeKind::ClassDecl) {
             const auto& cls = static_cast<const zl::ClassDecl&>(*declaration);
             ClassLayout& layout = ctx.builder.addClassLayout(cls.name);
             layout.typeParameters = cls.typeParams;
@@ -1732,6 +1757,9 @@ void declareLayouts(LoweringContext& ctx) {
                                                          : ctx.builder.types().unknownType();
                 fieldLayout.ownership = field.ownership;
                 fieldLayout.isStatic = field.isStatic;
+                fieldLayout.access = field.access == zl::AccessModifier::PRIVATE    ? MemberAccess::Private
+                                     : field.access == zl::AccessModifier::PROTECTED ? MemberAccess::Protected
+                                                                                     : MemberAccess::Public;
                 layout.fields.push_back(fieldLayout);
                 // A `static` member is module-level storage, not per-instance
                 // state, so it is also declared as a MIR static. Without this the
@@ -1777,6 +1805,11 @@ void declareFunction(LoweringContext& ctx, const zl::FunctionDecl& function, con
     fb.setConstructor(function.isConstructor);
     fb.setStatic(function.isStatic);
     fb.setOperator(function.isOperator);
+    // Visibility is part of the member's identity for reflection, so it is
+    // recorded rather than defaulted: `DEFAULT` (no modifier) is public.
+    fb.setAccess(function.access == zl::AccessModifier::PRIVATE    ? MemberAccess::Private
+                 : function.access == zl::AccessModifier::PROTECTED ? MemberAccess::Protected
+                                                                    : MemberAccess::Public);
     fb.setLocation(SourceLocation{{}, static_cast<std::uint32_t>(function.line), 0});
     if (!typeParams.empty()) fb.setGenericTemplate(typeParams);
     for (const auto& annotation : function.annotations) {
