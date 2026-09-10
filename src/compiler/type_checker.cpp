@@ -514,7 +514,12 @@ DispatchSignature TypeChecker::dispatchSignature(const std::string& methodName, 
             !method.paramClassNames[i].empty()) {
             const std::string& className = method.paramClassNames[i];
             if (className.find('<') != std::string::npos) {
-                signature.parameters.push_back({DispatchTypeKind::GENERIC_OBJECT, {}});
+                // A concrete instantiation: keep the generic class's base name
+                // so declarations over different generic classes (`Option<int>`
+                // vs `List<int>`) never collapse into one dispatch identity.
+                const auto open = className.find('<');
+                signature.parameters.push_back({DispatchTypeKind::GENERIC_OBJECT,
+                                                className.substr(0, open)});
             } else {
                 signature.parameters.push_back({DispatchTypeKind::OBJECT, className});
             }
@@ -531,7 +536,7 @@ DispatchSignature TypeChecker::dispatchSignature(const std::string& methodName, 
             case ZlType::SET: signature.parameters.push_back({DispatchTypeKind::SET, {}}); break;
             case ZlType::MAP: signature.parameters.push_back({DispatchTypeKind::MAP, {}}); break;
             case ZlType::FUNCTION: signature.parameters.push_back({DispatchTypeKind::FUNCTION, {}}); break;
-            case ZlType::TASK: signature.parameters.push_back({DispatchTypeKind::GENERIC_OBJECT, {}}); break;
+            case ZlType::TASK: signature.parameters.push_back({DispatchTypeKind::GENERIC_OBJECT, "Task"}); break;
             case ZlType::UNION: signature.parameters.push_back({DispatchTypeKind::OBJECT, method.paramClassNames.at(i)}); break;
             case ZlType::NIL:
             case ZlType::OBJECT:

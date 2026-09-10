@@ -22,6 +22,21 @@ enum class DispatchTypeKind {
     GENERIC_OBJECT,
 };
 
+// One dispatched parameter type. `className` is the erased runtime identity:
+// the declaring name for a plain class, and - for a concrete generic
+// instantiation such as `Option<int>` - the generic class's base name
+// ("Option"), because the runtime erases instantiations of one generic class
+// into a single body with per-storage contracts. It is empty only where the
+// type is genuinely not a single class at runtime: a class's own type
+// parameter, `unknown`, `nil`, or a union-of-erased shapes.
+//
+// Keeping the base name is what keeps distinct declarations distinct:
+// `label(Option<int>)` and `label(List<int>)` used to describe to the same
+// `label(object)` and overwrite each other in every function table keyed by
+// that name, binding calls to whichever declaration registered last. With the
+// base name they are `label(Option)` and `label(List)` - still one body per
+// declaration (never per instantiation), but never one declaration silently
+// shadowing another.
 struct DispatchType {
     DispatchTypeKind kind{DispatchTypeKind::OBJECT};
     std::string className;
@@ -56,9 +71,9 @@ struct DispatchSignature {
                 case DispatchTypeKind::MAP: result += "map"; break;
                 case DispatchTypeKind::FUNCTION: result += "func"; break;
                 case DispatchTypeKind::OBJECT:
+                case DispatchTypeKind::GENERIC_OBJECT:
                     result += p.className.empty() ? "object" : p.className;
                     break;
-                case DispatchTypeKind::GENERIC_OBJECT: result += "object"; break;
             }
         }
         result += ")";

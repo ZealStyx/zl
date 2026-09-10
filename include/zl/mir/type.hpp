@@ -57,6 +57,19 @@ enum class TypeKind : std::uint8_t {
     Task,
     // `Shared<T>`; `arguments` holds the shared payload type.
     Shared,
+    // `Option<T>` — the builtin sum of a payload and absence. `arguments`
+    // holds the payload type. `Some<T>`/`None<T>` are the *class* spellings
+    // (Object kinds); they are recognisably the same sum through
+    // optionPayloadFor(), and `Some<int>` is assignable to `Option<int>`.
+    // Keeping `Option<int>` a kind of its own (rather than an Object that
+    // happens to be named "Option") is what lets a backend see "this value is
+    // a payload-or-nothing" without string-matching class names.
+    Option,
+    // `Result<T,E>` — the builtin sum of a success value and an error value.
+    // `arguments` holds [ok, error]. `Ok<T,E>`/`Err<T,E>` are the class
+    // spellings (Object kinds), related through resultPartsFor() and
+    // assignability the same way Some/None relate to Option.
+    Result,
     // A callable value: `signature` is populated, `name` is empty.
     Function,
     // `A|B|...`; `arguments` holds the member types, kept sorted and deduped
@@ -76,8 +89,8 @@ enum class TypeKind : std::uint8_t {
 // True for the value-carrying primitive types: bool, int, double, string.
 [[nodiscard]] bool isPrimitiveKind(TypeKind kind) noexcept;
 // True for types that hold a heap reference and are therefore nullable in ZL:
-// collections, objects, tasks, shared cells, functions. Primitives and Nil
-// are not.
+// collections, objects, tasks, shared cells, options, results, functions.
+// Primitives and Nil are not.
 [[nodiscard]] bool isReferenceKind(TypeKind kind) noexcept;
 // True for the numeric types ZL's arithmetic and comparison rules accept.
 [[nodiscard]] bool isNumericKind(TypeKind kind) noexcept;
@@ -148,6 +161,69 @@ struct Type {
 // while construction rejects it, which is what this predicate exists to stop.
 [[nodiscard]] bool isCollectionType(const Type& type) noexcept;
 
+// ---------------------------------------------------------------------------
+// Sum types: Option / Result and their class spellings
+// ---------------------------------------------------------------------------
+//
+// ZL spells a sum two ways. `Option<int>` in source is the sum type itself;
+// `new Some<int>(42)` and `new None<int>()` construct the *classes* that
+// implement it (`Some<T> extends Option<T>`, `None<T> extends Option<T>`, and
+// likewise Ok/Err for Result). A MIR type coming straight out of a
+// constructor call is therefore an Object named "Some", while the same value
+// passed to a parameter declared `Option<int>` is the Option kind - and both
+// must be readable as the same sum or every unwrap-shaped optimisation would
+// need a special case per spelling.
+//
+// These predicates are that single answer, for both questions. They accept
+// the kind forms (Option/Result) and the class spellings (Some/None/Ok/Err)
+// by name; anything else is an ordinary class and reports "not a sum".
+
+// True for `Option<T>` (the kind) and for `Some<T>`/`None<T>` (Object kinds
+// carrying those names).
+[[nodiscard]] bool isOptionType(const Type& type) noexcept;
+// True for `Result<T,E>` (the kind) and for `Ok<T,E>`/`Err<T,E>`.
+[[nodiscard]] bool isResultType(const Type& type) noexcept;
+// True for either sum family, in either spelling.
+[[nodiscard]] bool isSumType(const Type& type) noexcept;
+
+// The payload type of an Option-shaped type: the payload for `Option<T>`,
+// `Some<T>`, `None<T>`. Returns 0 for anything else, and for a sum whose
+// argument is missing or unresolved.
+[[nodiscard]] std::uint32_t optionPayloadFor(const Type& type) noexcept;
+
+// The two halves of a Result-shaped type: [ok, error] for `Result<T,E>`,
+// `Ok<T,E>`, `Err<T,E>`. Returns {0, 0} for anything else.
+struct ResultParts {
+    std::uint32_t ok{0};
+    std::uint32_t error{0};
+};
+[[nodiscard]] ResultParts resultPartsFor(const Type& type) noexcept;
+
+// True when `from` (an Option/Result-shaped type in either spelling) can be
+// used where `to` is expected, by the sum relation alone: the two must be the
+// same family, with assignable payloads. Nominal subclass edges beyond the
+// sum relation (e.g. a user class extending Option) are the caller's question,
+// because they need the module's class layouts, which live above the type
+// table. `assignableArg` decides payload compatibility; pass the verifier's
+// assignable (or your own) so nesting composes - this is what makes
+// `Some<List<int>>` assignable to `Option<list<int>>` and
+// `Ok<Option<int>, string>` assignable to `Result<Option<int>,string>`.
+template <typename Assignable>
+[[nodiscard]] bool sumAssignable(const Type& from, const Type& to, const Assignable& assignableArg) noexcept {
+    if (isOptionType(from) && isOptionType(to)) {
+        const std::uint32_t fromPayload = optionPayloadFor(from);
+        const std::uint32_t toPayload = optionPayloadFor(to);
+        return fromPayload != 0 && toPayload != 0 && assignableArg(fromPayload, toPayload);
+    }
+    if (isResultType(from) && isResultType(to)) {
+        const ResultParts fromParts = resultPartsFor(from);
+        const ResultParts toParts = resultPartsFor(to);
+        return fromParts.ok != 0 && toParts.ok != 0 && fromParts.error != 0 && toParts.error != 0 &&
+               assignableArg(fromParts.ok, toParts.ok) && assignableArg(fromParts.error, toParts.error);
+    }
+    return false;
+}
+
 struct TypeHash {
     [[nodiscard]] std::size_t operator()(const Type& type) const noexcept;
 };
@@ -199,6 +275,12 @@ public:
     [[nodiscard]] std::uint32_t arrayType(std::uint32_t element, std::optional<int> size) const;
     [[nodiscard]] std::uint32_t taskType(std::uint32_t payload) const;
     [[nodiscard]] std::uint32_t sharedType(std::uint32_t payload) const;
+    // `Option<T>`: the builtin payload-or-nothing sum. `Option<int>` and a
+    // hypothetical Object named "Option" with argument `int` are different
+    // ids: the kind is semantic, and a backend may rely on it.
+    [[nodiscard]] std::uint32_t optionType(std::uint32_t payload) const;
+    // `Result<T,E>`: [ok, error].
+    [[nodiscard]] std::uint32_t resultType(std::uint32_t ok, std::uint32_t error) const;
     [[nodiscard]] std::uint32_t functionType(FunctionSignature signature) const;
     [[nodiscard]] std::uint32_t unionType(std::vector<std::uint32_t> members) const;
     [[nodiscard]] std::uint32_t typeParam(const std::string& name) const;
