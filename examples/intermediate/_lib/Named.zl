@@ -1,0 +1,6 @@
+// Shared module source for Interfaces.zl - not a runnable example.
+// A base interface, so Shape can extend it and Interfaces.zl can exercise the
+// widening from a derived interface to the one it extends.
+interface Named {
+    name(): string
+}

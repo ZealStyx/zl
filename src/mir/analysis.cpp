@@ -44,6 +44,7 @@ ControlFlowGraph::ControlFlowGraph(const Function& function) : function_(functio
     computeReachability();
     computeReversePostOrder();
     computeDominators();
+    computeDominanceFrontiers();
 }
 
 const std::vector<BlockId>& ControlFlowGraph::successors(BlockId id) const {
@@ -178,6 +179,105 @@ void ControlFlowGraph::computeDominators() {
             }
         }
     }
+}
+
+void ControlFlowGraph::computeDominanceFrontiers() {
+    const std::size_t count = function_.blocks.size();
+    // Position in reverse post-order. `reversePostOrder_` already runs
+    // entry-first over reachable blocks; numbering it here keeps the dominance
+    // frontier loop from searching the order vector repeatedly.
+    reversePostOrderNumbers_.assign(count, -1);
+    for (std::size_t i = 0; i < reversePostOrder_.size(); ++i) {
+        reversePostOrderNumbers_[indexOf(reversePostOrder_[i])] = static_cast<int>(i);
+    }
+
+    dominatorTreeChildren_.assign(count, {});
+    for (std::size_t i = 0; i < count; ++i) {
+        const BlockId block = order_[i];
+        const BlockId idom = immediateDominator(block);
+        if (idom == kNoBlock || idom == block) continue; // entry or unreachable
+        dominatorTreeChildren_[indexOf(idom)].push_back(block);
+    }
+    for (auto& children : dominatorTreeChildren_) {
+        std::sort(children.begin(), children.end());
+        children.erase(std::unique(children.begin(), children.end()), children.end());
+    }
+
+    // Textbook dominance frontier, in the formulation that walks a join's
+    // predecessors up to their common dominator:
+    //
+    //     for every join block b, for every predecessor p of b, add b to the
+    //     frontier of every block on the way from p up to idom(b).
+    //
+    // The entry block can never appear as a member of a frontier here: the walk
+    // stops at `idom(b)` and an entry has no predecessors to start from. (The
+    // successor-side formulation gets this wrong unless the root is special
+    // cased, which is a bug that shows up as a block parameter on the entry.)
+    //
+    // Only normal predecessors count. A catch block is entered by an exception,
+    // not by falling through, so it is not a join this construction can place a
+    // phi at.
+    dominanceFrontiers_.assign(count, {});
+    for (std::size_t i = 0; i < count; ++i) {
+        const BlockId block = order_[i];
+        if (!isReachable(block)) continue;
+        std::vector<BlockId> predecessors = predecessors_[i];
+        std::sort(predecessors.begin(), predecessors.end());
+        predecessors.erase(std::unique(predecessors.begin(), predecessors.end()), predecessors.end());
+        if (predecessors.size() < 2) continue; // not a join
+        const BlockId stop = immediateDominator(block);
+        for (BlockId predecessor : predecessors) {
+            BlockId runner = predecessor;
+            // A join whose immediate dominator is itself (the entry, or an
+            // unreachable block) has no frontier to contribute.
+            if (stop == kNoBlock || !isReachable(runner)) continue;
+            std::size_t guard = 0;
+            while (runner != kNoBlock && runner != stop && guard++ <= count + 1) {
+                std::vector<BlockId>& frontier = dominanceFrontiers_[indexOf(runner)];
+                if (std::find(frontier.begin(), frontier.end(), block) == frontier.end()) {
+                    frontier.push_back(block);
+                }
+                const BlockId next = immediateDominator(runner);
+                if (next == runner) break;
+                runner = next;
+            }
+        }
+    }
+    for (auto& frontier : dominanceFrontiers_) {
+        std::sort(frontier.begin(), frontier.end());
+        frontier.erase(std::unique(frontier.begin(), frontier.end()), frontier.end());
+    }
+}
+
+const std::vector<BlockId>& ControlFlowGraph::dominatorTreeChildren(BlockId id) const {
+    const auto it = indexOf_.find(id);
+    return it == indexOf_.end() ? kEmpty : dominatorTreeChildren_[it->second];
+}
+
+const std::vector<BlockId>& ControlFlowGraph::dominanceFrontier(BlockId id) const {
+    const auto it = indexOf_.find(id);
+    return it == indexOf_.end() ? kEmpty : dominanceFrontiers_[it->second];
+}
+
+int ControlFlowGraph::reversePostOrderNumber(BlockId id) const {
+    const auto it = indexOf_.find(id);
+    if (it == indexOf_.end() || it->second >= reversePostOrderNumbers_.size()) return -1;
+    return reversePostOrderNumbers_[it->second];
+}
+
+std::vector<BlockId> ControlFlowGraph::deadBlocks() const {
+    std::vector<BlockId> dead;
+    for (const auto& block : function_.blocks) {
+        if (reachable_.count(block.id)) continue;
+        if (reachableWithUnwind_.count(block.id)) continue;
+        dead.push_back(block.id);
+    }
+    std::sort(dead.begin(), dead.end());
+    return dead;
+}
+
+bool ControlFlowGraph::strictlyDominates(BlockId dominator, BlockId block) const {
+    return dominator != block && dominates(dominator, block);
 }
 
 BlockId ControlFlowGraph::immediateDominator(BlockId id) const {

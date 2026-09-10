@@ -1,6 +1,11 @@
 // Shared module source for Interfaces.zl - not a runnable example.
 // Interface members are declared WITHOUT the `func` keyword.
-interface Shape {
+//
+// An interface may extend other interfaces (the base ones are listed after
+// `extends`, comma-separated). An implementer inherits every signature in the
+// hierarchy, so Circle below must supply `name()` from Named as well as
+// `area()` from Shape.
+import Named
+interface Shape extends Named {
     area(): double
-    name(): string
 }

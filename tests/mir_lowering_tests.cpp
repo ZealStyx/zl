@@ -13,6 +13,8 @@
 #include "zl/compiler/type_checker.hpp"
 #include "zl/mir/lowering.hpp"
 #include "zl/mir/printer.hpp"
+#include "zl/mir/dataflow.hpp"
+#include "zl/mir/ssa.hpp"
 #include "zl/mir/verifier.hpp"
 
 #include <cstdio>
@@ -768,6 +770,267 @@ class MatchWildcard {
     std::cout << "mir lowering match wildcard: PASS\n";
 }
 
+// ---------------------------------------------------------------------------
+// Interfaces: hierarchy, and visibility recorded well enough for reflection
+// ---------------------------------------------------------------------------
+
+// `interface Shape extends Named` and then `Named n = shape`: widening from a
+// derived interface to the interface it extends. The store's value type is
+// `Shape`, which is an interface, so the verifier's subtype walk has to follow
+// interface-to-interface edges - there is no class named Shape to hang them on.
+//
+// This lower-and-verify used to fail with
+//   "store of Shape into slot ... of type Named"
+// on a program the reference path runs correctly.
+void testInterfaceWideningVerifies() {
+    auto lowered = lower("InterfaceWidening", R"ZL(
+interface Named {
+    name(): string
+}
+
+interface Shape extends Named {
+    area(): double
+}
+
+class Circle implements Shape {
+    public double radius
+
+    func Circle(double radius): void {
+        this.radius = radius
+    }
+
+    @Override
+    public func area(): double {
+        return 3.0 * this.radius * this.radius
+    }
+
+    @Override
+    public func name(): string {
+        return "circle"
+    }
+}
+
+class InterfaceWidening {
+    static func widen(): string {
+        Shape shape = new Circle(2.0)
+        Named named = shape
+        return named.name()
+    }
+}
+)ZL");
+    require(lowered.ok, "interface widening should lower and verify: " + lowered.errors);
+    require(zl::mir::verifyModule(lowered.module).ok(), "the interface hierarchy must verify");
+
+    // The hierarchy itself is recorded, because it is the only thing that
+    // answers whether a Shape may be used as a Named.
+    const auto* named = lowered.module.interfaceInfo("Named");
+    const auto* shape = lowered.module.interfaceInfo("Shape");
+    require(named != nullptr, "the base interface should be recorded");
+    require(shape != nullptr, "the derived interface should be recorded");
+    if (shape != nullptr) {
+        require(shape->bases.size() == 1 && shape->bases[0] == "Named",
+                "`interface Shape extends Named` should record Named as a base");
+        const auto* area = shape->method("area");
+        require(area != nullptr, "the interface's own method signature should be recorded");
+        if (area != nullptr) {
+            require(area->parameterTypes.empty(), "area() takes no parameters");
+        }
+    }
+    if (named != nullptr) {
+        require(named->method("name") != nullptr,
+                "an interface method signature should be recorded for dispatch");
+    }
+    // An interface is a contract, not a class: it must not appear as a layout,
+    // or the backend would build reflection and dispatch rows for a type that
+    // can never be instantiated.
+    require(lowered.module.classLayout("Shape") == nullptr,
+            "an interface should not be recorded as a class layout");
+    std::cout << "lowering interface widening: PASS\n";
+}
+
+// Member visibility has to survive into MIR. It is observable - Type.fields()
+// prints each field's access - so a backend with nothing to consult prints
+// `public` for a `private` field and the program's output silently changes.
+void testMemberVisibilityIsRecorded() {
+    auto lowered = lower("MemberVisibility", R"ZL(
+class MemberVisibility {
+    public int shown
+    private string hidden
+    protected double guarded
+
+    static func total(): int {
+        return 1
+    }
+}
+)ZL");
+    require(lowered.ok, "member visibility should lower: " + lowered.errors);
+    const auto* layout = lowered.module.classLayout("MemberVisibility");
+    require(layout != nullptr, "the class should have a layout");
+    if (layout == nullptr) return;
+
+    const auto accessOf = [&](const std::string& field) {
+        const auto* f = layout->field(field);
+        return f == nullptr ? zl::mir::MemberAccess::Public : f->access;
+    };
+    require(layout->field("shown") != nullptr, "the public field should be recorded");
+    require(accessOf("shown") == zl::mir::MemberAccess::Public, "`public` should be public");
+    require(accessOf("hidden") == zl::mir::MemberAccess::Private, "`private` should be private");
+    require(accessOf("guarded") == zl::mir::MemberAccess::Protected, "`protected` should be protected");
+
+    const auto* total = findFunction(lowered, "MemberVisibility.total");
+    require(total != nullptr, "the static method should be lowered");
+    if (total != nullptr) {
+        require(total->access == zl::mir::MemberAccess::Public,
+                "a method's visibility should be recorded too");
+    }
+    std::cout << "lowering member visibility: PASS\n";
+}
+
+
+// ---------------------------------------------------------------------------
+
+void testBranchMergeBecomesBlockParameter() {
+    // The programme this whole representation exists to get right:
+    //
+    //     if condition { x = 10 } else { x = 20 }
+    //     return x
+    //
+    // Lowering produces the memory form (store on each arm, load after the
+    // join), which is correct but leaves the merge implicit. Promoting slots to
+    // block parameters has to turn it into one merged value at the join, with
+    // one argument per incoming edge, and the result must still verify.
+    auto lowered = lower("BranchMerge", R"ZL(
+class BranchMerge {
+    static func pick(bool condition): int {
+        var x = 0
+        if (condition) { x = 10 } else { x = 20 }
+        return x
+    }
+}
+)ZL");
+    requireClean(lowered, "a value written on two branches and read after the join");
+
+    const zl::mir::Function* before = findFunction(lowered, "BranchMerge.pick");
+    require(before != nullptr, "pick was not lowered");
+    if (before) {
+        std::size_t loads = 0;
+        for (const auto& block : before->blocks) {
+            for (const auto& instruction : block.instructions) {
+                if (instruction.opcode == zl::mir::Opcode::Load) ++loads;
+            }
+        }
+        require(loads != 0, "the fixture no longer lowers to the memory form, so it proves nothing");
+        require(before->blocks.size() >= 4, "expected a diamond with a join");
+    }
+
+    std::size_t promoted = 0;
+    for (auto& function : lowered.module.functions) {
+        promoted += zl::mir::promoteSlotsToBlockParameters(function).promotedSlots;
+    }
+    require(promoted != 0, "no slot was promoted, so the merge is still implicit");
+
+    // The rewrite has to leave verifiable MIR behind - that is the contract the
+    // whole pass rests on.
+    const auto report = zl::mir::verifyModule(lowered.module);
+    require(report.ok(), "promoted MIR did not verify:\n" + report.describe());
+
+    const zl::mir::Function* after = findFunction(lowered, "BranchMerge.pick");
+    require(after != nullptr, "pick disappeared during promotion");
+
+    // The merged value: exactly one block parameter, in the join, of the slot's
+    // type, read by the return, with one argument handed to it from each arm.
+    std::size_t parameterCount = 0;
+    const zl::mir::BasicBlock* join = nullptr;
+    for (const auto& block : after->blocks) {
+        if (block.parameters.empty()) continue;
+        parameterCount += block.parameters.size();
+        join = &block;
+    }
+    require(parameterCount == 1, "expected exactly one merged value, got " +
+                                     std::to_string(parameterCount));
+    if (join != nullptr) {
+        const zl::mir::BlockParamId parameter = join->parameters[0].id;
+        require(join->parameters[0].type == after->returnType,
+                "the merged value should carry the variable's type");
+        require(zl::mir::valueOf(join->terminator.value) == zl::mir::blockParamValue(parameter),
+                "the join should return the merged parameter, not a load");
+
+        std::size_t edges = 0;
+        bool sawTen = false;
+        bool sawTwenty = false;
+        for (const auto& block : after->blocks) {
+            const auto successors = block.terminator.successors();
+            for (std::size_t i = 0; i < successors.size(); ++i) {
+                if (successors[i] != join->id) continue;
+                const auto& arguments = block.terminator.argumentsFor(i);
+                if (arguments.size() != 1) continue;
+                ++edges;
+                const zl::mir::Constant* constant = lowered.module.constant(arguments[0].index);
+                if (constant && constant->kind == zl::mir::ConstKind::Int) {
+                    if (constant->intValue == 10) sawTen = true;
+                    if (constant->intValue == 20) sawTwenty = true;
+                }
+            }
+        }
+        require(edges == 2, "expected both arms to hand the join an argument, got " +
+                                std::to_string(edges));
+        require(sawTen && sawTwenty, "the arms should pass 10 and 20 to the merged value");
+    }
+
+    // And no store or load of the promoted slot survives anywhere in that
+    // function: the merge is now a value, not a cell.
+    if (after != nullptr) {
+        for (const auto& block : after->blocks) {
+            for (const auto& instruction : block.instructions) {
+                require(instruction.opcode != zl::mir::Opcode::Load &&
+                            instruction.opcode != zl::mir::Opcode::Store,
+                        "a load or store survived in the merged function:\n" +
+                            zl::mir::printFunction(lowered.module, *after));
+            }
+        }
+    }
+    std::cout << "mir lowering branch merge: PASS\n";
+}
+
+void testDataFlowQueriesAnswerForLoweredCode() {
+    // Def-use and liveness have to be answerable for real lowered programs, not
+    // only for hand-built fixtures.
+    const auto lowered = lower("FlowOnLowered", R"ZL(
+class FlowOnLowered {
+    static func sum(int n): int {
+        var total = 0
+        var i = 0
+        while (i < n) {
+            total = total + i
+            i = i + 1
+        }
+        return total
+    }
+}
+)ZL");
+    requireClean(lowered, "a loop accumulating into a local");
+    const zl::mir::Function* function = findFunction(lowered, "FlowOnLowered.sum");
+    require(function != nullptr, "sum was not lowered");
+    if (!function) return;
+
+    const zl::mir::DefUseInfo defUse(*function);
+    require(defUse.undefinedUses().empty(), "lowered MIR has a use with no definition");
+    require(!defUse.definitions().empty(), "lowered MIR has no definitions at all");
+
+    const zl::mir::LivenessAnalysis liveness(*function);
+    // The accumulator is live somewhere: it is stored and read back across the
+    // loop's back edge.
+    bool anyLiveSlot = false;
+    for (const auto& block : function->blocks) {
+        if (!liveness.liveSlotsIn(block.id).empty() || !liveness.liveSlotsOut(block.id).empty()) {
+            anyLiveSlot = true;
+            break;
+        }
+    }
+    require(anyLiveSlot, "no slot was reported live anywhere in a loop that uses one");
+    std::cout << "mir lowering data flow: PASS\n";
+}
+
 void testUnsupportedConstructStaysValid() {
     // `finally` is not lowered yet. The function must be marked incomplete and
     // noted, but the module still has to verify: a bail-out partway through a
@@ -881,6 +1144,11 @@ int main() {
     testMatchEnumMembersCompareByName();
     testMatchFallsThroughToAThrow();
     testMatchWildcardPrunesItsFallthrough();
+
+    testInterfaceWideningVerifies();
+    testMemberVisibilityIsRecorded();
+    testBranchMergeBecomesBlockParameter();
+    testDataFlowQueriesAnswerForLoweredCode();
 
     testUnsupportedConstructStaysValid();
     testWholeExampleCorpusShape();

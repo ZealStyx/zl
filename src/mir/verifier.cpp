@@ -255,15 +255,43 @@ private:
                                [&](std::uint32_t member) { return assignable(member, toId); });
         }
         if (from->kind == TypeKind::Object && to->kind == TypeKind::Object) {
-            // Walk the layout parent chain. Only the unparameterized base name
-            // is compared, which matches how the semantic model keys
+            // Walk every subtype edge a name can have. Only the unparameterized
+            // base name is compared, which matches how the semantic model keys
             // inheritance for instantiations.
+            //
+            // There are three such edges, and leaving any one out rejects a
+            // legal program rather than merely missing an optimisation:
+            //
+            //   class   --extends-->     class       (layout.parent)
+            //   class   --implements-->  interface   (layout.interfaces)
+            //   interface --extends-->   interface   (InterfaceInfo.bases)
+            //
+            // The first two are what makes `Shape masked = new Circle(...)`
+            // verify; the third is what makes `Named n = shape` verify when
+            // `interface Shape extends Named`. The search is breadth-first with
+            // a visited set, because diamonds in either hierarchy would
+            // otherwise be re-expanded, and a step guard because both tables are
+            // input data rather than a guarantee.
             if (baseName(from->name) != baseName(to->name)) {
-                const ClassLayout* current = module_.classLayout(from->name);
+                const std::string wanted = baseName(to->name);
+                std::vector<std::string> pending{from->name};
+                std::vector<std::string> seen;
                 std::size_t guard = 0;
-                while (current && guard++ < 64) {
-                    if (baseName(current->parent) == baseName(to->name)) return true;
-                    current = current->parent.empty() ? nullptr : module_.classLayout(current->parent);
+                while (!pending.empty() && guard++ < 256) {
+                    const std::string currentName = pending.back();
+                    pending.pop_back();
+                    if (std::find(seen.begin(), seen.end(), currentName) != seen.end()) continue;
+                    seen.push_back(currentName);
+                    if (baseName(currentName) == wanted) return true;
+                    if (const ClassLayout* current = module_.classLayout(currentName)) {
+                        if (!current->parent.empty()) pending.push_back(current->parent);
+                        for (const auto& implemented : current->interfaces) {
+                            pending.push_back(implemented);
+                        }
+                    }
+                    if (const InterfaceInfo* info = module_.interfaceInfo(currentName)) {
+                        for (const auto& base : info->bases) pending.push_back(base);
+                    }
                 }
                 return false;
             }
@@ -522,6 +550,7 @@ private:
             else warn(message, block.id, -1, block.location);
         }
 
+        checkBlockParameters();
         checkEdgesConsistency();
     }
 
@@ -643,6 +672,131 @@ private:
         }
     }
 
+    // --- block parameters and edge arguments ------------------------------
+    //
+    // A block parameter is a definition with no instruction behind it, so
+    // nothing in the instruction checks would catch a malformed one. These are
+    // the rules that make "the value a join block reads" well defined:
+    //
+    //   * one definition per parameter id, in exactly one block;
+    //   * a parameter's type is a real, non-void type;
+    //   * the entry block has none (nothing can hand it a value);
+    //   * every *normal* successor receives exactly as many arguments as the
+    //     target has parameters, each with the parameter's type;
+    //   * a terminator with no successors carries no arguments.
+    //
+    // An unwind edge gets no arguments on purpose: a catch block is entered by
+    // an exception, not by the throwing block deciding what to pass it.
+    void checkBlockParameters() {
+        std::unordered_map<BlockParamId, BlockId> definedIn;
+        for (const auto& block : function_.blocks) {
+            for (const auto& parameter : block.parameters) {
+                const std::string what = "block parameter ^" + std::to_string(parameter.id) +
+                                         " ('" + parameter.name + "')";
+                if (parameter.id == kNoBlockParam) {
+                    error("block b" + std::to_string(block.id) +
+                          " declares a block parameter with id 0; ids are 1-based", block.id, -1,
+                          block.location);
+                    continue;
+                }
+                const auto inserted = definedIn.emplace(parameter.id, block.id);
+                if (!inserted.second) {
+                    error(what + " is defined by both block b" +
+                          std::to_string(inserted.first->second) + " and block b" +
+                          std::to_string(block.id) + "; a value has one definition",
+                          block.id, -1, parameter.location);
+                    continue;
+                }
+                if (!validType(parameter.type, what.c_str(), block.id, -1, parameter.location)) continue;
+                const Type* type = typeOf(parameter.type);
+                if (type && type->kind == TypeKind::Void) {
+                    error(what + " cannot have type void", block.id, -1, parameter.location);
+                }
+                checkTypeParamScope(parameter.type, what, block.id, -1, parameter.location);
+            }
+            if (block.id == function_.entryBlock && !block.parameters.empty()) {
+                error("entry block b" + std::to_string(block.id) +
+                      " declares block parameters; nothing can supply them on entry",
+                      block.id, -1, block.location);
+            }
+        }
+
+        for (const auto& block : function_.blocks) {
+            const auto& terminator = block.terminator;
+            const auto successors = terminator.successors();
+            if (successors.empty()) {
+                if (!terminator.edgeArguments.empty()) {
+                    error("block b" + std::to_string(block.id) + " has a " +
+                          std::string(terminatorKindName(terminator.kind)) +
+                          " terminator that carries block-parameter arguments but transfers nowhere",
+                          block.id, -1, terminator.location);
+                }
+                continue;
+            }
+            // A block reached by falling through is given a value by this
+            // terminator, so the argument list has to be complete.
+            for (std::size_t i = 0; i < successors.size(); ++i) {
+                const BasicBlock* target = function_.block(successors[i]);
+                const std::string edge = "block b" + std::to_string(block.id) + " -> b" +
+                                         std::to_string(successors[i]);
+                const std::size_t expected = target ? target->parameters.size() : 0;
+                if (i >= terminator.edgeArguments.size()) {
+                    if (expected != 0) {
+                        error(edge + " supplies no arguments but block b" +
+                              std::to_string(successors[i]) + " has " + std::to_string(expected) +
+                              " block parameter(s)", block.id, -1, terminator.location);
+                    }
+                    continue;
+                }
+                const auto& arguments = terminator.edgeArguments[i];
+                if (arguments.size() != expected) {
+                    error(edge + " supplies " + std::to_string(arguments.size()) +
+                          " block-parameter argument(s) but block b" + std::to_string(successors[i]) +
+                          " has " + std::to_string(expected), block.id, -1, terminator.location);
+                    continue;
+                }
+                for (std::size_t a = 0; a < arguments.size(); ++a) {
+                    const auto& argument = arguments[a];
+                    const auto& parameter = target->parameters[a];
+                    const std::string what = edge + " argument " + std::to_string(a) + " for ^" +
+                                             std::to_string(parameter.id) + " ('" + parameter.name + "')";
+                    if (!checkOperand(argument, what, block.id, -1, terminator.location)) continue;
+                    if (!assignable(argument.type, parameter.type)) {
+                        error(what + " is " + render(argument.type) + " but the parameter is " +
+                              render(parameter.type), block.id, -1, terminator.location);
+                    }
+                }
+            }
+            if (terminator.edgeArguments.size() > successors.size()) {
+                error("block b" + std::to_string(block.id) + " supplies arguments for " +
+                      std::to_string(terminator.edgeArguments.size()) + " successors but has " +
+                      std::to_string(successors.size()), block.id, -1, terminator.location);
+            }
+        }
+
+        // Every normal predecessor must hand a parameter its value; a parameter
+        // whose block has a predecessor that never supplies it would read
+        // whatever was left behind on that path.
+        for (const auto& block : function_.blocks) {
+            if (block.parameters.empty()) continue;
+            for (BlockId pred : cfg_.predecessors(block.id)) {
+                const BasicBlock* predecessor = function_.block(pred);
+                if (!predecessor) continue; // reported elsewhere
+                const auto successors = predecessor->terminator.successors();
+                std::size_t edgeIndex = successors.size();
+                for (std::size_t i = 0; i < successors.size(); ++i) {
+                    if (successors[i] == block.id) { edgeIndex = i; break; }
+                }
+                if (edgeIndex >= predecessor->terminator.edgeArguments.size()) {
+                    error("block b" + std::to_string(pred) + " reaches block b" +
+                          std::to_string(block.id) + " without supplying its " +
+                          std::to_string(block.parameters.size()) + " block parameter(s)",
+                          pred, -1, predecessor->terminator.location);
+                }
+            }
+        }
+    }
+
     // The materialised edge list must be exactly what the terminators imply. A
     // stale list is how a pass that rewrote control flow silently desynchronises
     // itself from every consumer that reads predecessors.
@@ -716,6 +870,38 @@ private:
                     error(what + " refers to parameter " + std::to_string(operand.index) + " ('" + parameter->name +
                           "') as " + render(operand.type) + " but it is declared " + render(parameter->type),
                           block, index, loc);
+                    return false;
+                }
+                return true;
+            }
+            case OperandKind::BlockParam: {
+                if (operand.index == kNoBlockParam) {
+                    error(what + " refers to no block parameter", block, index, loc);
+                    return false;
+                }
+                const BlockParameter* parameter = function_.blockParameter(operand.index);
+                if (!parameter) {
+                    error(what + " refers to block parameter ^" + std::to_string(operand.index) +
+                          ", which no block defines", block, index, loc);
+                    return false;
+                }
+                if (parameter->type != operand.type) {
+                    error(what + " refers to block parameter ^" + std::to_string(operand.index) + " ('" +
+                          parameter->name + "') as " + render(operand.type) + " but it is declared " +
+                          render(parameter->type), block, index, loc);
+                    return false;
+                }
+                // A block parameter is defined on entry to its block, so using
+                // one is only sound where that block dominates - the same rule
+                // a temp's definition is held to. Without this check a value
+                // computed on one branch could be read on another.
+                const BasicBlock* owner = function_.blockOfParameter(operand.index);
+                const BasicBlock* usingBlock = function_.block(block);
+                if (!owner || !usingBlock) return true; // reported above
+                if (owner->id != block && !cfg_.dominates(owner->id, block)) {
+                    error(what + " uses block parameter ^" + std::to_string(operand.index) + " defined by block b" +
+                          std::to_string(owner->id) + ", which does not dominate block b" +
+                          std::to_string(block), block, index, loc);
                     return false;
                 }
                 return true;
@@ -1713,6 +1899,16 @@ private:
             if (!t.value.isNone()) {
                 checkUseDominatesDef(t.value, std::string(terminatorKindName(t.kind)) + " value",
                                      block.id, -1, t.location);
+            }
+            // Block-parameter arguments are evaluated by this block, so their
+            // definitions must dominate *it* - not the block they are handed to.
+            for (std::size_t edge = 0; edge < t.edgeArguments.size(); ++edge) {
+                for (std::size_t a = 0; a < t.edgeArguments[edge].size(); ++a) {
+                    checkUseDominatesDef(t.edgeArguments[edge][a],
+                                         "block-parameter argument " + std::to_string(a) +
+                                             " of successor " + std::to_string(edge),
+                                         block.id, -1, t.location);
+                }
             }
         }
     }

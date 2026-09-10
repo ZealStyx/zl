@@ -10,8 +10,12 @@
 //
 // A class adopts it with `implements`, and each adopted method is marked
 // `@Override`. A variable typed as the interface accepts any implementer.
+//
+// An interface can also extend other interfaces, and a value of the derived
+// interface is accepted where the base one is expected.
 // ============================================================================
 
+import Named
 import Shape
 import Circle
 
@@ -28,6 +32,10 @@ class Interfaces {
         Shape masked = new Circle(3.0)
         log(masked.name())
         log(masked.area())
+
+        // Shape extends Named, so an implementer of Shape is also a Named.
+        Named named = masked
+        log(named.name())
     }
 }
 
@@ -36,4 +44,5 @@ class Interfaces {
 // 12
 // circle
 // 27
+// circle
 // --- End expected output ---

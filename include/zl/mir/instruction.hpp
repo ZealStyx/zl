@@ -295,10 +295,29 @@ struct Terminator {
     BlockId target{kNoBlock};
     BlockId elseBlock{kNoBlock};
     std::vector<SwitchTarget> cases;
+
+    // Block-parameter arguments, one entry per normal successor, in the same
+    // order `successors()` reports them:
+    //
+    //   Jump   -> [target]
+    //   Branch -> [target, elseBlock]
+    //   Switch -> [case 0, case 1, ..., default]
+    //
+    // Entry i must have exactly `successors()[i]->parameters.size()` operands,
+    // each with the matching type. An absent entry (fewer entries than
+    // successors) means "no arguments", which is only legal when the target has
+    // no parameters. This lives on the terminator rather than on the edge
+    // because the terminator is what actually evaluates the arguments.
+    std::vector<std::vector<Operand>> edgeArguments;
+
     SourceLocation location;
 
     // Every block this terminator can transfer control to, in a stable order.
     [[nodiscard]] std::vector<BlockId> successors() const;
+
+    // The arguments handed to successor `index`, or an empty list when that
+    // successor has none. Never index out of range.
+    [[nodiscard]] const std::vector<Operand>& argumentsFor(std::size_t index) const;
 };
 
 } // namespace zl::mir
