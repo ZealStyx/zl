@@ -156,8 +156,9 @@ void FunctionBuilder::setGenericArguments(std::vector<std::uint32_t> arguments) 
     function_.genericArguments = std::move(arguments);
 }
 
-void FunctionBuilder::addCapture(const std::string& name, std::uint32_t type, bool usesThis) {
-    function_.captures.push_back(CaptureSpec{name, type, usesThis});
+void FunctionBuilder::addCapture(const std::string& name, std::uint32_t type, bool usesThis,
+                                 std::string storage) {
+    function_.captures.push_back(CaptureSpec{name, std::move(storage), type, usesThis});
 }
 
 void FunctionBuilder::markIncomplete(std::string reason) {
@@ -549,6 +550,16 @@ void FunctionBuilder::emitEndBorrow(SlotId borrowSlot, SourceLocation location) 
 void FunctionBuilder::emitDrop(Operand value, SourceLocation location) {
     Instruction& instruction = append(Opcode::Drop, std::move(location));
     instruction.operands = {value};
+}
+
+void FunctionBuilder::emitDrop(SlotId slot, SourceLocation location) {
+    // The storage-release form: drop the value held by `slot`. Lowering uses
+    // this for the deterministic end of an owned local's lifetime - the same
+    // event the reference compiler spells `DropVar` - so the slot travels on
+    // the instruction and backends can name the local they release without
+    // re-deriving provenance from the operand.
+    Instruction& instruction = append(Opcode::Drop, std::move(location));
+    instruction.slot = slot;
 }
 
 TempId FunctionBuilder::emitRangeInBounds(Operand current, Operand end, Operand step, SourceLocation location) {

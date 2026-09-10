@@ -28,6 +28,8 @@ const char* typeName(TypeKind kind) noexcept {
         case TypeKind::Object: return "object";
         case TypeKind::Task: return "Task";
         case TypeKind::Shared: return "Shared";
+        case TypeKind::Option: return "Option";
+        case TypeKind::Result: return "Result";
         case TypeKind::Function: return "func";
         case TypeKind::Union: return "union";
         case TypeKind::TypeParam: return "typeparam";
@@ -57,6 +59,8 @@ bool isReferenceKind(TypeKind kind) noexcept {
         case TypeKind::Object:
         case TypeKind::Task:
         case TypeKind::Shared:
+        case TypeKind::Option:
+        case TypeKind::Result:
         case TypeKind::Function:
             return true;
         default:
@@ -101,6 +105,41 @@ bool isCollectionType(const Type& type) noexcept {
         default:
             return false;
     }
+}
+
+bool isOptionType(const Type& type) noexcept {
+    if (type.kind == TypeKind::Option) return true;
+    // The class spellings. Only the exact builtin names count: a user class
+    // called "Some" is still an ordinary class, but the builtin library owns
+    // these names (they are declared in the always-present builtin source, not
+    // importable user code), so matching by name cannot collide with a
+    // program's own types.
+    return type.kind == TypeKind::Object && (type.name == "Some" || type.name == "None");
+}
+
+bool isResultType(const Type& type) noexcept {
+    if (type.kind == TypeKind::Result) return true;
+    return type.kind == TypeKind::Object && (type.name == "Ok" || type.name == "Err");
+}
+
+bool isSumType(const Type& type) noexcept {
+    return isOptionType(type) || isResultType(type);
+}
+
+std::uint32_t optionPayloadFor(const Type& type) noexcept {
+    if (!isOptionType(type)) return 0;
+    // Option<T> always has exactly the payload argument; the class spellings
+    // carry it too (`Some<T>` has one parameter because `None<T>` still needs
+    // the payload type to satisfy `Option<T>`). A malformed shape yields 0
+    // rather than guessing.
+    if (type.arguments.size() != 1) return 0;
+    return type.arguments.front();
+}
+
+ResultParts resultPartsFor(const Type& type) noexcept {
+    if (!isResultType(type)) return {};
+    if (type.arguments.size() != 2) return {};
+    return ResultParts{type.arguments[0], type.arguments[1]};
 }
 
 std::size_t TypeHash::operator()(const Type& type) const noexcept {
@@ -225,6 +264,23 @@ std::uint32_t TypeArena::sharedType(std::uint32_t payload) const {
     return intern(std::move(t));
 }
 
+std::uint32_t TypeArena::optionType(std::uint32_t payload) const {
+    Type t;
+    t.kind = TypeKind::Option;
+    t.name = "Option";
+    t.arguments = {payload};
+    return intern(std::move(t));
+}
+
+std::uint32_t TypeArena::resultType(std::uint32_t ok, std::uint32_t error) const {
+    Type t;
+    t.kind = TypeKind::Result;
+    t.name = "Result";
+    t.arguments = {ok, error};
+    return intern(std::move(t));
+}
+
+
 std::uint32_t TypeArena::functionType(FunctionSignature signature) const {
     Type t;
     t.kind = TypeKind::Function;
@@ -293,6 +349,12 @@ std::string TypeArena::render(std::uint32_t id) const {
             break;
         case TypeKind::Shared:
             out = "Shared" + renderArguments('<', '>');
+            break;
+        case TypeKind::Option:
+            out = "Option" + renderArguments('<', '>');
+            break;
+        case TypeKind::Result:
+            out = "Result" + renderArguments('<', '>');
             break;
         case TypeKind::Union: {
             for (std::size_t i = 0; i < type->arguments.size(); ++i) {

@@ -64,9 +64,13 @@ export ZL_EXTRA_ROOTS="${ROOTS}${ZL_EXTRA_ROOTS:+:$ZL_EXTRA_ROOTS}"
 FILES=("$@")
 if [[ ${#FILES[@]} -eq 0 ]]; then
     cd "$ROOT" || exit 2
+    # Only runnable programs: `_lib` directories hold importable module
+    # sources (no main), which would otherwise be counted as permanent
+    # "skips" and bury a real skip - a program the backend genuinely cannot
+    # run - under nine lines of noise.
     while IFS= read -r f; do
         FILES+=("$f")
-    done < <(find examples -name '*.zl' | sort)
+    done < <(find examples -name '*.zl' -not -path '*/_lib/*' | sort)
 fi
 
 pass=0

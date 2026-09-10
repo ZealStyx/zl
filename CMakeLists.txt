@@ -178,6 +178,17 @@ zl_add_optional_test(zl-mir-tests tests/mir_tests.cpp
 # zl-mir-lowering-tests drives the real pipeline - ModuleLoader, TypeChecker,
 # lowerProgram, verifyModule - so it links the whole compiler minus main().
 zl_add_optional_test(zl-mir-lowering-tests tests/mir_lowering_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+
+# Type-system integration: the type table, sum types, canonical nested
+# generics through lowering, dynamic-to-static boundaries, and the verifier
+# rules that keep invalid type assumptions detectable. Links the whole front
+# end because most of its cases drive the real pipeline.
+zl_add_optional_test(zl-mir-type-tests tests/mir_type_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+
+# Ownership/lifetime integration: storage contracts and the move/borrow/drop
+# events, with the verifier's flow rules pinning each invalid state. Links the
+# whole front end for its pipeline case.
+zl_add_optional_test(zl-mir-ownership-tests tests/mir_ownership_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
 if(TARGET zl-mir-lowering-tests AND WIN32)
     target_link_libraries(zl-mir-lowering-tests PRIVATE ws2_32)
 endif()

@@ -35,6 +35,11 @@ zl::ZlType toZlType(const Type* type) {
         // `Shared<T>` is an ordinary generic class in ZL, not a runtime kind of
         // its own, so it types as an object.
         case TypeKind::Shared: return zl::ZlType::OBJECT;
+        // The builtin sum types are ordinary generic classes at runtime
+        // (`Some<T> extends Option<T>`); only MIR gives them a kind of their
+        // own, so the operator table sees them as objects.
+        case TypeKind::Option: return zl::ZlType::OBJECT;
+        case TypeKind::Result: return zl::ZlType::OBJECT;
         case TypeKind::Function: return zl::ZlType::FUNCTION;
         case TypeKind::Union: return zl::ZlType::UNION;
         // An unsubstituted generic parameter resolves to OBJECT for typing
@@ -243,16 +248,39 @@ private:
         // An unsubstituted generic parameter stands for some concrete type that
         // is not knowable here.
         if (from->kind == TypeKind::TypeParam || to->kind == TypeKind::TypeParam) return true;
+        // Every value boxes to `object`: the checker lets a call pass a string,
+        // number, bool, callable, collection or class instance where an `object`
+        // parameter is declared, and the VM stores any of them in an object
+        // slot. Without this the verifier rejected reference-legal `object`
+        // parameters (the reflection examples' `object target, object value`
+        // helpers) on both counts below.
+        if (to->kind == TypeKind::Object && (to->name == "object" || to->name == "Object") &&
+            from->kind != TypeKind::Nil) {
+            return true;
+        }
         // Nullability is the arena's question, not this function's: only the
         // arena can see through a union to its members.
         if (from->kind == TypeKind::Nil) return module_.types.isNullable(toId);
         if (from->kind == TypeKind::Int && to->kind == TypeKind::Double) return true;
         if (to->kind == TypeKind::Union) {
-            return std::find(to->arguments.begin(), to->arguments.end(), fromId) != to->arguments.end();
+            // A member of the union, by identity or by assignability to one -
+            // `Some<int>` satisfies `Option<int>|nil` because it satisfies the
+            // `Option<int>` member.
+            return std::any_of(to->arguments.begin(), to->arguments.end(),
+                               [&](std::uint32_t member) { return assignable(fromId, member); });
         }
         if (from->kind == TypeKind::Union) {
             return std::all_of(from->arguments.begin(), from->arguments.end(),
                                [&](std::uint32_t member) { return assignable(member, toId); });
+        }
+        // The builtin sums relate across their spellings: `Some<int>` is
+        // assignable to `Option<int>`, `Ok<int,string>` to `Result<int,string>`,
+        // including under arguments (`Some<List<int>>` to `Option<list<int>>`).
+        // The sum relation alone decides this; the nominal walk below cannot,
+        // because `Some`'s layout parent is the erased `Option`, and comparing
+        // payloads is what keeps `Some<string>` from satisfying `Option<int>`.
+        if (sumAssignable(*from, *to, [&](std::uint32_t a, std::uint32_t b) { return assignable(a, b); })) {
+            return true;
         }
         if (from->kind == TypeKind::Object && to->kind == TypeKind::Object) {
             // Walk every subtype edge a name can have. Only the unparameterized
@@ -283,13 +311,22 @@ private:
                     if (std::find(seen.begin(), seen.end(), currentName) != seen.end()) continue;
                     seen.push_back(currentName);
                     if (baseName(currentName) == wanted) return true;
-                    if (const ClassLayout* current = module_.classLayout(currentName)) {
+                    // A generic instantiation (`List<string>`) has no layout of
+                    // its own - the layout is keyed by the unparameterized base
+                    // name. Falling back to it is what lets `List<string> ->
+                    // object` (and any base thereof) walk the same parent edges
+                    // a non-generic class does.
+                    const ClassLayout* current = module_.classLayout(currentName);
+                    if (!current) current = module_.classLayout(baseName(currentName));
+                    if (current) {
                         if (!current->parent.empty()) pending.push_back(current->parent);
                         for (const auto& implemented : current->interfaces) {
                             pending.push_back(implemented);
                         }
                     }
-                    if (const InterfaceInfo* info = module_.interfaceInfo(currentName)) {
+                    const InterfaceInfo* info = module_.interfaceInfo(currentName);
+                    if (!info) info = module_.interfaceInfo(baseName(currentName));
+                    if (info) {
                         for (const auto& base : info->bases) pending.push_back(base);
                     }
                 }
@@ -317,6 +354,26 @@ private:
         return open == std::string::npos ? name : name.substr(0, open);
     }
 
+    // A dynamic value may cross into statically typed territory only through
+    // Refine, the explicit runtime type assertion. An `unknown` operand that a
+    // store, call, return, or edge argument reclassifies as a concrete type
+    // would make every later consumer trust a type nothing ever checked - the
+    // silent disappearance this layer exists to prevent. Unknown and TypeParam
+    // destinations stay permissive (nothing was assumed), and so do
+    // unresolvable shapes the verifier cannot name.
+    void requireRefined(const Operand& value, std::uint32_t targetId, const std::string& what,
+                        BlockId block, long index, SourceLocation loc) {
+        if (value.isNone()) return;
+        const Type* from = typeOf(value.type);
+        const Type* to = typeOf(targetId);
+        if (!from || !to) return;
+        if (from->kind != TypeKind::Unknown) return;
+        if (to->kind == TypeKind::Unknown || to->kind == TypeKind::TypeParam || to->kind == TypeKind::Void) return;
+        error(what + " passes a dynamic (unknown) value where " + render(targetId) +
+              " is declared without a runtime type assertion; lower the boundary as refine",
+              block, index, loc);
+    }
+
     // --- signature --------------------------------------------------------
     void checkSignature() {
         if (function_.name.empty()) error("function has no name");
@@ -339,9 +396,11 @@ private:
             error("return type cannot be nil; use void for a function with no result",
                   kNoBlock, -1, function_.location);
         }
-        if (returnType->kind == TypeKind::Union) {
-            error("return type cannot be a union at the MIR level", kNoBlock, -1, function_.location);
-        }
+        // A union return type is ordinary ZL (`func f(): int|string`); every
+        // return operand is checked against it by the assignable relation, and
+        // a caller narrows members back out with type_test/refine. Rejecting
+        // the shape here used to force every such function to lose its return
+        // type on the way into MIR.
         // An async function's MIR return type is the payload T; callers observe
         // Task<T>. A Task return type here would mean the payload is itself a
         // Task, which is never what `async func f(): T` produces.
@@ -585,6 +644,7 @@ private:
                               " but the function returns " + render(function_.returnType),
                               id, -1, t.location);
                     }
+                    requireRefined(t.value, function_.returnType, "return", id, -1, t.location);
                 }
                 break;
             }
@@ -765,6 +825,7 @@ private:
                         error(what + " is " + render(argument.type) + " but the parameter is " +
                               render(parameter.type), block.id, -1, terminator.location);
                     }
+                    requireRefined(argument, parameter.type, what, block.id, -1, terminator.location);
                 }
             }
             if (terminator.edgeArguments.size() > successors.size()) {
@@ -987,6 +1048,34 @@ private:
                          id, index, loc);
         }
 
+        // Drop is spelled either as a slot (release this storage - the
+        // end-of-lifetime form for owned locals) or as a value operand
+        // (release this parameter's or temp's value). The two are exclusive,
+        // and one of them is required.
+        if (instruction.opcode == Opcode::Drop) {
+            if (instruction.slot != 0 && !instruction.operands.empty()) {
+                error("drop names both a slot and a value; the two spellings are exclusive",
+                      id, index, loc);
+                return;
+            }
+            if (instruction.slot != 0) {
+                const Slot* slot = function_.slot(instruction.slot);
+                if (!slot) {
+                    error("drop refers to unknown slot " + std::to_string(instruction.slot),
+                          id, index, loc);
+                    return;
+                }
+                checkSlotRules(block, instruction, index, *slot);
+                return;
+            }
+            if (instruction.operands.empty()) {
+                error("drop names no storage: it needs a slot or a value operand", id, index, loc);
+                return;
+            }
+            checkValueRules(block, instruction, index);
+            return;
+        }
+
         // Slot operands.
         if (opcodeUsesSlot(instruction.opcode)) {
             const Slot* slot = function_.slot(instruction.slot);
@@ -1012,6 +1101,19 @@ private:
         const SourceLocation& loc = instruction.location;
         const std::string slotName = "slot " + std::to_string(instruction.slot) + " ('" + slot.name + "')";
 
+        // The storage-release form of drop names the slot it releases, and
+        // only owned storage has a deterministic lifetime to end. A gc slot's
+        // value belongs to the collector; a borrow slot is released by
+        // EndBorrow. Either would make `drop` a lie about who owns the value.
+        if (instruction.opcode == Opcode::Drop) {
+            if (slot.ownership != zl::OwnershipKind::OWNED) {
+                error("drop of " + slotName + " whose storage is '" +
+                      std::string(zl::ownershipName(slot.ownership)) +
+                      "'; only owned storage has a lifetime to end", id, index, loc);
+            }
+            return;
+        }
+
         switch (instruction.opcode) {
             case Opcode::Load:
                 if (instruction.resultType != slot.type) {
@@ -1030,6 +1132,7 @@ private:
                     error("store of " + render(value.type) + " into " + slotName + " of type " +
                           render(slot.type), id, index, loc);
                 }
+                requireRefined(value, slot.type, "store into " + slotName, id, index, loc);
                 break;
             }
             case Opcode::Move:
@@ -1215,8 +1318,11 @@ private:
                 break;
             }
             case Opcode::Drop: {
-                // Dropping a borrowed value would release something this
-                // function does not own; the borrow is released by EndBorrow.
+                // The slot form was handled by checkSlotRules; what follows
+                // checks the value form. Dropping a borrowed value would
+                // release something this function does not own; the borrow is
+                // released by EndBorrow.
+                if (instruction.slot != 0) break;
                 if (operandType(0) == 0) break;
                 const auto provenance = provenance_.find(operands[0].kind == OperandKind::Temp ? operands[0].index : 0);
                 if (provenance != provenance_.end()) {
@@ -1285,6 +1391,17 @@ private:
         // Ask the language's own operator table. This is the single source of
         // truth for what `a op b` means, so the MIR cannot disagree with the
         // type checker about, say, `string + int` or `int - double`.
+        // An unknown operand is a dynamic boundary (an untyped lambda
+        // parameter, a dynamic value): the runtime dispatches the operator on
+        // the actual values, and the recorded result is whatever the checker
+        // inferred. The static table classifies fully typed operands only.
+        const auto dynamic = [this](std::uint32_t id) {
+            const Type* resolved = module_.types.find(id);
+            return !resolved || resolved->kind == TypeKind::Unknown;
+        };
+        if (dynamic(leftId) || dynamic(rightId)) {
+            return;
+        }
         const auto result = zl::OperatorRules::binaryResult(binaryToken(opcode), toZlType(left), toZlType(right));
         if (!result) {
             error(std::string(name) + " on " + render(leftId) + " and " + render(rightId) + ": " +
@@ -1365,6 +1482,15 @@ private:
             return;
         }
 
+        {
+            const auto dynamic = [this](std::uint32_t id) {
+                const Type* resolved = module_.types.find(id);
+                return !resolved || resolved->kind == TypeKind::Unknown;
+            };
+            if (dynamic(leftId) || dynamic(rightId)) {
+                return; // dynamic boundary: see checkBinaryOperator
+            }
+        }
         const auto result = zl::OperatorRules::binaryResult(binaryToken(opcode), toZlType(left), toZlType(right));
         if (!result) {
             error(std::string(name) + " on " + render(leftId) + " and " + render(rightId) + ": " +
@@ -1443,6 +1569,8 @@ private:
                 error("field_store of " + render(value.type) + " into field '" + instruction.name +
                       "' declared " + render(field->type), id, index, loc);
             }
+            requireRefined(value, field->type,
+                           "field_store into field '" + instruction.name + "'", id, index, loc);
         }
     }
 
@@ -1547,6 +1675,8 @@ private:
                 error("static_store of " + render(instruction.operands[0].type) + " into '" + match->name +
                       "' declared " + render(match->type), id, index, loc);
             }
+            requireRefined(instruction.operands[0], match->type,
+                           "static_store into '" + match->name + "'", id, index, loc);
         }
     }
 
@@ -1561,8 +1691,11 @@ private:
         if (!result) return;
         // `Shared<T>` is its own kind rather than a plain Object, but it is a
         // heap reference to an instance of a class just the same, so it is a
-        // legal thing for a construction to produce.
-        if (result->kind != TypeKind::Object && result->kind != TypeKind::Shared) {
+        // legal thing for a construction to produce. The builtin sums are the
+        // same shape: `new Some<int>(..)` produces Some<int>, and the abstract
+        // `new Option<int>()` produces the Option kind itself.
+        if (result->kind != TypeKind::Object && result->kind != TypeKind::Shared &&
+            result->kind != TypeKind::Option && result->kind != TypeKind::Result) {
             error("alloc must produce an object but produces " + render(instruction.resultType), id, index, loc);
             return;
         }
@@ -1632,6 +1765,10 @@ private:
             case TypeKind::Object: return module_.types.objectType(type->name, std::move(arguments));
             case TypeKind::Task: return module_.types.taskType(arguments.front());
             case TypeKind::Shared: return module_.types.sharedType(arguments.front());
+            case TypeKind::Option:
+                return module_.types.optionType(arguments.front());
+            case TypeKind::Result:
+                return arguments.size() >= 2 ? module_.types.resultType(arguments[0], arguments[1]) : id;
             case TypeKind::List: return module_.types.listType(arguments.front());
             case TypeKind::Set: return module_.types.setType(arguments.front());
             case TypeKind::Array: return module_.types.arrayType(arguments.front(), type->fixedSize);
@@ -1702,6 +1839,10 @@ private:
                               " ('" + callee->parameters[i].name + "') passes " + render(argument.type) +
                               " but the parameter is " + render(parameterType), id, index, loc);
                     }
+                    requireRefined(argument, parameterType,
+                                   std::string(name) + " of '" + callee->name + "' argument " +
+                                       std::to_string(i) + " ('" + callee->parameters[i].name + "')",
+                                   id, index, loc);
                 }
                 // Calling an async function hands back the Task, not the payload.
                 expectedResult = callee->isAsync ? module_.types.taskType(callee->returnType) : callee->returnType;
@@ -1720,6 +1861,7 @@ private:
                 // on one is ordinary, not malformed.
                 if (receiverType && receiverType->kind != TypeKind::Object &&
                     receiverType->kind != TypeKind::Shared && receiverType->kind != TypeKind::Task &&
+                    receiverType->kind != TypeKind::Option && receiverType->kind != TypeKind::Result &&
                     receiverType->kind != TypeKind::Unknown && receiverType->kind != TypeKind::TypeParam) {
                     error("invoke_method receiver has type " + render(receiver.type) +
                           " but must be an object", id, index, loc);
@@ -1762,6 +1904,8 @@ private:
                               " but the callable expects " + render(signature.parameterTypes[i]),
                               id, index, loc);
                     }
+                    requireRefined(argument, signature.parameterTypes[i],
+                                   "call_indirect argument " + std::to_string(i), id, index, loc);
                 }
                 expectedResult = signature.isAsync ? module_.types.taskType(signature.returnType)
                                                    : signature.returnType;
@@ -1936,11 +2080,19 @@ private:
     // --- ownership / move state -------------------------------------------
     struct FlowState {
         std::set<SlotId> moved;
+        // Owned slots whose value has been deterministically released. A
+        // dropped slot is dead: no use, no second drop, and no borrow can
+        // outlive the release. A store re-initialises and clears it.
+        std::set<SlotId> dropped;
+        // Same, for owned *parameters* released by slot-less drops (the
+        // parameter index is the identity; params cannot move).
+        std::set<SlotId> droppedParams;
         // borrow slot -> owner slot (0 when the owner is not a known slot)
         std::map<SlotId, SlotId> borrows;
 
         friend bool operator==(const FlowState& a, const FlowState& b) noexcept {
-            return a.moved == b.moved && a.borrows == b.borrows;
+            return a.moved == b.moved && a.dropped == b.dropped &&
+                   a.droppedParams == b.droppedParams && a.borrows == b.borrows;
         }
     };
 
@@ -1950,6 +2102,13 @@ private:
         // not assume a path that might not have been taken.
         out.moved = a.moved;
         out.moved.insert(b.moved.begin(), b.moved.end());
+        // Same for a released value: dead on any path is dead at the join. A
+        // resource releases exactly once, and one path releasing it is enough
+        // to make a later use on the merged path a use of nothing.
+        out.dropped = a.dropped;
+        out.dropped.insert(b.dropped.begin(), b.dropped.end());
+        out.droppedParams = a.droppedParams;
+        out.droppedParams.insert(b.droppedParams.begin(), b.droppedParams.end());
         // A borrow survives the join only if it is active on every incoming
         // path. Conflicting owners collapse to "unknown owner" rather than
         // being dropped, so a later move still sees the claim.
@@ -2003,21 +2162,35 @@ private:
             const Slot* slot = function_.slot(instruction.slot);
             const std::string slotName = slot ? "local '" + slot->name + "'" : "an unknown local";
 
+            // A moved value is gone and a dropped value is released; neither
+            // can be read, written, moved, or borrowed again. `what` names the
+            // attempted use for the diagnostic.
+            const auto checkLive = [&](SlotId slot, const std::string& what) {
+                if (state.moved.count(slot)) {
+                    error(what + " " + slotName + " after it was moved", id, index, loc);
+                } else if (state.dropped.count(slot)) {
+                    error(what + " " + slotName + " after it was dropped", id, index, loc);
+                }
+            };
+
             switch (instruction.opcode) {
                 case Opcode::Store:
-                    if (state.moved.count(instruction.slot)) {
-                        error("assignment to " + slotName + " after it was moved", id, index, loc);
-                    }
-                    state.moved.erase(instruction.slot);
+                    checkLive(instruction.slot, "assignment to");
+                    // ZL's own rule: a moved variable stays moved - the
+                    // checker rejects assigning to one - so a store cannot
+                    // resurrect it here either. A release is the same kind of
+                    // dead end while it lasts; the fresh-value reset only
+                    // clears the release record.
+                    state.dropped.erase(instruction.slot);
                     break;
                 case Opcode::Load:
-                    if (state.moved.count(instruction.slot)) {
-                        error("read of " + slotName + " after it was moved", id, index, loc);
-                    }
+                    checkLive(instruction.slot, "read of");
                     break;
                 case Opcode::Move:
                     if (state.moved.count(instruction.slot)) {
                         error("move of " + slotName + " after it was already moved", id, index, loc);
+                    } else if (state.dropped.count(instruction.slot)) {
+                        error("move of " + slotName + " after it was dropped", id, index, loc);
                     }
                     for (const auto& [borrowSlot, owner] : state.borrows) {
                         if (owner != instruction.slot && owner != 0) continue;
@@ -2036,6 +2209,10 @@ private:
                         const Slot* owner = function_.slot(ownerSlot);
                         error("borrow of " + (owner ? "local '" + owner->name + "'" : "an unknown local") +
                               " after it was moved", id, index, loc);
+                    } else if (ownerSlot != 0 && state.dropped.count(ownerSlot)) {
+                        const Slot* owner = function_.slot(ownerSlot);
+                        error("borrow of " + (owner ? "local '" + owner->name + "'" : "an unknown local") +
+                              " after it was dropped; a borrow cannot outlive a released owner", id, index, loc);
                     }
                     state.borrows[instruction.slot] = ownerSlot;
                     break;
@@ -2047,10 +2224,72 @@ private:
                     }
                     state.borrows.erase(instruction.slot);
                     break;
+                case Opcode::Drop: {
+                    // The two spellings: release of a slot's storage (slot is
+                    // set, no operands) or release of a value operand. The
+                    // slot form is what lowering emits for the end of an
+                    // owned local's lifetime.
+                    SlotId target = instruction.slot;
+                    if (target == 0 && !instruction.operands.empty()) {
+                        const Operand& value = instruction.operands[0];
+                        if (value.kind == OperandKind::Param) {
+                            // Releasing a parameter's storage. Params cannot
+                            // move, so only a double release is detectable.
+                            if (state.droppedParams.count(value.index)) {
+                                error("drop of parameter after it was dropped; a resource releases exactly once",
+                                      id, index, loc);
+                            } else {
+                                state.droppedParams.insert(value.index);
+                            }
+                            break;
+                        }
+                        target = ownerSlotOf(value);
+                    }
+                    if (target == 0) break; // a temp with no slot provenance
+                    if (state.moved.count(target)) {
+                        error("drop of " + slotName + " after it was moved", id, index, loc);
+                    } else if (state.dropped.count(target)) {
+                        error("drop of " + slotName + " after it was dropped; a resource releases exactly once",
+                              id, index, loc);
+                    }
+                    // A ZL borrow is function-scoped: it ends when the
+                    // function does, at the same point as the exit cleanup.
+                    // A release in that trailing cleanup region therefore
+                    // cannot invalidate a still-used borrow - there is no
+                    // later use. Anywhere else, dropping an owner while a
+                    // borrow is live leaves that borrow pointing at a
+                    // released resource, which is exactly the invalid state
+                    // this analysis exists to catch.
+                    const bool exitRelease = isTrailingCleanup(block, i);
+                    if (!exitRelease) {
+                        for (const auto& [borrowSlot, owner] : state.borrows) {
+                            if (owner != target || owner == 0) continue;
+                            const Slot* borrow = function_.slot(borrowSlot);
+                            error("drop of " + slotName + " while it is borrowed by " +
+                                  (borrow ? "local '" + borrow->name + "'" : "an unknown local") +
+                                  "; the borrow would access a released resource", id, index, loc);
+                            break;
+                        }
+                    }
+                    state.dropped.insert(target);
+                    break;
+                }
                 default:
                     break;
             }
         }
+    }
+
+    // True when instruction `index` sits in a block's trailing cleanup region:
+    // everything after it is another drop, and the block ends in a return.
+    // That is the shape of the end-of-lifetime release lowering emits, and the
+    // one place a release cannot conflict with a function-scoped borrow.
+    static bool isTrailingCleanup(const BasicBlock& block, std::size_t index) {
+        if (block.terminator.kind != TerminatorKind::Return) return false;
+        for (std::size_t i = index + 1; i < block.instructions.size(); ++i) {
+            if (block.instructions[i].opcode != Opcode::Drop) return false;
+        }
+        return true;
     }
 
     // The slot a value was loaded or moved from, or 0 when it has no slot

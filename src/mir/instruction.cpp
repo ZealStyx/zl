@@ -150,7 +150,12 @@ const OpcodeShape& opcodeShape(Opcode opcode) noexcept {
         set(Opcode::Move, 0, false, true, false, true);
         set(Opcode::Borrow, 1, false, false, false, true);
         set(Opcode::EndBorrow, 0, false, false, false, true);
-        set(Opcode::Drop, 1, false, false, false, true);
+        // Drop has two spellings with the same meaning: a value operand (drop
+        // this value) or no operand plus a slot (release this slot's storage -
+        // the end-of-lifetime form lowering emits for owned locals). The
+        // minimum is therefore 0; the verifier's Drop rule decides which shape
+        // it is looking at and checks each form's own requirements.
+        set(Opcode::Drop, 0, true, false, false, true);
 
         set(Opcode::NewCollection, 0, false, true, false, false);
         set(Opcode::RangeInBounds, 3, false, true, true, false);
@@ -183,6 +188,9 @@ bool opcodeUsesSlot(Opcode opcode) noexcept {
         case Opcode::Move:
         case Opcode::Borrow:
         case Opcode::EndBorrow:
+        // Drop's storage-release form names the slot whose value is released;
+        // the operand form leaves the slot empty.
+        case Opcode::Drop:
             return true;
         default:
             return false;

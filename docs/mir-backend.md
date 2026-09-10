@@ -34,9 +34,10 @@ and output. The second runs every program the backend *can* run through
 `--mir-vm` twice - once on the memory form, once with `ZL_MIR_PROMOTE=1` - and
 requires the two to be identical. Because the backend translates a block
 parameter into the memory form of itself, that comparison is a real check of
-`promoteSlotsToBlockParameters` against the interpreter-free path: 27 identical,
-0 differing, with 32 programs the backend cannot run at all skipped (they already
-fail without promotion, so they say nothing about it).
+`promoteSlotsToBlockParameters` against the interpreter-free path: all 50
+runnable programs run on the backend today, all 50 are identical with and
+without promotion, and the skip count is 0 (the `_lib` module sources are
+excluded from the listing rather than counted as permanent skips).
 
 Both harnesses put every `_lib` directory on the module search path, the way
 `examples/run_all.sh` does. Without that, every example that imports a sibling
@@ -48,6 +49,58 @@ comparison, so the first harness now reports an unloadable reference program as
 an error of the harness rather than as agreement.
 
 ## Design
+
+### Type semantics are translated, not assumed
+
+The three opcodes that carry the type system's runtime meaning lower to the
+VM's own instructions, so a boundary the MIR records is a boundary the
+interpreter enforces:
+
+- `Refine` → `AssertType "<rendered type>"`. A refine is the explicit
+  dynamic-to-static assertion (see mir.md, invariant 8), so the backend emits a
+  real check. Only an identity refinement — operand type already equals the
+  asserted type — stays a no-op, because there the MIR checker proved the fact
+  the assertion would re-check. The rendered name is the canonical source
+  spelling (`int`, `list<int>`, `Option<int>`, `int|string`), which
+  `RuntimeTypeCheck` parses with the language's own type-name grammar, so
+  nested generics assert nested.
+- `TypeTest` → `MatchType "<rendered type>"` — the non-raising partner, the
+  bool a `match` arm branches on.
+- `IsNull` → `value == null` in the reference's own spelling.
+
+Index reads go through the VM's `GetIndex` (what the reference compiler emits
+for `c[i]`), which accepts a raw native list and a typed `List`/`Set` object
+alike by unwrapping the object's `__native` storage; only maps read through
+`Collection.mapGet`. Collection classification reads the MIR type structurally
+— both the lowercase keyword kinds and the capitalised class spellings — rather
+than matching a rendered-name prefix.
+
+### Ownership events become the runtime's own lifetime opcodes
+
+The backend does not reinvent lifetime management; it emits the same opcodes
+the reference compiler emits for the same source constructs:
+
+- `Move` → `MoveVar <slot>`. The VM's `MoveVar` loads the local, clears it,
+  and leaves the value on the stack — the transfer the source's `move`
+  spelled, with a later read of the source failing the same way the
+  reference's does.
+- `Drop` (either spelling) → `DropVar <local>`. The slot form names the
+  slot's local; the value form releases the parameter or temp local its value
+  lives in. `DropVar` erases the local, which is the reference's deterministic
+  release.
+- `Borrow` → the owner's value bound to the borrow's own local. The bytecode
+  has no aliasing to maintain, so the borrow's lifetime rules are enforced by
+  the MIR verifier, not by the interpreter.
+- `EndBorrow` → `DropVar` on the borrow's local: the deterministic release a
+  native borrow view exists for; for ordinary values it only retires the
+  name, which is unobservable.
+
+Every function translated from MIR also registers its owned locals and
+parameters in `ownedLocalNames`, so the VM's frame teardown erases them on
+*any* frame exit — ordinary return, early return, exception — exactly as the
+reference compiler's `ownedLocalNames` does. The two paths release the same
+storage at the same points; nothing depends on reaching the cleanup at the
+end of the body.
 
 ### Fail closed, never miscompile
 
@@ -135,26 +188,36 @@ The backend reproduces the reference byte-for-byte (see
   reference path exactly (`Reflection.zl`).
 - Native calls (`log`, `Math.*`, `Collection.*`, ...).
 
-`examples/basics/*` and the passing `examples/intermediate/*` set are the corpus
-the harness enforces.
+Every runnable example in the tree — `examples/basics/*`, the whole of
+`examples/intermediate/*`, and `examples/advanced/*` — is the corpus the
+harness enforces (`examples/*/*.zl`; `_lib` directories hold importable
+module sources, not programs).
 
 ## Known gaps (fail closed)
 
-These constructs still stub the functions that use them, so the affected
-example programs raise a loud runtime error under `--mir-vm` rather than match:
+None today: the differential corpus is every runnable example in the tree —
+`examples/basics/*`, `examples/intermediate/*` and `examples/advanced/*`
+(50 programs, the `_lib` module sources are imports, not programs), each
+byte-identical on both paths — including async tasks, threads, channels and
+mutexes from `advanced/`, closures/lambdas with indirect calls,
+`try`/`catch`/`finally` with typed and rethrow handlers, static fields with
+lazy initializers, generics end to end (generic classes, projected
+inheritance, `Shared<T>`, reflective `Method.invoke` on generic receivers),
+and the collection algorithms built on all of that. No example reaches a
+stub: a tree-wide run of `--mir-vm` reports zero stub warnings, so the
+fail-closed path is never exercised by the corpus — every function the
+examples touch is faithfully translated.
 
-- Closures / lambdas and indirect calls (`MakeClosure`, `CallIndirect`, value
-  capture), and the collection algorithms that are built on them.
-- Exceptions (`try`/`catch`/`finally`) and `throw` with exception-object values
-  through handler chains; `match` expressions with runtime type narrowing
-  (`TypeTest`/`Refine` on union members) and non-constant patterns.
-- Static *fields* (`StaticLoad`/`StaticStore`, lazy-init initializer functions).
-- A method call on an interface-typed receiver used to be here. It is not a gap
-  any more: MIR records each interface's method signatures, so the slot is
-  resolved from the interface's own declaration.
-- `Generics.zl` is in this list for a reason that has nothing to do with
-  generics: its `main` builds a closure.
+Constructs that would still fail closed (the gate rejects the function before
+it can misbehave) have no example coverage left; when one turns up, name it
+here and in `KNOWN_GAPS` in `tools/mir_backend_diff.sh`. The mechanism is
+unchanged: a construct the backend cannot translate faithfully stubs the
+functions that use it, and the affected programs raise a loud runtime error
+under `--mir-vm` rather than silently diverge. The last gap to graduate was
+the interface-receiver method call, resolved from the interface's own
+declaration; before that, runtime *type* narrowing (`TypeTest` → `MatchType`,
+`Refine` → `AssertType`).
 
-Each is a documented, localized extension: add the opcode family to the
-supported set (and mark the function translatable) and it graduates from the
-stub list into the differential corpus.
+Each future gap is a documented, localized extension: add the opcode family to
+the supported set (and mark the function translatable) and it graduates from
+the stub list into the differential corpus.
