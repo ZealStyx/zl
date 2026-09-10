@@ -49,6 +49,7 @@ const char* operandKindName(OperandKind kind) noexcept {
         case OperandKind::Const: return "const";
         case OperandKind::Temp: return "temp";
         case OperandKind::Param: return "param";
+        case OperandKind::BlockParam: return "block-param";
         case OperandKind::Static: return "static";
     }
     return "<invalid-operand>";
@@ -77,6 +78,36 @@ const Slot* Function::slot(SlotId id) const {
     // "no slot" rather than slot zero.
     if (id == 0 || id > slots.size()) return nullptr;
     return &slots[id - 1];
+}
+
+const BlockParameter* Function::blockParameter(BlockParamId id) const {
+    if (id == kNoBlockParam) return nullptr;
+    for (const auto& block : blocks) {
+        for (const auto& parameter : block.parameters) {
+            if (parameter.id == id) return &parameter;
+        }
+    }
+    return nullptr;
+}
+
+const BasicBlock* Function::blockOfParameter(BlockParamId id) const {
+    if (id == kNoBlockParam) return nullptr;
+    for (const auto& block : blocks) {
+        for (const auto& parameter : block.parameters) {
+            if (parameter.id == id) return &block;
+        }
+    }
+    return nullptr;
+}
+
+BlockParamId Function::nextBlockParameterId() const {
+    BlockParamId next = 1;
+    for (const auto& block : blocks) {
+        for (const auto& parameter : block.parameters) {
+            if (parameter.id >= next) next = parameter.id + 1;
+        }
+    }
+    return next;
 }
 
 void Function::rebuildEdges() {

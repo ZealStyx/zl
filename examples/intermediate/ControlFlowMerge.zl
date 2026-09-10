@@ -1,0 +1,50 @@
+// ============================================================================
+// ZL Examples - Intermediate - Values crossing branches
+//
+// A variable written on both arms of an `if` and read after they join. The
+// language's answer is one value: the merged result of the two paths. The MIR
+// that carries this program represents that merge explicitly - the join block
+// takes a block parameter, and each arm hands it its own value.
+//
+//     if (condition) { x = 10 } else { x = 20 }
+//     return x
+//
+// Run `zl --emit-ssa - ControlFlowMerge.zl` to see the merged parameter, the
+// arm that passes 10 to it, and the arm that passes 20.
+// ============================================================================
+
+class ControlFlowMerge {
+    static func pick(bool condition): int {
+        var x = 0
+        if (condition) {
+            x = 10
+        } else {
+            x = 20
+        }
+        return x
+    }
+
+    // The merge survives a loop: the value the loop header receives is the
+    // merge of "before the first iteration" and "what the body produced".
+    static func accumulate(int n): int {
+        var total = 0
+        var i = 0
+        while (i < n) {
+            total = total + i
+            i = i + 1
+        }
+        return total
+    }
+
+    func main(): void {
+        log(ControlFlowMerge.pick(true))
+        log(ControlFlowMerge.pick(false))
+        log(ControlFlowMerge.accumulate(5))
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// 10
+// 20
+// 10
+// --- End expected output ---

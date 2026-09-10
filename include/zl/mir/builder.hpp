@@ -118,6 +118,26 @@ public:
     [[nodiscard]] BlockId addBlock(BlockKind kind = BlockKind::Normal, SourceLocation location = {});
     void setCurrentBlock(BlockId id) { current_ = id; }
     [[nodiscard]] BlockId currentBlock() const { return current_; }
+
+    // --- block parameters (phi nodes) ------------------------------------
+    //
+    // A block parameter is added to `block` and gets the next function-wide id.
+    // Nothing supplies it until the incoming edges are given arguments, so a
+    // caller adding one must also call `setEdgeArguments` (or build the
+    // arguments through `emitJumpWithArguments` / `emitBranchWithArguments`) for
+    // every predecessor - otherwise the verifier reports the missing argument,
+    // which is exactly the failure mode worth catching.
+    [[nodiscard]] BlockParamId addBlockParameter(BlockId block, const std::string& name,
+                                                 std::uint32_t type, SourceLocation location = {});
+    // Replaces the arguments handed to successor `successorIndex` of `from`.
+    // The index matches the order `Terminator::successors()` reports.
+    void setEdgeArguments(BlockId from, std::size_t successorIndex, std::vector<Operand> arguments);
+    // Terminators that carry block-parameter arguments, in successor order.
+    void emitJumpWithArguments(BlockId target, std::vector<Operand> arguments,
+                               SourceLocation location = {});
+    void emitBranchWithArguments(Operand condition, BlockId thenBlock, std::vector<Operand> thenArguments,
+                                 BlockId elseBlock, std::vector<Operand> elseArguments,
+                                 SourceLocation location = {});
     [[nodiscard]] BasicBlock& block(BlockId id) { return function_.blocks[static_cast<std::size_t>(id - 1)]; }
 
     // Installs a handler on the *current* block, innermost last: the handler

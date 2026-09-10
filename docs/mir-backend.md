@@ -24,8 +24,19 @@ is identical to the reference path; it differs only by reporting (on stderr)
 how many of the module's functions were *stubbed* because the backend does not
 yet translate them.
 
-The differential harness that checks the backend against the reference on the
-example corpus is `tools/mir_backend_diff.sh`.
+The differential harnesses on the example corpus are:
+
+    tools/mir_backend_diff.sh ./build/zl_language        # backend vs reference
+    tools/mir_promotion_diff.sh ./build/zl_language      # block params vs slots
+
+The first runs every corpus program through both paths and compares exit code
+and output. The second runs every program the backend *can* run through
+`--mir-vm` twice - once on the memory form, once with `ZL_MIR_PROMOTE=1` - and
+requires the two to be identical. Because the backend translates a block
+parameter into the memory form of itself, that comparison is a real check of
+`promoteSlotsToBlockParameters` against the interpreter-free path: 22 identical,
+0 differing, with the 36 fail-closed gaps skipped (they already fail without
+promotion, so they say nothing about it).
 
 ## Design
 
@@ -54,10 +65,19 @@ chunk.
 Each supported MIR function body is translated straight-line with block-level
 control flow patched into VM `Jump`/`JumpIfFalse` addresses:
 
-- **Registers** (parameters, slots, temps) map to named VM locals; a slot or
-  temp is bound with `DefineVar` at its defining instruction. SSA def/use is
-  preserved because every value-producing instruction leaves its result on the
-  stack and the `DefineVar` that materialises the result temp pops it.
+- **Registers** (parameters, slots, temps, block parameters) map to named VM
+  locals; a slot or temp is bound with `DefineVar` at its defining instruction.
+  SSA def/use is preserved because every value-producing instruction leaves its
+  result on the stack and the `DefineVar` that materialises the result temp pops
+  it.
+- **Block parameters (MIR's phi nodes)** are lowered as the memory form of
+  themselves, since the VM has no phi instruction: each predecessor stores the
+  edge argument into that parameter's own local before transferring, and the
+  block reads it. Values and slots are interchangeable in meaning, so a MIR
+  module is translatable whether its merges are block parameters or store/load
+  pairs. Setting `ZL_MIR_PROMOTE=1` makes `--mir-vm` promote locals to block
+  parameters first, which is a differential check of the promotion: the output
+  must be identical either way.
 - **Dispatch** slots and per-class vtables are derived from the module's own
   instance methods/constructors, so subclass overrides and base methods share a
   slot.

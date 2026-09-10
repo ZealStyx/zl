@@ -149,6 +149,20 @@ endif()
 # malformed module. It only needs the MIR sources plus the two compiler
 # utilities the verifier delegates to, so it stays fast and does not depend on
 # the front end.
+# CFG queries, data-flow analyses, and slot -> block-parameter construction.
+zl_add_optional_test(zl-mir-ssa-tests tests/mir_ssa_tests.cpp
+    src/mir/analysis.cpp
+    src/mir/builder.cpp
+    src/mir/dataflow.cpp
+    src/mir/function.cpp
+    src/mir/instruction.cpp
+    src/mir/printer.cpp
+    src/mir/ssa.cpp
+    src/mir/type.cpp
+    src/mir/verifier.cpp
+    src/compiler/operator_rules.cpp
+    src/compiler/semantic_types.cpp
+    src/common/type_name.cpp)
 zl_add_optional_test(zl-mir-tests tests/mir_tests.cpp
     src/mir/analysis.cpp
     src/mir/builder.cpp

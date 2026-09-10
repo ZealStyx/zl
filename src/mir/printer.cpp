@@ -45,6 +45,10 @@ std::string printOperand(const Module& module, const Operand& operand) {
         case OperandKind::Param:
             out << "$" << operand.index;
             break;
+        case OperandKind::BlockParam:
+            // `^` marks a block parameter, the phi of the IR.
+            out << "^" << operand.index;
+            break;
         case OperandKind::Static: {
             const StaticField* field = module.staticField(operand.index);
             out << (field ? "@" + field->className + "." + field->name
@@ -104,6 +108,26 @@ std::string printInstruction(const Module& module, const Function& function, con
     return out.str();
 }
 
+namespace {
+
+// `b7(%3:int, ^2:int)` - a successor plus the block-parameter arguments handed
+// to it on this edge. Plain `b7` when the edge carries no arguments, so the
+// common case stays uncluttered.
+std::string edgeWithArguments(const Module& module, BlockId target, const std::vector<Operand>& arguments) {
+    std::ostringstream out;
+    out << "b" << target;
+    if (arguments.empty()) return out.str();
+    out << "(";
+    for (std::size_t i = 0; i < arguments.size(); ++i) {
+        if (i) out << ", ";
+        out << printOperand(module, arguments[i]);
+    }
+    out << ")";
+    return out.str();
+}
+
+} // namespace
+
 std::string printTerminator(const Module& module, const Terminator& terminator) {
     std::ostringstream out;
     out << "    ";
@@ -116,16 +140,24 @@ std::string printTerminator(const Module& module, const Terminator& terminator) 
             if (!terminator.value.isNone()) out << " " << printOperand(module, terminator.value);
             break;
         case TerminatorKind::Jump:
-            out << "jump b" << terminator.target;
+            out << "jump " << edgeWithArguments(module, terminator.target,
+                                                terminator.argumentsFor(0));
             break;
         case TerminatorKind::Branch:
-            out << "branch " << printOperand(module, terminator.value) << ", b" << terminator.target
-                << ", b" << terminator.elseBlock;
+            out << "branch " << printOperand(module, terminator.value) << ", "
+                << edgeWithArguments(module, terminator.target, terminator.argumentsFor(0)) << ", "
+                << edgeWithArguments(module, terminator.elseBlock, terminator.argumentsFor(1));
             break;
         case TerminatorKind::Switch: {
             out << "switch " << printOperand(module, terminator.value);
-            for (const auto& entry : terminator.cases) out << ", " << entry.value << " => b" << entry.block;
-            out << ", default => b" << terminator.target;
+            for (std::size_t i = 0; i < terminator.cases.size(); ++i) {
+                out << ", " << terminator.cases[i].value << " => "
+                    << edgeWithArguments(module, terminator.cases[i].block,
+                                         terminator.argumentsFor(i));
+            }
+            out << ", default => "
+                << edgeWithArguments(module, terminator.target,
+                                     terminator.argumentsFor(terminator.cases.size()));
             break;
         }
         case TerminatorKind::Throw:
@@ -202,6 +234,17 @@ std::string printFunction(const Module& module, const Function& function, const 
         out << "  b" << block.id;
         if (block.kind != BlockKind::Normal) out << " [" << blockKindName(block.kind) << "]";
         if (function.entryBlock == block.id) out << " (entry)";
+        // Block parameters: the merged values this block is entered with.
+        if (!block.parameters.empty()) {
+            out << "(";
+            for (std::size_t i = 0; i < block.parameters.size(); ++i) {
+                if (i) out << ", ";
+                const auto& parameter = block.parameters[i];
+                out << "^" << parameter.id << " " << parameter.name << ":"
+                    << module.types.render(parameter.type);
+            }
+            out << ")";
+        }
         out << ":\n";
         for (const auto& handler : block.exceptionHandlers) {
             out << "    handler ";

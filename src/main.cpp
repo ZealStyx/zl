@@ -25,6 +25,7 @@
 #include "zl/compiler/machine_code.hpp"
 #include "zl/mir/lowering.hpp"
 #include "zl/mir/printer.hpp"
+#include "zl/mir/ssa.hpp"
 #include "zl/mir/verifier.hpp"
 #include "zl/mir/vm_backend.hpp"
 
@@ -210,6 +211,71 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
+        if (command == "--emit-ssa") {
+            // Like --emit-mir, but with mutable locals promoted to block
+            // parameters (the MIR's SSA form) where that is provably safe. This
+            // is the seam that makes explicit data flow visible: a value written
+            // on two branches and read after the join shows up as a block
+            // parameter with one argument per incoming edge, instead of as a
+            // store/load pair whose merge has to be inferred.
+            if (argc != 4) {
+                std::cerr << "usage: zl --emit-ssa <output|-> <file.zl>\n";
+                return 2;
+            }
+            try {
+                std::vector<std::filesystem::path> roots;
+                if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
+                    if (*env != '\0') for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
+                const auto stdlibRoot = resolveStdlibRoot(argv[0]);
+                const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
+                if (!stdlibVersion.compatible) { std::cerr << "error: " << stdlibVersion.error << "\n"; return 3; }
+                roots.push_back(stdlibRoot);
+                zl::ModuleLoader loader(argv[3], roots);
+                auto program = loader.load();
+                zl::TypeChecker typeChecker;
+                typeChecker.check(*program, /*requireMain=*/false);
+                auto lowered = zl::mir::lowerProgram(*program, typeChecker);
+                for (const auto& diagnostic : lowered.diagnostics) std::cerr << "note: " << diagnostic << "\n";
+                auto report = zl::mir::verifyModule(lowered.module);
+                if (!report.ok()) { std::cerr << report.describe(); return 4; }
+
+                std::size_t promoted = 0, slots = 0, loads = 0, stores = 0;
+                bool verboseSsa = std::getenv("ZL_MIR_SSA_VERBOSE") != nullptr;
+                for (auto& function : lowered.module.functions) {
+                    const auto promotion = zl::mir::promoteSlotsToBlockParameters(function);
+                    promoted += promotion.promotedSlots;
+                    slots += promotion.parametersAdded;
+                    loads += promotion.loadsRemoved;
+                    stores += promotion.storesRemoved;
+                    if (verboseSsa && !promotion.skipped.empty()) {
+                        for (const auto& reason : promotion.skipped) {
+                            std::cerr << "  ssa: " << function.name << ": " << reason << "\n";
+                        }
+                    }
+                }
+                std::cerr << "ssa: promoted " << promoted << " slot(s) into " << slots
+                          << " block parameter(s); removed " << loads << " load(s), "
+                          << stores << " store(s)\n";
+
+                // The promotion must leave verifiable MIR behind; re-verify so a
+                // bug in the rewrite cannot be mistaken for a bug in the input.
+                report = zl::mir::verifyModule(lowered.module);
+                if (!report.ok()) { std::cerr << "after ssa promotion:\n" << report.describe(); return 4; }
+
+                const std::string text = zl::mir::printModule(lowered.module);
+                if (std::string(argv[2]) == "-") {
+                    std::cout << text;
+                    return std::cout.good() ? 0 : 5;
+                }
+                std::ofstream out(argv[2], std::ios::binary);
+                if (!out) { std::cerr << "error: cannot open MIR output '" << argv[2] << "'\n"; return 5; }
+                out << text;
+                return out.good() ? 0 : 5;
+            } catch (const std::exception& e) {
+                std::cerr << "MIR compile error: " << e.what() << "\n";
+                return 1;
+            }
+        }
         if (command == "--mir-vm") {
             // Run a program through the MIR -> bytecode backend path:
             // source -> type analysis -> MIR -> verify -> bytecode -> VM.
@@ -231,9 +297,23 @@ int main(int argc, char** argv) {
                 auto program = loader.load();
                 zl::TypeChecker typeChecker;
                 typeChecker.check(*program, /*requireMain=*/true);
-                const auto lowered = zl::mir::lowerProgram(*program, typeChecker);
-                const auto report = zl::mir::verifyModule(lowered.module);
+                auto lowered = zl::mir::lowerProgram(*program, typeChecker);
+                auto report = zl::mir::verifyModule(lowered.module);
                 if (!report.ok()) { std::cerr << report.describe(); return 4; }
+                // Optional: run MIR in its SSA form (mutable locals promoted to
+                // block parameters) before translating. The bytecode backend
+                // must behave identically either way - block parameters and
+                // slots are interchangeable in meaning - so this doubles as a
+                // differential check of the promotion itself.
+                if (std::getenv("ZL_MIR_PROMOTE") != nullptr) {
+                    for (auto& function : lowered.module.functions)
+                        (void)zl::mir::promoteSlotsToBlockParameters(function);
+                    report = zl::mir::verifyModule(lowered.module);
+                    if (!report.ok()) {
+                        std::cerr << "after ssa promotion:\n" << report.describe();
+                        return 4;
+                    }
+                }
                 const auto backend = zl::mir::compileModuleToBytecode(lowered.module);
                 if (!backend.ok()) {
                     for (const auto& e : backend.errors) std::cerr << "MIR bytecode error: " << e << "\n";
@@ -343,6 +423,7 @@ int main(int argc, char** argv) {
                          "  zl --emit-machine-code <output.zlm> <file.zl>\n"
                          "  zl --mir-vm <file.zl> [program args...]\n"
                          "  zl --emit-mir <output|-> <file.zl>\n"
+                         "  zl --emit-ssa <output|-> <file.zl>\n"
                          "  zl --version\n"
                          "  zl --help\n";
             return 0;

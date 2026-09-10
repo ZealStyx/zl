@@ -62,11 +62,36 @@ struct ControlFlowEdge {
     }
 };
 
+// A block parameter: the value a block's incoming edges agree to hand it. This
+// is the phi node, written as a block argument rather than as a list of
+// `(value, predecessor)` pairs on the *use* side. Two consequences worth
+// knowing:
+//
+//   * the merged value lives at the block, so it is defined exactly once no
+//     matter how many predecessors there are, and it has a name the rest of the
+//     block can use;
+//   * the *edge* carries the argument, so "what does this phi take on this
+//     path" is answered by the predecessor, which is the only place that knows.
+//
+// A block with parameters must supply one argument per incoming normal edge;
+// the verifier checks the count and the types, and that the parameter's block
+// dominates every use.
+struct BlockParameter {
+    BlockParamId id{kNoBlockParam};
+    std::string name;      // for diagnostics and for readable MIR dumps
+    std::uint32_t type{0}; // TypeId; never void
+    SourceLocation location;
+};
+
 // A maximal straight-line instruction sequence with exactly one entry point
 // (the top) and exactly one exit (the terminator).
 struct BasicBlock {
     BlockId id{kNoBlock};
     BlockKind kind{BlockKind::Normal};
+    // Values bound on entry, one argument per incoming normal edge. Empty for
+    // the entry block (it has no predecessors) and for any block that does not
+    // merge values.
+    std::vector<BlockParameter> parameters;
     // Value-producing and effectful instructions, in order. Never contains a
     // control transfer: that is what `terminator` is for.
     std::vector<Instruction> instructions;
@@ -169,6 +194,15 @@ struct Function {
     [[nodiscard]] BasicBlock* block(BlockId id);
     [[nodiscard]] const Parameter* parameter(ParamId id) const;
     [[nodiscard]] const Slot* slot(SlotId id) const;
+
+    // The block parameter with this id, or nullptr. The owning block is what
+    // gives the parameter its definition point, so the lookup returns both:
+    // `block` is null exactly when the parameter does not exist.
+    [[nodiscard]] const BlockParameter* blockParameter(BlockParamId id) const;
+    [[nodiscard]] const BasicBlock* blockOfParameter(BlockParamId id) const;
+    // One past the largest block parameter id in use, which is where a pass
+    // that adds parameters starts allocating.
+    [[nodiscard]] BlockParamId nextBlockParameterId() const;
 
     // Recomputes `edges` from the terminators and exception handler chains.
     void rebuildEdges();

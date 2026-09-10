@@ -433,6 +433,14 @@ private:
 
         for (const BasicBlock& block : fn.blocks) {
             if (!body.label.count(block.id)) body.label[block.id] = body.code.size();
+            // Block parameters are the MIR's phi nodes. The VM has no phi, but
+            // block parameters and slots are interchangeable in meaning, so the
+            // lowering is exactly the memory form: each predecessor stores the
+            // value it would have passed into the parameter's own local (see
+            // emitEdgeArguments) and the block simply reads it. Every incoming
+            // edge writes that local before the block runs, so a read inside
+            // the block sees the value its predecessor supplied, which is what
+            // the parameter means. Nothing is emitted here on entry.
             for (const Instruction& ins : block.instructions) {
                 emitInstruction(fn, block.id, ins, body);
             }
@@ -465,6 +473,7 @@ private:
     }
     std::string slotLocal(SlotId s) const { return "@m_slot_" + std::to_string(s); }
     std::string tempLocal(TempId t) const { return "@m_tmp_" + std::to_string(t); }
+    std::string blockParamLocal(BlockParamId p) const { return "@m_bparam_" + std::to_string(p); }
 
     void pushOperand(const Function& fn, Operand op, Body& body, std::size_t line) {
         switch (op.kind) {
@@ -479,6 +488,11 @@ private:
                 return;
             case OperandKind::Temp:
                 body.emit(OpCode::LoadVar, addName(tempLocal(op.index)), line);
+                return;
+            case OperandKind::BlockParam:
+                // A block parameter's local was written by the predecessor that
+                // transferred here; reading it is the phi.
+                body.emit(OpCode::LoadVar, addName(blockParamLocal(op.index)), line);
                 return;
             case OperandKind::None:
                 throw std::runtime_error("MIR backend: cannot push a None operand");
@@ -807,6 +821,33 @@ private:
     }
 
     // ---- terminators ------------------------------------------------------
+    //
+    // Block-parameter arguments are stored into the parameter's own local before
+    // control transfers, one store per argument, in successor order. The VM has
+    // no phi node, so the parameter's value is materialised as a local the
+    // predecessor writes and the block reads - the memory form of the same
+    // merge. Storing before the branch keeps the values the parameters name
+    // visible in the target block no matter which edge is taken; the arguments
+    // are already-computed operands, so evaluating them ahead of the branch
+    // cannot reorder any effect the block itself performs.
+    void emitEdgeArguments(const Function& fn, const Terminator& term, std::size_t successorIndex,
+                           Body& body, std::size_t line) {
+        const auto successors = term.successors();
+        if (successorIndex >= successors.size()) return;
+        const BasicBlock* target = fn.block(successors[successorIndex]);
+        if (!target || target->parameters.empty()) return;
+        const std::vector<Operand>& arguments = term.argumentsFor(successorIndex);
+        if (arguments.size() != target->parameters.size())
+            throw std::runtime_error("MIR backend: block b" + std::to_string(target->id) +
+                                     " has " + std::to_string(target->parameters.size()) +
+                                     " block parameter(s) but its incoming edge supplies " +
+                                     std::to_string(arguments.size()));
+        for (std::size_t i = 0; i < arguments.size(); ++i) {
+            pushOperand(fn, arguments[i], body, line);
+            body.emit(OpCode::DefineVar, addName(blockParamLocal(target->parameters[i].id)), line);
+        }
+    }
+
     void emitTerminator(const Function& fn, const BasicBlock& block, Body& body) {
         const Terminator& term = block.terminator;
         const std::size_t line = term.location.line;
@@ -822,14 +863,28 @@ private:
                 return;
             }
             case TerminatorKind::Jump: {
+                emitEdgeArguments(fn, term, 0, body, line);
                 emitJumpTo(term.target, body, line);
                 return;
             }
             case TerminatorKind::Branch: {
+                // Arguments first, then the condition: the condition has to end
+                // up on top of the stack for the jump, and the arguments are
+                // pure reads so their order relative to it does not matter.
+                emitEdgeArguments(fn, term, 0, body, line);
+                emitEdgeArguments(fn, term, 1, body, line);
                 pushOperand(fn, term.value, body, line);
                 emitJumpIfFalse(term.elseBlock, body, line);
                 emitJumpTo(term.target, body, line);
                 return;
+            }
+            case TerminatorKind::Switch: {
+                // A multi-way terminator is not translatable to this VM's
+                // single jump-if-false; the opcode gate rejects it before we
+                // get here, so reaching this is a translator bug, not user
+                // input. Fail loudly rather than emit a wrong transfer.
+                throw std::runtime_error(
+                    "MIR backend: switch terminator is not translatable to this bytecode");
             }
             case TerminatorKind::Throw: {
                 pushOperand(fn, term.value, body, line);

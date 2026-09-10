@@ -45,6 +45,7 @@ fi
 EXPECTED=(
     examples/basics/*.zl
     examples/intermediate/Classes.zl
+    examples/intermediate/ControlFlowMerge.zl
     examples/intermediate/DataRecords.zl
     examples/intermediate/Encapsulation.zl
     examples/intermediate/Enums.zl

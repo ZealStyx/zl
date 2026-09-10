@@ -69,11 +69,32 @@ public:
     // algorithm over `reversePostOrder_`.
     [[nodiscard]] BlockId immediateDominator(BlockId id) const;
     [[nodiscard]] bool dominates(BlockId dominator, BlockId block) const;
+    // True when `dominator` strictly dominates `block` (dominates, and is not
+    // the same block).
+    [[nodiscard]] bool strictlyDominates(BlockId dominator, BlockId block) const;
+
+    // Children of this block in the dominator tree, in block-id order. The
+    // entry has children but no immediate dominator; unreachable blocks appear
+    // in no tree.
+    [[nodiscard]] const std::vector<BlockId>& dominatorTreeChildren(BlockId id) const;
+    // The dominance frontier: every block `y` such that this block dominates a
+    // predecessor of `y` without strictly dominating `y` itself. These are
+    // exactly the join points where a value defined here meets a value defined
+    // somewhere else, which is where block parameters have to be placed.
+    [[nodiscard]] const std::vector<BlockId>& dominanceFrontier(BlockId id) const;
+    // Numeric position in `reversePostOrder()`, or -1 for an unreachable block.
+    // Dominance comparisons are cheapest in this order.
+    [[nodiscard]] int reversePostOrderNumber(BlockId id) const;
+
+    // Blocks that cannot be entered at all: not reachable along normal edges and
+    // not an unwind target. In block-id order.
+    [[nodiscard]] std::vector<BlockId> deadBlocks() const;
 
 private:
     void computeReachability();
     void computeReversePostOrder();
     void computeDominators();
+    void computeDominanceFrontiers();
 
     const Function& function_;
     std::unordered_map<BlockId, std::size_t> indexOf_;
@@ -85,7 +106,10 @@ private:
     std::unordered_set<BlockId> reachable_;
     std::unordered_set<BlockId> reachableWithUnwind_;
     std::vector<BlockId> reversePostOrder_;
+    std::vector<int> reversePostOrderNumbers_;
     std::vector<BlockId> immediateDominators_;
+    std::vector<std::vector<BlockId>> dominatorTreeChildren_;
+    std::vector<std::vector<BlockId>> dominanceFrontiers_;
     static const std::vector<BlockId> kEmpty;
 };
 

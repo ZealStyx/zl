@@ -187,6 +187,53 @@ BlockId FunctionBuilder::addBlock(BlockKind kind, SourceLocation location) {
     return block.id;
 }
 
+BlockParamId FunctionBuilder::addBlockParameter(BlockId block, const std::string& name,
+                                               std::uint32_t type, SourceLocation location) {
+    // Parameters are numbered in one function-wide space, so a parameter is a
+    // value with a unique identity rather than "the third parameter of b4".
+    BlockParamId next = 1;
+    for (const auto& existing : function_.blocks) {
+        for (const auto& parameter : existing.parameters) {
+            if (parameter.id >= next) next = parameter.id + 1;
+        }
+    }
+    BasicBlock& target = this->block(block);
+    BlockParameter parameter;
+    parameter.id = next;
+    parameter.name = name;
+    parameter.type = type;
+    parameter.location = std::move(location);
+    target.parameters.push_back(parameter);
+    return parameter.id;
+}
+
+void FunctionBuilder::setEdgeArguments(BlockId from, std::size_t successorIndex,
+                                       std::vector<Operand> arguments) {
+    BasicBlock& source = block(from);
+    const std::size_t successorCount = source.terminator.successors().size();
+    if (source.terminator.edgeArguments.size() < successorCount) {
+        source.terminator.edgeArguments.resize(successorCount);
+    }
+    assert(successorIndex < source.terminator.edgeArguments.size() &&
+           "edge argument index is not a successor of that block");
+    source.terminator.edgeArguments[successorIndex] = std::move(arguments);
+}
+
+void FunctionBuilder::emitJumpWithArguments(BlockId target, std::vector<Operand> arguments,
+                                            SourceLocation location) {
+    emitJump(target, std::move(location));
+    setEdgeArguments(current_, 0, std::move(arguments));
+}
+
+void FunctionBuilder::emitBranchWithArguments(Operand condition, BlockId thenBlock,
+                                              std::vector<Operand> thenArguments, BlockId elseBlock,
+                                              std::vector<Operand> elseArguments,
+                                              SourceLocation location) {
+    emitBranch(condition, thenBlock, elseBlock, std::move(location));
+    setEdgeArguments(current_, 0, std::move(thenArguments));
+    setEdgeArguments(current_, 1, std::move(elseArguments));
+}
+
 void FunctionBuilder::pushExceptionHandler(std::uint32_t catchType, BlockId target, SlotId catchSlot) {
     assert(current_ != kNoBlock && "pushExceptionHandler with no current block");
     block(current_).exceptionHandlers.push_back(ExceptionHandler{catchType, target, catchSlot});

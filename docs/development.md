@@ -74,18 +74,22 @@ scheduler, native compiler, and FFI layers; they are declared as separate
 executables in `CMakeLists.txt`. If you extend the language, add tests for the
 affected layer.
 
-MIR has two targets, split by what they link:
+MIR has three targets, split by what they link:
 
 ```bash
 cmake --build build --target zl-mir-tests            # verifier regressions
+cmake --build build --target zl-mir-ssa-tests        # CFG, data flow, promotion
 cmake --build build --target zl-mir-lowering-tests   # end-to-end lowering
-./build/zl-mir-tests && ./build/zl-mir-lowering-tests
+./build/zl-mir-tests && ./build/zl-mir-ssa-tests && ./build/zl-mir-lowering-tests
 ```
 
 `zl-mir-tests` builds MIR by hand and checks the verifier rejects each class of
-malformed module; it links only the MIR sources. `zl-mir-lowering-tests` drives
-`ModuleLoader` → `TypeChecker` → `lowerProgram` → `verifyModule` on small
-programs, so it links the whole compiler minus `main()`.
+malformed module; it links only the MIR sources. `zl-mir-ssa-tests` does the same
+for the CFG queries, the data-flow analyses and slot→block-parameter promotion,
+including the malformed-SSA cases the verifier must reject and the slots the
+promotion must decline. `zl-mir-lowering-tests` drives `ModuleLoader` →
+`TypeChecker` → `lowerProgram` → `verifyModule` on small programs, so it links the
+whole compiler minus `main()`.
 
 The ZL-level corpus is split in two:
 
@@ -118,6 +122,18 @@ The ZL-level corpus is split in two:
 Use `scripts/run_regressions.sh` / `scripts/run_regressions.bat` for the full permanent
 regression corpus, including package-manager cases, and `scripts/native_gate.sh` /
 `scripts/native_gate.ps1` for the native compiler gate.
+
+Two differential harnesses cover the MIR bytecode backend on `examples/`:
+
+```bash
+tools/mir_backend_diff.sh ./build/zl_language     # backend vs reference path
+tools/mir_promotion_diff.sh ./build/zl_language   # block params vs store/load
+```
+
+The first must stay at 23 matching with the 8 documented fail-closed gaps. The
+second compares `--mir-vm` with and without `ZL_MIR_PROMOTE=1`; it must report 0
+differing. Both are the check that a change to the IR, the promotion pass, or the
+backend did not alter behaviour.
 
 ## Distribution builds
 
