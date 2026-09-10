@@ -209,6 +209,19 @@ private:
                 // must not invent spurious runtime mismatches.
                 info.parameterTypeNames.push_back("");
             }
+            for (std::size_t slotIndex = 0; slotIndex < fn.slots.size(); ++slotIndex) {
+                // Slots are 1-based; the local a Store writes is slotLocal(id).
+                if (fn.slots[slotIndex].ownership != zl::OwnershipKind::OWNED) continue;
+                // An owned local's storage belongs to this call: the VM
+                // releases it when the frame exits - on the ordinary return,
+                // an early return, and an exception alike - matching the
+                // reference compiler's owned-local cleanup.
+                info.ownedLocalNames.push_back(slotLocal(static_cast<SlotId>(slotIndex + 1)));
+            }
+            for (std::size_t p = 0; p < fn.parameters.size(); ++p) {
+                if (fn.parameters[p].ownership != zl::OwnershipKind::OWNED) continue;
+                info.ownedLocalNames.push_back(paramLocal(fn, static_cast<ParamId>(p)));
+            }
             info.returnTypeName = ""; // "" skips the return assertion
             info.dispatchSignature.name = fn.simpleName;
             if (fn.isNative) {
@@ -258,7 +271,10 @@ private:
             case Opcode::Eq: case Opcode::Ne: case Opcode::Lt: case Opcode::Le:
             case Opcode::Gt: case Opcode::Ge:
             case Opcode::Not:
-            case Opcode::Widen: case Opcode::Refine:
+            case Opcode::Widen: case Opcode::Refine: case Opcode::TypeTest:
+            case Opcode::IsNull:
+            case Opcode::Move: case Opcode::Drop: case Opcode::Borrow:
+            case Opcode::EndBorrow:
             case Opcode::Load: case Opcode::Store:
             case Opcode::FieldLoad: case Opcode::FieldStore:
             case Opcode::IndexLoad: case Opcode::IndexStore:
@@ -598,10 +614,37 @@ private:
                 return;
             }
             case Opcode::Refine: {
-                // A refine is a runtime no-op for well-typed programs (the MIR
-                // checker proved the narrowing). Skipping the check keeps this
-                // backend from fabricating a type-assertion it cannot name.
+                // A refine is the runtime type assertion at a dynamic-to-static
+                // boundary, so this backend emits a real AssertType when the
+                // operand is not already statically the asserted type. Only an
+                // identity refinement stays a no-op: there the MIR checker
+                // proved the value already has the type, and re-checking it
+                // would burn time re-proving a static fact.
+                if (ins.operands[0].type != ins.resultType) {
+                    pushOperand(fn, ins.operands[0], body, line);
+                    body.emit(OpCode::AssertType, addName(module_.types.render(ins.resultType)), line);
+                    defineTemp(ins.result, body, line);
+                    return;
+                }
                 pushOperand(fn, ins.operands[0], body, line);
+                defineTemp(ins.result, body, line);
+                return;
+            }
+            case Opcode::TypeTest: {
+                // `value MatchType "T"` - the non-raising partner of
+                // AssertType, producing the bool a match arm branches on.
+                pushOperand(fn, ins.operands[0], body, line);
+                const std::size_t nameConst = addConst(Value{module_.types.render(ins.testedType)});
+                body.emit(OpCode::PushConst, nameConst, line);
+                body.emit(OpCode::MatchType, 0, line);
+                defineTemp(ins.result, body, line);
+                return;
+            }
+            case Opcode::IsNull: {
+                // `value == null` in the reference's own spelling.
+                pushOperand(fn, ins.operands[0], body, line);
+                body.emit(OpCode::PushConst, addConst(Value{}), line);
+                body.emit(OpCode::Eq, 0, line);
                 defineTemp(ins.result, body, line);
                 return;
             }
@@ -612,6 +655,50 @@ private:
             case Opcode::Store:
                 pushOperand(fn, ins.operands[0], body, line);
                 body.emit(OpCode::DefineVar, addName(slotLocal(ins.slot)), line);
+                return;
+            case Opcode::Move:
+                // `MoveVar` loads the local, clears it, and leaves the value
+                // on the stack: the source local is gone from this point on,
+                // so a later read fails the same way the reference path's
+                // does. This is the ownership transfer, not a copy.
+                body.emit(OpCode::MoveVar, addName(slotLocal(ins.slot)), line);
+                defineTemp(ins.result, body, line);
+                return;
+            case Opcode::Drop: {
+                // Deterministic release. The slot form names the storage to
+                // release; the operand form releases the parameter or temp
+                // local its value lives in. The VM's frame teardown also
+                // erases every owned local on any exit, so an early return or
+                // an exception releases exactly what the reference path
+                // releases.
+                std::string local;
+                if (ins.slot != 0) {
+                    local = slotLocal(ins.slot);
+                } else if (!ins.operands.empty() && ins.operands[0].kind == OperandKind::Param) {
+                    local = paramLocal(fn, ins.operands[0].index);
+                } else if (!ins.operands.empty() && ins.operands[0].kind == OperandKind::Temp) {
+                    local = tempLocal(ins.operands[0].index);
+                } else {
+                    throw std::runtime_error("MIR backend: drop names no local");
+                }
+                body.emit(OpCode::DropVar, addName(local), line);
+                return;
+            }
+            case Opcode::Borrow:
+                // A ZL borrow is a read-only view of one owner, and the
+                // runtime represents it the way the reference compiler does:
+                // as the owner's value bound to the borrow's own local. There
+                // is no aliasing at the bytecode level to maintain, so the
+                // lifetime rules are enforced by the MIR verifier, not here.
+                pushOperand(fn, ins.operands[0], body, line);
+                body.emit(OpCode::DefineVar, addName(slotLocal(ins.slot)), line);
+                return;
+            case Opcode::EndBorrow:
+                // Releases the borrow's local. For a native borrow view this
+                // is the deterministic release the construct exists for; for
+                // ordinary values it only retires the name, which is
+                // unobservable.
+                body.emit(OpCode::DropVar, addName(slotLocal(ins.slot)), line);
                 return;
             case Opcode::FieldLoad:
                 pushOperand(fn, ins.operands[0], body, line);
@@ -809,9 +896,18 @@ private:
     // list/array vs map vs set for a native collection typed operand.
     enum class NativeCollKind { List, Map, Set };
     NativeCollKind collKind(std::uint32_t typeId) const {
-        const std::string render = module_.types.render(typeId);
-        if (render.rfind("map", 0) == 0) return NativeCollKind::Map;
-        if (render.rfind("set", 0) == 0) return NativeCollKind::Set;
+        // Read the type structurally. ZL spells a collection two ways - the
+        // lowercase keywords arrive as their own kinds and the capitalised
+        // classes as an Object with that name - and both must classify the
+        // same, or `new List<string>()` and `var l: list<string>` would take
+        // different access paths. Matching on the rendered string prefix used
+        // to send every class-spelled collection down the raw-native path.
+        const Type* type = module_.types.find(typeId);
+        if (!type) return NativeCollKind::List;
+        const bool isMap = type->kind == TypeKind::Map || (type->kind == TypeKind::Object && type->name == "Map");
+        if (isMap) return NativeCollKind::Map;
+        const bool isSet = type->kind == TypeKind::Set || (type->kind == TypeKind::Object && type->name == "Set");
+        if (isSet) return NativeCollKind::Set;
         return NativeCollKind::List;
     }
     void emitNewCollection(const Function& fn, const Instruction& ins, Body& body) {
@@ -827,13 +923,23 @@ private:
     }
 
     // IndexLoad: push (collection, key), call the getter, keep the result.
+    //
+    // A map reads through Collection.mapGet. Everything else reads through
+    // the VM's GetIndex, which is what the reference compiler emits for `c[i]`:
+    // it accepts a raw native list and a typed List/Set object (unwrapping the
+    // object's `__native` storage) alike, and it enforces bounds. Going through
+    // Collection.get instead required the operand to be a raw list, so an
+    // index read on a class-spelled collection failed at runtime even though
+    // its MIR type was exactly right.
     void emitCollectionIndexLoad(const Function& fn, const Instruction& ins, Body& body) {
         const std::size_t line = ins.location.line;
-        const NativeCollKind kind = collKind(ins.operands[0].type);
-        const char* getter = (kind == NativeCollKind::Map) ? "Collection.mapGet" : "Collection.get";
         pushOperand(fn, ins.operands[0], body, line);
         pushOperand(fn, ins.operands[1], body, line);
-        body.emit(OpCode::CallNative, nativeIndexByName(getter), line, 0);
+        if (collKind(ins.operands[0].type) == NativeCollKind::Map) {
+            body.emit(OpCode::CallNative, nativeIndexByName("Collection.mapGet"), line, 0);
+        } else {
+            body.emit(OpCode::GetIndex, 0, line);
+        }
         defineTemp(ins.result, body, line);
     }
 

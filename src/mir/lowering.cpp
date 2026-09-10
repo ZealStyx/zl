@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <sstream>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -64,6 +65,18 @@ struct TypeConverter {
         }
         if (base == "Task") return arena.taskType(arguments.empty() ? arena.voidType() : arguments.front());
         if (base == "Shared") return arena.sharedType(arguments.empty() ? arena.unknownType() : arguments.front());
+        // The builtin sums are semantic kinds, not plain classes: a backend
+        // reading `Option<List<int>>` must see "a List<int> or nothing"
+        // without string-matching the name. `Some`/`None`/`Ok`/`Err` stay
+        // Object kinds - they are the runtime classes - and relate to these
+        // through isOptionType/isResultType and the assignability rule.
+        if (base == "Option") {
+            return arena.optionType(arguments.empty() ? arena.unknownType() : arguments.front());
+        }
+        if (base == "Result") {
+            return arena.resultType(arguments.size() > 0 ? arguments[0] : arena.unknownType(),
+                                    arguments.size() > 1 ? arguments[1] : arena.unknownType());
+        }
         if (base == "func") {
             FunctionSignature signature;
             // A bare `func` has no signature. Recording it as `func():void`
@@ -273,6 +286,13 @@ struct FunctionLowerer {
     // Names this body assigns to or moves out of (storage keys). A binding that
     // is in here needs real storage; one that is not can stay an SSA value.
     std::unordered_set<std::string> writtenLocals;
+    // Owned slots that have been `move`d out of somewhere in this body and not
+    // definitively re-initialised. The end-of-lifetime cleanup skips them: a
+    // drop after a move would be a second consumption of a value that is no
+    // longer there, and skipping is the conservative direction - the runtime
+    // frame teardown still releases the (cleared) local, exactly as the
+    // reference compiler relies on for its own early-return paths.
+    std::set<SlotId> movedOwnedSlots;
     bool failed{false};
 
     FunctionLowerer(LoweringContext& context, FunctionId id, std::vector<std::string> params)
@@ -622,6 +642,8 @@ struct FunctionLowerer {
         value = coerce(value, fb.function().slot(slot)->type, loc);
         if (value.isNone()) return Operand::none();
         fb.emitStore(slot, value, loc);
+        // A store is a fresh value: any earlier move of this slot is undone.
+        movedOwnedSlots.erase(slot);
         return value;
     }
 
@@ -632,6 +654,7 @@ struct FunctionLowerer {
             return Operand::none();
         }
         const TypeId type = fb.function().slot(slot)->type;
+        movedOwnedSlots.insert(slot);
         return Operand::temp(fb.emitMove(slot, location(&node)), type);
     }
 
@@ -657,6 +680,17 @@ struct FunctionLowerer {
             }
             const TypeId resultType = typeOfNode(&node);
             const bool returnsVoid = isVoid(resultType);
+            // The callable's own signature is the boundary: an unknown-typed
+            // argument is asserted to the parameter type, not silently passed.
+            if (const Type* calleeType = ctx.builder.types().find(callee.type)) {
+                if (calleeType->kind == TypeKind::Function && calleeType->signature.hasSignature) {
+                    const FunctionSignature& signature = calleeType->signature;
+                    for (std::size_t i = 0; i < arguments.size() && i < signature.parameterTypes.size(); ++i) {
+                        Operand refined = coerce(arguments[i], signature.parameterTypes[i], loc);
+                        if (!refined.isNone()) arguments[i] = std::move(refined);
+                    }
+                }
+            }
             const TempId temp = fb.emitCallIndirect(callee, std::move(arguments),
                                                     returnsVoid ? 0 : resultType, loc);
             return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
@@ -676,6 +710,14 @@ struct FunctionLowerer {
             // method on another class.
             const std::string qualifiedName = node.namespaceName + "." + node.calleeName;
             if (const auto native = zl::findNativeSignature(qualifiedName)) {
+                // The native catalog's declared parameter names are the FFI
+                // boundary's contract; assert dynamics against them here.
+                for (std::size_t i = 0; i < arguments.size() && i < (*native)->parameterTypeNames.size(); ++i) {
+                    const std::string& declared = (*native)->parameterTypeNames[i];
+                    if (declared.empty()) continue;
+                    Operand refined = coerce(arguments[i], types.fromRendered(declared), loc);
+                    if (!refined.isNone()) arguments[i] = std::move(refined);
+                }
                 const TempId temp = fb.emitCallNative(qualifiedName, static_cast<std::int32_t>((*native)->id),
                                                       std::move(arguments), returnsVoid ? 0 : resultType,
                                                       (*native)->taskValueType != zl::ZlType::UNKNOWN, loc);
@@ -686,6 +728,9 @@ struct FunctionLowerer {
             if (callee == kNoFunction) {
                 unsupported(&node, "call to '" + target + "' which was not lowered");
                 return Operand::none();
+            }
+            if (const Function* calleeFunction = ctx.builder.module().function(callee)) {
+                refineArguments(arguments, *calleeFunction, 0, loc);
             }
             const TempId temp = fb.emitInvokeStatic(callee, std::move(arguments), returnsVoid ? 0 : resultType, loc);
             return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
@@ -700,6 +745,12 @@ struct FunctionLowerer {
         // same test without the hardcoding.
         if (node.namespaceName.empty()) {
             if (const auto native = zl::findNativeSignature(node.calleeName)) {
+                for (std::size_t i = 0; i < arguments.size() && i < (*native)->parameterTypeNames.size(); ++i) {
+                    const std::string& declared = (*native)->parameterTypeNames[i];
+                    if (declared.empty()) continue;
+                    Operand refined = coerce(arguments[i], types.fromRendered(declared), loc);
+                    if (!refined.isNone()) arguments[i] = std::move(refined);
+                }
                 const TempId temp = fb.emitCallNative(node.calleeName, static_cast<std::int32_t>((*native)->id),
                                                      std::move(arguments), returnsVoid ? 0 : resultType,
                                                      (*native)->taskValueType != zl::ZlType::UNKNOWN, loc);
@@ -717,12 +768,14 @@ struct FunctionLowerer {
         }
         std::vector<Operand> callArguments;
         const Function* calleeFunction = ctx.builder.module().function(callee);
-        if (calleeFunction && calleeFunction->hasThisParameter) {
+        const std::size_t leading = calleeFunction && calleeFunction->hasThisParameter ? 1 : 0;
+        if (leading == 1) {
             Operand self = thisOperand(zl::ThisExpr{} , loc);
             if (self.isNone()) return Operand::none();
             callArguments.push_back(self);
         }
         for (auto& argument : arguments) callArguments.push_back(std::move(argument));
+        if (calleeFunction) refineArguments(callArguments, *calleeFunction, leading, loc);
         const TempId temp = fb.emitCall(callee, std::move(callArguments), returnsVoid ? 0 : resultType, loc,
                                         callArguments.empty() ? std::vector<TypeId>{}
                                                               : typeArgumentsFor(callee, callArguments.front()));
@@ -783,6 +836,9 @@ struct FunctionLowerer {
         }
         const TypeId resultType = typeOfNode(&node);
         const bool returnsVoid = isVoid(resultType);
+        if (const Function* calleeFunction = ctx.builder.module().function(callee)) {
+            refineArguments(arguments, *calleeFunction, 1, loc);
+        }
         const TempId temp = fb.emitInvokeSuper(self, callee, std::move(arguments),
                                                returnsVoid ? 0 : resultType, loc,
                                                typeArgumentsFor(callee, self));
@@ -842,6 +898,9 @@ struct FunctionLowerer {
         if (constructor != kNoFunction) {
             std::vector<Operand> callArguments{receiver};
             for (auto& argument : arguments) callArguments.push_back(std::move(argument));
+            if (const Function* constructorFunction = ctx.builder.module().function(constructor)) {
+                refineArguments(callArguments, *constructorFunction, 1, loc);
+            }
             (void)fb.emitCall(constructor, std::move(callArguments), 0, loc,
                               typeArgumentsFor(constructor, receiver));
         } else if (!arguments.empty()) {
@@ -861,8 +920,20 @@ struct FunctionLowerer {
         const SourceLocation loc = location(&node);
         const TypeId objectType = typeOfNode(&node);
         const Operand instance = Operand::temp(fb.emitAlloc(node.typeName, {}, objectType, loc), objectType);
+        const ClassLayout* layout = ctx.builder.module().classLayout(node.typeName);
         for (const auto& field : node.fields) {
             Operand value = expression(field.second.get());
+            if (value.isNone()) return Operand::none();
+            // A record literal's field writes are typed boundaries too: a
+            // dynamic value is asserted against the declared field type rather
+            // than silently stored.
+            if (layout) {
+                for (const auto& declared : layout->fields) {
+                    if (declared.name != field.first) continue;
+                    value = coerce(value, declared.type, loc);
+                    break;
+                }
+            }
             if (value.isNone()) return Operand::none();
             fb.emitFieldStore(instance, field.first, value, loc);
         }
@@ -919,11 +990,29 @@ struct FunctionLowerer {
         Operand value = expression(node.value.get());
         if (value.isNone()) return Operand::none();
         if (node.isStaticFieldAssign) {
+            for (const auto& staticField : ctx.builder.module().statics) {
+                if (staticField.name != node.fieldName) continue;
+                value = coerce(value, staticField.type, loc);
+                break;
+            }
+            if (value.isNone()) return Operand::none();
             fb.emitStaticStore(node.staticFieldClassName, node.fieldName, value, loc);
             return value;
         }
         Operand base = expression(node.object.get());
         if (base.isNone()) return Operand::none();
+        // A field write is a typed boundary: assert a dynamic value against
+        // the declared field type instead of storing it unchecked.
+        if (const Type* baseType = ctx.builder.types().find(base.type)) {
+            if (const ClassLayout* layout = ctx.builder.module().classLayout(baseType->name)) {
+                for (const auto& declared : layout->fields) {
+                    if (declared.name != node.fieldName) continue;
+                    value = coerce(value, declared.type, loc);
+                    break;
+                }
+            }
+        }
+        if (value.isNone()) return Operand::none();
         fb.emitFieldStore(base, node.fieldName, value, loc);
         return value;
     }
@@ -949,18 +1038,29 @@ struct FunctionLowerer {
         const TempId collection_ = fb.emitNewCollection(type, loc);
         const Operand result = Operand::temp(collection_, type);
 
+        // Element writes are typed boundaries: the collection type's own
+        // arguments are the contract, so a dynamic element is asserted against
+        // the declared element (or key/value) type here.
         if (node.isMap) {
+            const TypeId keyType = collection->arguments.size() > 0 ? collection->arguments[0] : 0;
+            const TypeId valueType = collection->arguments.size() > 1 ? collection->arguments[1] : 0;
             for (const auto& entry : node.entries) {
                 Operand key = expression(entry.first.get());
                 if (key.isNone()) return Operand::none();
                 Operand value = expression(entry.second.get());
                 if (value.isNone()) return Operand::none();
+                if (keyType != 0) key = coerce(key, keyType, loc);
+                if (valueType != 0) value = coerce(value, valueType, loc);
+                if (key.isNone() || value.isNone()) return Operand::none();
                 fb.emitIndexStore(result, key, value, loc);
             }
             return result;
         }
+        const TypeId elementType = collection->arguments.empty() ? 0 : collection->arguments.front();
         for (std::size_t i = 0; i < node.elements.size(); ++i) {
             Operand value = expression(node.elements[i].get());
+            if (value.isNone()) return Operand::none();
+            if (elementType != 0) value = coerce(value, elementType, loc);
             if (value.isNone()) return Operand::none();
             const Operand index = Operand::constant(ctx.builder.constantInt(static_cast<std::int64_t>(i)),
                                                     ctx.builder.types().intType());
@@ -1108,6 +1208,7 @@ struct FunctionLowerer {
             return;
         }
         fb.emitStore(slot, initial, loc);
+        movedOwnedSlots.erase(slot);
     }
 
     void ifStatement(const zl::IfStmt& node) {
@@ -1246,10 +1347,35 @@ struct FunctionLowerer {
         fb.emitJump(loops.back().continueTarget, location(&node));
     }
 
+    // Emits the deterministic end-of-lifetime events for every owned local
+    // still holding a value: a `drop` of each owned slot (skipping slots moved
+    // out of and never re-initialised) and of each owned parameter. This is
+    // the MIR spelling of the reference compiler's owned-local cleanup, placed
+    // at the same program point - immediately before control leaves the
+    // function - so a backend translates it to the same release the reference
+    // emits, and the ownership dataflow sees exactly where each resource dies.
+    // GC storage needs no event: the collector owns those values.
+    void emitOwnedCleanup(const SourceLocation& loc) {
+        const Function& function = fb.function();
+        for (std::size_t i = function.slots.size(); i >= 1; --i) {
+            const SlotId slot = static_cast<SlotId>(i);
+            const Slot* info = function.slot(slot);
+            if (!info || info->ownership != zl::OwnershipKind::OWNED) continue;
+            if (movedOwnedSlots.count(slot)) continue;
+            fb.emitDrop(slot, loc);
+        }
+        for (std::size_t p = function.parameters.size(); p >= 1; --p) {
+            const std::size_t index = p - 1;
+            if (function.parameters[index].ownership != zl::OwnershipKind::OWNED) continue;
+            fb.emitDrop(fb.parameterOperand(static_cast<ParamId>(index)), loc);
+        }
+    }
+
     void returnStatement(const zl::ReturnStmt& node) {
         const SourceLocation loc = location(&node);
         const TypeId returnType = fb.function().returnType;
         if (!node.value) {
+            emitOwnedCleanup(loc);
             fb.emitReturn(Operand::none(), loc);
             return;
         }
@@ -1257,6 +1383,7 @@ struct FunctionLowerer {
         if (value.isNone()) return;
         value = coerce(value, returnType, loc);
         if (value.isNone()) return;
+        emitOwnedCleanup(loc);
         fb.emitReturn(value, loc);
     }
 
@@ -1647,8 +1774,17 @@ struct FunctionLowerer {
         return Operand::none();
     }
 
-    // Inserts the language's implicit int -> double widening so MIR arithmetic
-    // never has to model a mixed-type operation the source did not write.
+    // Inserts the conversions the language performs implicitly, so MIR never
+    // carries a boundary it does not name:
+    //
+    //   * int -> double widening, so arithmetic is homogeneous;
+    //   * nil into any nullable type, which is a plain assignment in ZL;
+    //   * unknown -> concrete, the dynamic-to-static boundary. This is NOT a
+    //     silent retype: it emits Refine, the runtime type assertion, so the
+    //     graph shows `dynamic value -> refine -> statically typed value` and
+    //     a value whose shape does not match the destination fails loudly
+    //     instead of being trusted. Every consumer of MIR - optimiser,
+    //     backend, analyser - sees exactly where the checked boundaries are.
     [[nodiscard]] Operand coerce(Operand value, TypeId target, SourceLocation loc) {
         if (value.isNone() || value.type == target) return value;
         const Type* from = ctx.builder.types().find(value.type);
@@ -1658,9 +1794,32 @@ struct FunctionLowerer {
             return Operand::temp(fb.emitWiden(value, loc), target);
         }
         if (from->kind == TypeKind::Nil && isNullableKind(to->kind)) return value;
+        if (from->kind == TypeKind::Unknown && to->kind != TypeKind::Unknown &&
+            to->kind != TypeKind::TypeParam && to->kind != TypeKind::Void) {
+            return Operand::temp(fb.emitRefine(value, target, loc), target);
+        }
         // Anything else is the checker's business, not the lowerer's: it already
         // accepted the program, so the value is usable where the target expects.
         return value;
+    }
+
+    // Refines call arguments against the callee's declared parameter types.
+    // Template parameters are skipped: a TypeParam stands for a type only the
+    // instantiation knows, and asserting one at the template would be a lie
+    // the verifier rejects. Mutates `arguments` in place.
+    void refineArguments(std::vector<Operand>& arguments, const Function& callee,
+                         std::size_t skipLeading, SourceLocation loc) {
+        for (std::size_t i = 0; i + skipLeading < arguments.size() && i < callee.parameters.size(); ++i) {
+            const TypeId parameterType = callee.parameters[i].type;
+            const Type* parameter = ctx.builder.types().find(parameterType);
+            if (!parameter) continue;
+            if (parameter->kind == TypeKind::TypeParam || parameter->kind == TypeKind::Unknown ||
+                parameter->kind == TypeKind::Void) {
+                continue;
+            }
+            Operand refined = coerce(arguments[i + skipLeading], parameterType, loc);
+            if (!refined.isNone()) arguments[i + skipLeading] = std::move(refined);
+        }
     }
 };
 
@@ -1971,10 +2130,16 @@ void lowerLambdaBody(LoweringContext& ctx, const zl::LambdaExpr& lambda) {
             // The value is still evaluated for its side effect, but the block
             // ends in a bare return - returning a value from a void function is
             // not a thing the MIR allows.
-            if (!lowerer.isDead()) fb.emitReturn(Operand::none(), loc);
+            if (!lowerer.isDead()) {
+                lowerer.emitOwnedCleanup(loc);
+                fb.emitReturn(Operand::none(), loc);
+            }
         } else if (!value.isNone()) {
             value = lowerer.coerce(value, fb.function().returnType, loc);
-            if (!value.isNone() && !lowerer.isDead()) fb.emitReturn(value, loc);
+            if (!value.isNone() && !lowerer.isDead()) {
+                lowerer.emitOwnedCleanup(loc);
+                fb.emitReturn(value, loc);
+            }
         }
     } else if (lambda.blockBody) {
         lowerer.statement(lambda.blockBody.get());
@@ -1988,6 +2153,7 @@ void lowerLambdaBody(LoweringContext& ctx, const zl::LambdaExpr& lambda) {
     if (!lowerer.isDead() && !lowerer.failed) {
         const Type* returnTypePtr = ctx.builder.types().find(fb.function().returnType);
         if (returnTypePtr && returnTypePtr->kind == TypeKind::Void) {
+            lowerer.emitOwnedCleanup(loc);
             fb.emitReturn(Operand::none(), loc);
         } else {
             fb.emitUnreachable(loc);
@@ -2093,8 +2259,12 @@ void lowerFunctionBody(LoweringContext& ctx, const zl::FunctionDecl& function, c
     // would catch, so end it in `unreachable` rather than inventing a value.
     if (!lowerer.isDead()) {
         const Type* returnType = ctx.builder.types().find(fb.function().returnType);
-        if (returnType && returnType->kind == TypeKind::Void) fb.emitReturn(Operand::none(), fb.function().location);
-        else fb.emitUnreachable(fb.function().location);
+        if (returnType && returnType->kind == TypeKind::Void) {
+            lowerer.emitOwnedCleanup(fb.function().location);
+            fb.emitReturn(Operand::none(), fb.function().location);
+        } else {
+            fb.emitUnreachable(fb.function().location);
+        }
     }
     fb.finish();
 

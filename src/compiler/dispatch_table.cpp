@@ -12,6 +12,14 @@ DispatchType dispatchTypeFor(const Param& param, const std::vector<std::string>&
         if (containsTypeParameter(param.type, genericTypeParams)) return {DispatchTypeKind::GENERIC_OBJECT, {}};
         return {DispatchTypeKind::OBJECT, describeTypeAnnotation(param.type)};
     }
+    // The erased base name of a concrete instantiation (`Option<int>` ->
+    // "Option"): the runtime keeps one body per generic class, but two
+    // declarations over different generic classes are different declarations
+    // and must not share a dispatch identity.
+    const auto erasedBase = [](const std::string& rendered) {
+        const auto open = rendered.find('<');
+        return open == std::string::npos ? rendered : rendered.substr(0, open);
+    };
     const std::string& name = param.type.name;
     if (name == "int") return {DispatchTypeKind::INT, {}};
     if (name == "double" || name == "float") return {DispatchTypeKind::DOUBLE, {}};
@@ -24,9 +32,15 @@ DispatchType dispatchTypeFor(const Param& param, const std::vector<std::string>&
     if (name == "map") return {DispatchTypeKind::MAP, {}};
     if (name == "func") return {DispatchTypeKind::FUNCTION, {}};
     if (name == "unknown" || name == "nil" || name == "object") return {DispatchTypeKind::GENERIC_OBJECT, {}};
-    if (!param.type.typeArgs.empty() ||
-        std::find(genericTypeParams.begin(), genericTypeParams.end(), name) != genericTypeParams.end()) {
+    if (std::find(genericTypeParams.begin(), genericTypeParams.end(), name) != genericTypeParams.end()) {
+        // The class's own type parameter: erased all the way down, because the
+        // one template body serves every instantiation.
         return {DispatchTypeKind::GENERIC_OBJECT, {}};
+    }
+    if (!param.type.typeArgs.empty()) {
+        // A concrete instantiation of a generic class. Distinct base classes
+        // stay distinct; instantiations of the same base share the body.
+        return {DispatchTypeKind::GENERIC_OBJECT, erasedBase(name)};
     }
     return {DispatchTypeKind::OBJECT, name};
 }

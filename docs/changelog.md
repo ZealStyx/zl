@@ -2,6 +2,92 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-10 — MIR: ownership and lifetime as events, not metadata
+
+ZL's ownership model now survives lowering. The MIR keeps each storage's
+contract (`gc`/`owned`/`borrow`/`shared` on slots and parameters) and
+represents the lifetime events as instructions: `move` empties a slot and
+continues the value; `borrow`/`end_borrow` bracket a function-scoped view;
+`drop` releases a resource in two exclusive spellings — a value operand, or
+the **storage-release form** (slot named, no operands) that lowering emits
+for the end of an owned local's lifetime. Documented in
+[`docs/mir.md`](mir.md); regression suite in `tests/mir_ownership_tests.cpp`
+(`zl-mir-ownership-tests`).
+
+**Lowering.** Every return site — each `return`, the implicit end of a void
+body, each lambda's exit — emits reverse-order releases for owned slots that
+were not moved and for owned parameters, mirroring the reference compiler's
+`DropVar`-before-`Return` placement. Slots whose value was `move`d are
+skipped: the reference clears the local and the frame teardown releases the
+rest, and the MIR path does the same. GC slots get no events; closure
+captures are always GC values, so `MakeClosure` carries none either.
+
+**Verification.** `checkOwnershipFlow` now tracks
+`{moved, dropped, droppedParams, borrows}` across the CFG with union joins —
+the same rule the type checker's `joinOwnershipStates` uses, so MIR rejects
+exactly the programs the checker does, no stricter and no looser at branch
+and loop joins. The invalid states it catches: use after move, use after
+drop, double drop ("a resource releases exactly once"), drop after move,
+drop while borrowed outside the exit-cleanup region (a ZL borrow is
+function-scoped and ends with the function, so the trailing release cannot
+conflict with it), borrow of a moved or released owner, storage-release of
+non-owned storage, and `end_borrow` without a borrow. A move is final: the
+checker rejects assigning to a moved variable, so no store resurrects one
+here either.
+
+**Backend.** The bytecode backend translates the events to the reference
+runtime's own opcodes — `MoveVar`, `DropVar`, and value rebinding for borrows
+(the runtime has no aliasing; lifetimes are the verifier's job) — and
+registers owned locals in `ownedLocalNames` so the VM's frame teardown
+releases them on early return and exception exactly as the reference path
+does. Differential runs (`tools/mir_backend_diff.sh`) stay at 24 matched /
+7 known gaps; examples stay 50/50.
+
+## 2026-09-10 — MIR: the ZL type system, end to end
+
+MIR now carries the language's *type semantics*, not just its shapes, and the
+boundaries where a dynamic value becomes a typed one are explicit instructions
+instead of silent retypes. Documented in [`docs/mir.md`](mir.md); regression
+suite in `tests/mir_type_tests.cpp` (`zl-mir-type-tests`).
+
+**Types.** `Option<T>` and `Result<T,E>` are first-class kinds carrying their
+payload/[ok, error] type ids; `Some`/`None`/`Ok`/`Err` keep their class spellings
+and relate to the sums by a verified assignability rule (`Some<int>` satisfies
+`Option<int>`, `Some<string>` does not, and the relation composes under
+arguments). Unions are ordinary types everywhere — a function may declare
+`int|string` as its return type, which the verifier previously rejected outright.
+Nested generics survive as structural ids, so `Map<string,List<int>>` and
+`Option<List<int>>` keep their arguments as type ids, not rendered strings.
+Native/resource semantics stay where the language actually has them: FFI values
+are typed by their declared renders and resource behaviour by slot/parameter
+ownership with the move/borrow/drop dataflow.
+
+**Boundaries.** A dynamic (`unknown`) value crossing into typed territory — a
+typed local or assignment, a call argument, a return, a field/element write,
+a `match` arm — now lowers to an explicit `refine` (the runtime type
+assertion), and the verifier rejects any `unknown` operand that reaches a typed
+destination without one, so an invalid type assumption fails at the boundary
+instead of being trusted downstream. The MIR→bytecode backend translates
+`refine` to a real `AssertType`, `type_test` to `MatchType`, and index reads
+through `GetIndex`, which fixed `--mir-vm` on every program that indexes a
+class-spelled collection (`names[0]` on a `List<string>`). SSA promotion
+declines to promote a slot whose stores are retyped relative to the slot's
+declared type, so promotion can no longer erase a declared `unknown` (or any
+declared contract) out from under a `match` subject.
+
+**Compiler type resolution.** Dispatch signatures erased every concrete generic
+instantiation to a bare `object`, so `label(Option<int>)` and `label(List<int>)`
+collided in every function table keyed by the rendered name — the second
+declaration silently replaced the first and calls dispatched to the wrong body,
+caught (when at all) by a runtime assertion. A `GENERIC_OBJECT` parameter now
+keeps the generic class's erased base name (`label(Option)`, `label(List)`):
+still one body per declaration, never per instantiation, but no declaration can
+shadow another.
+
+**Verification:** `zl-mir-type-tests` (new), the three existing MIR suites, the
+50-example corpus, `type_boundaries.py`, the LSP/test-runner Python suites, and
+differential `--mir-vm` runs against the reference path all pass.
+
 ## 2026-09-09 — MIR: a typed mid-level IR with a verifier
 
 ZL now has a real mid-level intermediate representation, in `zl::mir`

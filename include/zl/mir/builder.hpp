@@ -222,6 +222,11 @@ public:
     void emitBorrow(SlotId borrowSlot, Operand owner, SourceLocation location = {});
     void emitEndBorrow(SlotId borrowSlot, SourceLocation location = {});
     void emitDrop(Operand value, SourceLocation location = {});
+    // Storage-release form: deterministically release the value held by an
+    // owned slot (the MIR spelling of the reference's end-of-lifetime
+    // DropVar). The slot travels on the instruction, so a backend can name
+    // the local it releases without re-deriving provenance.
+    void emitDrop(SlotId slot, SourceLocation location = {});
 
     [[nodiscard]] TempId emitRangeInBounds(Operand current, Operand end, Operand step,
                                            SourceLocation location = {});

@@ -551,6 +551,16 @@ void FunctionBuilder::emitDrop(Operand value, SourceLocation location) {
     instruction.operands = {value};
 }
 
+void FunctionBuilder::emitDrop(SlotId slot, SourceLocation location) {
+    // The storage-release form: drop the value held by `slot`. Lowering uses
+    // this for the deterministic end of an owned local's lifetime - the same
+    // event the reference compiler spells `DropVar` - so the slot travels on
+    // the instruction and backends can name the local they release without
+    // re-deriving provenance from the operand.
+    Instruction& instruction = append(Opcode::Drop, std::move(location));
+    instruction.slot = slot;
+}
+
 TempId FunctionBuilder::emitRangeInBounds(Operand current, Operand end, Operand step, SourceLocation location) {
     Instruction& instruction = append(Opcode::RangeInBounds, std::move(location));
     instruction.operands = {current, end, step};

@@ -34,8 +34,8 @@ and output. The second runs every program the backend *can* run through
 `--mir-vm` twice - once on the memory form, once with `ZL_MIR_PROMOTE=1` - and
 requires the two to be identical. Because the backend translates a block
 parameter into the memory form of itself, that comparison is a real check of
-`promoteSlotsToBlockParameters` against the interpreter-free path: 27 identical,
-0 differing, with 32 programs the backend cannot run at all skipped (they already
+`promoteSlotsToBlockParameters` against the interpreter-free path: 29 identical,
+0 differing, with 30 programs the backend cannot run at all skipped (they already
 fail without promotion, so they say nothing about it).
 
 Both harnesses put every `_lib` directory on the module search path, the way
@@ -48,6 +48,58 @@ comparison, so the first harness now reports an unloadable reference program as
 an error of the harness rather than as agreement.
 
 ## Design
+
+### Type semantics are translated, not assumed
+
+The three opcodes that carry the type system's runtime meaning lower to the
+VM's own instructions, so a boundary the MIR records is a boundary the
+interpreter enforces:
+
+- `Refine` → `AssertType "<rendered type>"`. A refine is the explicit
+  dynamic-to-static assertion (see mir.md, invariant 8), so the backend emits a
+  real check. Only an identity refinement — operand type already equals the
+  asserted type — stays a no-op, because there the MIR checker proved the fact
+  the assertion would re-check. The rendered name is the canonical source
+  spelling (`int`, `list<int>`, `Option<int>`, `int|string`), which
+  `RuntimeTypeCheck` parses with the language's own type-name grammar, so
+  nested generics assert nested.
+- `TypeTest` → `MatchType "<rendered type>"` — the non-raising partner, the
+  bool a `match` arm branches on.
+- `IsNull` → `value == null` in the reference's own spelling.
+
+Index reads go through the VM's `GetIndex` (what the reference compiler emits
+for `c[i]`), which accepts a raw native list and a typed `List`/`Set` object
+alike by unwrapping the object's `__native` storage; only maps read through
+`Collection.mapGet`. Collection classification reads the MIR type structurally
+— both the lowercase keyword kinds and the capitalised class spellings — rather
+than matching a rendered-name prefix.
+
+### Ownership events become the runtime's own lifetime opcodes
+
+The backend does not reinvent lifetime management; it emits the same opcodes
+the reference compiler emits for the same source constructs:
+
+- `Move` → `MoveVar <slot>`. The VM's `MoveVar` loads the local, clears it,
+  and leaves the value on the stack — the transfer the source's `move`
+  spelled, with a later read of the source failing the same way the
+  reference's does.
+- `Drop` (either spelling) → `DropVar <local>`. The slot form names the
+  slot's local; the value form releases the parameter or temp local its value
+  lives in. `DropVar` erases the local, which is the reference's deterministic
+  release.
+- `Borrow` → the owner's value bound to the borrow's own local. The bytecode
+  has no aliasing to maintain, so the borrow's lifetime rules are enforced by
+  the MIR verifier, not by the interpreter.
+- `EndBorrow` → `DropVar` on the borrow's local: the deterministic release a
+  native borrow view exists for; for ordinary values it only retires the
+  name, which is unobservable.
+
+Every function translated from MIR also registers its owned locals and
+parameters in `ownedLocalNames`, so the VM's frame teardown erases them on
+*any* frame exit — ordinary return, early return, exception — exactly as the
+reference compiler's `ownedLocalNames` does. The two paths release the same
+storage at the same points; nothing depends on reaching the cleanup at the
+end of the body.
 
 ### Fail closed, never miscompile
 
@@ -146,8 +198,9 @@ example programs raise a loud runtime error under `--mir-vm` rather than match:
 - Closures / lambdas and indirect calls (`MakeClosure`, `CallIndirect`, value
   capture), and the collection algorithms that are built on them.
 - Exceptions (`try`/`catch`/`finally`) and `throw` with exception-object values
-  through handler chains; `match` expressions with runtime type narrowing
-  (`TypeTest`/`Refine` on union members) and non-constant patterns.
+  through handler chains, and `match` with structural or non-constant patterns.
+  Runtime *type* narrowing is no longer in this list: `TypeTest` translates to
+  the VM's `MatchType`, and `Refine` translates to `AssertType`.
 - Static *fields* (`StaticLoad`/`StaticStore`, lazy-init initializer functions).
 - A method call on an interface-typed receiver used to be here. It is not a gap
   any more: MIR records each interface's method signatures, so the slot is

@@ -115,6 +115,27 @@ bool slotIsEligible(const Function& function, SlotId slot, const SlotProfile& pr
         reason = "slot '" + info->name + "' is never loaded";
         return false;
     }
+    // Every stored value must already carry the slot's declared type. A Load
+    // produces the *slot's* type - that is the storage contract the store was
+    // checked against (a dynamic value crosses through a refine before it is
+    // stored). The value form hands the stored operand itself to later uses,
+    // so promoting a slot whose stores are retyped relative to it would let
+    // uses observe the raw value's type and silently drop the declared one:
+    // a slot of type `unknown` holding a `list<int>` would start reading as
+    // `list<int>` with no refine anywhere. Such a slot stays in memory form,
+    // where every read is typed by the contract.
+    for (const auto& [blockId, index] : profile.stores) {
+        const BasicBlock* block = function.block(blockId);
+        if (!block || index >= block->instructions.size()) continue;
+        const Instruction& store = block->instructions[index];
+        if (store.operands.empty() || store.operands[0].isNone()) continue;
+        if (store.operands[0].type != info->type) {
+            reason = "slot '" + info->name + "' stores a value whose static type (type " +
+                     std::to_string(store.operands[0].type) + ") differs from the slot's declared type (type " +
+                     std::to_string(info->type) + ")";
+            return false;
+        }
+    }
     return true;
 }
 

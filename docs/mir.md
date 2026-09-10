@@ -100,10 +100,38 @@ The verifier enforces all of these. They are the contract a backend may rely on.
    `class Set<T>` is a real type with a name. Nothing is boxed to `object` to
    make the first implementation simpler.
 5. **`name` is set for every nominal type** — `Object`, `Task`, `Shared`,
-   `TypeParam`. Rendering never needed it (the kind supplies `"Task"`), but every
-   consumer asking "which class is this?" does.
+   `Option`, `Result`, `TypeParam`. Rendering never needed it (the kind supplies
+   `"Task"`), but every consumer asking "which class is this?" does.
 6. **An array's size is optional.** `array<int>` is dynamic; `array[10]<int>` is
    fixed. Interning must not normalise the former into the latter.
+7. **`Option<T>` and `Result<T,E>` are kinds of their own.** A declared
+   `Option<int>` is the `Option` kind carrying the `int` payload type id, not an
+   `Object` that happens to be named "Option", so a backend can see "a payload
+   or nothing" without string-matching class names. The runtime *classes* the
+   language constructs — `Some<T>`, `None<T>`, `Ok<T,E>`, `Err<T,E>` — stay
+   Object kinds, and relate to the sum kinds through `isOptionType` /
+   `isResultType` / `optionPayloadFor` / `resultPartsFor` and the assignability
+   rule: `Some<int>` satisfies `Option<int>`, `Some<string>` does not, and the
+   relation composes under arguments (`Some<List<int>>` satisfies
+   `Option<list<int>>`). Native/resource semantics are not a type kind at all:
+   ZL has no separate static native type, so FFI values are typed by their
+   declared renders (a `CallNative` result is an ordinary type) and resource
+   behaviour is carried by slot/parameter *ownership* (`GC`/`OWNED`/`BORROW`)
+   plus the move/borrow/drop dataflow, which the verifier checks.
+8. **A dynamic value crosses into typed territory only through `Refine`.**
+   Every boundary where semantic analysis left a value `unknown` and the
+   destination is a concrete type — a typed local or assignment, a call
+   argument, a return, a field/element write — lowers to an explicit
+   `refine` (the runtime type assertion), so the graph reads
+   `dynamic value → refine → statically typed value` and the verifier *rejects*
+   any `unknown` operand that reaches a typed destination without one. This is
+   what keeps an invalid type assumption detectable at the exact boundary
+   rather than silently trusted everywhere downstream.
+9. **Unions are ordinary types everywhere a type can appear.** A function may
+   declare `int|string` as its return type; the verifier checks each return
+   operand against the union, and callers narrow members back out with
+   `type_test`/`refine`. Nothing forces a union-returning function to lose its
+   return type on the way into MIR.
 
 ### SSA and storage
 
@@ -200,11 +228,27 @@ The verifier enforces all of these. They are the contract a backend may rely on.
 
 ### Ownership
 
-23. **Move and borrow state is tracked per slot** and checked as a dataflow
-    problem over the reverse postorder: use after move, move while borrowed,
-    drop of a borrow, and `EndBorrow` without `Borrow` are all rejected.
-24. **Only owned storage can be moved or dropped.** Ownership kinds on slots and
-    parameters are preserved from the source, not inferred.
+23. **Move, borrow, and drop state is tracked per slot** and checked as a
+    dataflow problem over the reverse postorder: use after move, use after
+    drop, move while borrowed, drop while borrowed (outside the exit-cleanup
+    region, see below), double drop ("a resource releases exactly once"),
+    borrow of a moved or released owner, and `EndBorrow` without `Borrow` are
+    all rejected.
+24. **Only owned storage can be moved or storage-released.** Ownership kinds on
+    slots and parameters are preserved from the source, not inferred; a
+    storage-release `drop` of `gc`/`borrow`/`shared` storage is rejected
+    because only owned storage has a lifetime to end.
+24b. **A move is final.** The checker rejects assigning to a moved variable,
+    so the verifier does not let a store resurrect a moved slot either. (It
+    does clear a *release*: the two dead-end states differ, and only the move
+    is permanent in the language.)
+24c. **Ownership joins are unions, matching the checker.** "A move is valid
+    after a join only when every path preserved the source" - the checker's
+    own `joinOwnershipStates` (branch and loop exits) unions the moved sets,
+    and so does the MIR dataflow. The walk is single-pass, not a fixpoint,
+    on purpose: a use at the top of a loop body of a value the same iteration
+    later moves is exactly the case the checker's sequential scan also misses,
+    and MIR must not reject a program the reference accepts.
 
 ### Exceptions
 
@@ -251,6 +295,17 @@ form of the VM's `AssertType`. `TypeTest` asks and produces a `bool` — the typ
 form of the VM's `MatchType` — because a `match` arm has to survive a "no" and
 fall through to the next arm. Its tested type lives in
 `Instruction::testedType`, since `resultType` there is always `bool`.
+
+`Refine` is not only for `match`. It is *the* spelling of the dynamic-to-static
+boundary: wherever lowering moves a value semantic analysis typed `unknown` into
+a concrete destination — a typed local or assignment (`int m = alias`), a call
+argument against a declared parameter, a `return` against the function's result
+type, a field or element write — it emits `refine` first. A backend lowers that
+to a real runtime assertion (the MIR→bytecode backend emits the VM's
+`AssertType`), so a wrong assumption fails loudly at the boundary instead of
+being trusted. Only an identity refinement (operand type already equals the
+asserted type) may be treated as a no-op, because there the MIR checker proved
+the fact the assertion would re-check.
 
 ---
 
@@ -322,7 +377,17 @@ Notable choices:
   and the verifier rejects it.
 - **`coerce()` makes implicit conversions explicit.** Where the result type is
   `double` and an operand is `int`, a `Widen` is emitted, so MIR arithmetic is
-  homogeneous and a backend never has to re-derive the promotion rule.
+  homogeneous and a backend never has to re-derive the promotion rule. Where
+  the operand is `unknown` and the target is a concrete type, a `Refine` is
+  emitted — the dynamic-to-static boundary of invariant 8. The same rule runs
+  at every call with a statically known callee: direct calls, `super` calls,
+  constructors, indirect calls through a `func(int): int`-shaped value, and
+  native calls (against the catalog's declared parameter names). Field writes,
+  static-field writes, collection literals (`[1, 2]` asserts each element
+  against the collection's element contract) and record literals assert against
+  the declared field/element types. A method dispatch names no static callee, so
+  its arguments ride on the VM's own dispatch-time checks, as in the reference
+  path.
 - **A `data` record literal is an allocation plus a write per field.** A record
   has no constructor, so `Point { x: 10, y: 20 }` must not go looking for one —
   unlike `new C(...)`, it never consults the function table.
@@ -354,14 +419,46 @@ Notable choices:
   `Exception("non-exhaustive match")`, as the bytecode reference does; when the
   last arm is a wildcard that block is unreachable and `finish()` prunes it.
 
+### Ownership events
+
+The language's ownership model survives lowering as explicit events, not as
+metadata that type checking consumes and discards:
+
+- `move` is `Move` on a slot: the storage is emptied and the value continues
+  in the result. The verifier's dataflow makes every later use of that slot an
+  error, so a backend or pass cannot silently turn the transfer into a copy.
+- `borrow T v = owner` is `Borrow` into a borrow-kind slot; `EndBorrow` ends
+  it explicitly. ZL borrows are function-scoped, so lowering does *not* emit
+  `EndBorrow` at scope end - the borrow ends when the function does. The
+  verifier models this: an owner's release inside the trailing cleanup region
+  (drops followed only by the return) cannot conflict with a live borrow,
+  because both end at the same point; anywhere else it is an error.
+- The end of an owned local's lifetime is `Drop` in its **storage-release
+  form**: the slot named, no operands (`drop slot 2('x')`). The value form
+  (one operand) releases a parameter's or temp's value. `Drop` is the only
+  opcode with two exclusive spellings; both check as the same event.
+- Lowering emits the cleanup before **every** return site - each `return`, the
+  implicit end of a void body, and each lambda's exit - in reverse
+  declaration order, for owned slots that were not moved and for owned
+  parameters. This mirrors the reference compiler's `DropVar`-before-`Return`
+  exactly; the VM's frame teardown also erases a frame's owned locals on any
+  exit (early return, exception), so the two paths release the same storage at
+  the same points.
+- Slots and parameters with `gc` storage get no drop events: the collector
+  owns those values. `shared` storage is reference-counted elsewhere and
+  likewise carries no release event here.
+- Closure captures are always GC values (the checker forbids owned/borrow
+  captures), so `MakeClosure` needs no ownership events.
+
 ### What is not lowered yet
 
 `try/finally`, `try` with no `catch`, structural (`data`/list/map) match
 patterns, `data` copy-update (`base with { ... }`), function references,
 object-typed collection literals, and a method call whose receiver semantic
-analysis could not resolve to a class (which happens where a generic's own type
-parameter comes back out, as with `Shared<T>.get()`). Each produces a note and an
-incomplete function rather than malformed MIR.
+analysis could not resolve to a class. Each produces a note and an
+incomplete function rather than malformed MIR. (The `Shared<T>.get()` case once
+listed here resolves again — generic-class receivers come back out of semantic
+analysis fully typed, as `Shared<int>.get(): int`.)
 
 Most of what is left is one root cause rather than several: a bare `func`
 parameter carries no signature, so semantic analysis types its body's
@@ -388,9 +485,17 @@ in `analysis.hpp`:
 1. **Eligibility.** A slot is considered only when nothing but `Load`/`Store`
    touches it (no `Move`, `Drop`, `Borrow`, `EndBorrow` — those are memory
    management, not values), its storage is plain GC, it is not a catch binding,
-   and the function has no exception-handler chains at all. The last one is not
-   laziness: an unwind edge is a path the dominator tree does not model, so "the
-   value reaching a catch block" is not a question this construction can answer.
+   every store already carries the slot's declared type, and the function has no
+   exception-handler chains at all. The unwind rule is not laziness: an unwind
+   edge is a path the dominator tree does not model, so "the value reaching a
+   catch block" is not a question this construction can answer. The store-type
+   rule is a type-fidelity rule: a `Load` produces the *slot's* type — that is
+   the contract the stores were checked against, with dynamic values asserted
+   before they were stored — while the value form hands later uses the stored
+   operand itself. Promoting a slot whose stores are retyped relative to it
+   (`unknown alias = numbers`, where the slot says `unknown` and the stored
+   value says `list<int>`) would let uses observe `list<int>` with no refine
+   anywhere, silently erasing the declared type a `match` subject still needs.
 2. **Definite assignment**, as a forward must-analysis over `solveForward`. A
    read may be rewritten into a value only where the slot is written on *every*
    path reaching it; otherwise the value form would name a value that does not
@@ -442,8 +547,13 @@ assume earlier ones held:
    shapes, call signatures, field and index access, ownership rules.
 5. `checkDominance` — every temp use is dominated by its definition, and every
    block-parameter use is dominated by the block that defines it.
-6. `checkOwnershipFlow` — a fixpoint over reverse postorder tracking
-   `{moved, borrows}`.
+6. `checkOwnershipFlow` — a walk over reverse postorder tracking
+   `{moved, dropped, droppedParams, borrows}`. Joins union the dead-end sets
+   (dead on any path is dead) and intersect the borrows. Stores clear a
+   slot's release record; nothing clears a move. `Drop` understands both
+   spellings (slot or value operand), reports the once-only rule on a double
+   release, and defers to the language's function-scoped borrows for the
+   trailing exit-cleanup region.
 
 The verifier is also the safety net for the construction pass: `--emit-ssa`
 re-runs `verifyModule` after promoting and refuses to print MIR that does not
@@ -457,6 +567,23 @@ private, and the two are not identical: MIR's does not model ZL's collection
 conversion rules (`Set<T>` against bare `set`, list/set interchangeability when
 generics agree). That is a known gap, not an oversight — widening it means
 exposing the checker's rules at the right layer rather than duplicating them.
+
+On top of the nominal edges it knows the builtin sums: `Some<int>` is assignable
+to `Option<int>`, `Ok<int,string>` to `Result<int,string>`, in either spelling,
+with payload compatibility checked pairwise and recursively — so
+`Some<List<int>>` satisfies `Option<list<int>>` while `Some<string>` does not
+satisfy `Option<int>`. A union target accepts a value assignable to *any*
+member, which is what makes returning a `Some<int>` from a function declared
+`Option<int>|nil` verify.
+
+The other load-bearing rule is the boundary check: an operand typed `unknown`
+may reach a *typed* destination — a slot, field, element or static store, a
+direct-call parameter, a return, a block-parameter edge argument — only through
+a `refine`. Anything else is rejected with an error naming the boundary, because
+a dynamic value that a store silently reclassifies makes every later consumer
+trust a type nothing ever checked. `unknown`/`TypeParam` destinations stay
+permissive (nothing was assumed), and so does anything the verifier cannot
+resolve.
 
 Subtyping is decided from the module's type tables, and it follows **all three**
 subtype edges the language has:
@@ -599,6 +726,26 @@ errors, and a module with notes can still verify.
   constants), every way a block parameter or edge argument can be malformed, and
   the promotion pass including the slots it must *decline* and the fact that a
   declined promotion leaves the function untouched.
+- `tests/mir_ownership_tests.cpp` (`zl-mir-ownership-tests`) — the
+  ownership/lifetime suite. Hand-built MIR naming one invalid state each
+  (use after drop, double drop, drop after move, drop while borrowed
+  mid-block, borrow after drop, storage-release of gc storage, both drop
+  spellings at once, a drop naming no storage, drop/move on one path used at
+  a join, `end_borrow` without a borrow, double drop of an owned parameter)
+  plus the legal shapes that must stay legal (the exit release with a live
+  function-scoped borrow, borrow→end_borrow→move), and a pipeline case
+  proving a real `owned`/`move`/`borrow` program verifies as emitted.
+- `tests/mir_type_tests.cpp` (`zl-mir-type-tests`) — the type-system integration
+  suite. The type table (primitives, classes, generics, instantiated generics,
+  function types, unions, collections, Option/Result sums, nullability, and the
+  nested shapes `List<int>`, `List<string>`, `Map<string,int>`,
+  `Map<string,List<int>>`, `Option<List<int>>` surviving as structural ids);
+  sum-spelling relations; union return types; the dynamic-to-static boundaries
+  emitting `refine` and the backend emitting `AssertType` for them; `match`
+  narrowing emitting `type_test`+`refine`; the verifier rejecting an unrefined
+  unknown store and a `Some<string>`-for-`Option<int>` return; distinct generic
+  overloads keeping distinct dispatch identities; and SSA promotion declining
+  to retype a dynamic slot.
 
 Lowering is also exercised across `examples/`: every file is lowered and
 verified. 56 of the 59 lower and verify completely; the other 3 verify with

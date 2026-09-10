@@ -65,7 +65,9 @@ EXPECTED=(
     examples/intermediate/Enums.zl
     examples/intermediate/Inheritance.zl
     examples/intermediate/Interfaces.zl
+    examples/intermediate/MatchExpressions.zl
     examples/intermediate/Modules.zl
+    examples/intermediate/NestedGenerics.zl
     examples/intermediate/OperatorOverloading.zl
     examples/intermediate/Reflection.zl
 )
@@ -84,8 +86,6 @@ KNOWN_GAPS=(
     examples/intermediate/Exceptions.zl
     examples/intermediate/GenericRuntimeChecks.zl
     examples/intermediate/Lambdas.zl
-    examples/intermediate/MatchExpressions.zl
-    examples/intermediate/NestedGenerics.zl
     examples/intermediate/StaticMembers.zl
 )
 
