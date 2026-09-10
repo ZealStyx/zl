@@ -117,6 +117,12 @@ enum class ExceptionBehavior : std::uint8_t {
 // is an operand copied into the closure at MakeClosure.
 struct CaptureSpec {
     std::string name;
+    // The captured variable's storage name (unique per declaration), or the
+    // source name when none was recorded. The runtime identifies captures by
+    // this name - the MakeClosure site binds the value under it, and the
+    // closure body reads it back under it - so two same-named locals in
+    // different scopes capture independently instead of colliding.
+    std::string storage;
     std::uint32_t type{0};
     bool usesThis{false};
 };
@@ -249,6 +255,12 @@ struct ClassLayout {
     std::string name;
     std::vector<std::string> typeParameters;
     std::string parent;
+    // The rendered extends clause including the parent's generic arguments
+    // ("Base<B>" for `class Proj<A,B> extends Base<B>`), exactly what runtime
+    // reflection's baseTypeName must carry so a projection's bindings thread
+    // through to the base's parameters. Empty when there is no parent or the
+    // parent is not generic; consumers fall back to `parent`.
+    std::string parentTypeName;
     std::vector<std::string> interfaces;
     std::vector<FieldLayout> fields;
     bool isData{false};

@@ -156,8 +156,9 @@ void FunctionBuilder::setGenericArguments(std::vector<std::uint32_t> arguments) 
     function_.genericArguments = std::move(arguments);
 }
 
-void FunctionBuilder::addCapture(const std::string& name, std::uint32_t type, bool usesThis) {
-    function_.captures.push_back(CaptureSpec{name, type, usesThis});
+void FunctionBuilder::addCapture(const std::string& name, std::uint32_t type, bool usesThis,
+                                 std::string storage) {
+    function_.captures.push_back(CaptureSpec{name, std::move(storage), type, usesThis});
 }
 
 void FunctionBuilder::markIncomplete(std::string reason) {

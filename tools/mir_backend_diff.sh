@@ -59,35 +59,32 @@ export ZL_EXTRA_ROOTS="${ROOTS}${ZL_EXTRA_ROOTS:+:$ZL_EXTRA_ROOTS}"
 EXPECTED=(
     examples/basics/*.zl
     examples/intermediate/Classes.zl
+    examples/intermediate/Closures.zl
+    examples/intermediate/CollectionAlgorithms.zl
     examples/intermediate/ControlFlowMerge.zl
     examples/intermediate/DataRecords.zl
     examples/intermediate/Encapsulation.zl
     examples/intermediate/Enums.zl
+    examples/intermediate/Exceptions.zl
+    examples/intermediate/Generics.zl
+    examples/intermediate/GenericRuntimeChecks.zl
     examples/intermediate/Inheritance.zl
     examples/intermediate/Interfaces.zl
+    examples/intermediate/Lambdas.zl
     examples/intermediate/MatchExpressions.zl
     examples/intermediate/Modules.zl
     examples/intermediate/NestedGenerics.zl
     examples/intermediate/OperatorOverloading.zl
     examples/intermediate/Reflection.zl
+    examples/intermediate/StaticMembers.zl
 )
 
 # Programs using constructs the backend still stubs (fail-closed), so they are
-# expected NOT to run cleanly yet; report but do not fail the run.
-KNOWN_GAPS=(
-    # Generics.zl builds a closure in main (`opcode make_closure`), so it is the
-    # same gap as Closures/Lambdas rather than a generics problem. It sat in
-    # EXPECTED only because the harness used to count "both paths failed
-    # identically" as a pass - the reference path could not load it either, for
-    # want of the _lib search path.
-    examples/intermediate/Generics.zl
-    examples/intermediate/Closures.zl
-    examples/intermediate/CollectionAlgorithms.zl
-    examples/intermediate/Exceptions.zl
-    examples/intermediate/GenericRuntimeChecks.zl
-    examples/intermediate/Lambdas.zl
-    examples/intermediate/StaticMembers.zl
-)
+# expected NOT to run cleanly yet; report but do not fail the run. Empty today:
+# every former gap (closures, lambdas, try/catch, statics, generics end to end)
+# now runs identically on both paths. New gaps land here with a comment naming
+# the missing construct.
+KNOWN_GAPS=()
 
 pass=0
 fail=0

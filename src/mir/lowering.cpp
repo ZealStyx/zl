@@ -581,20 +581,46 @@ struct FunctionLowerer {
         }
         const auto result = zl::OperatorRules::binaryResult(tokenFor(opcode), zlTypeOf(left.type),
                                                             zlTypeOf(right.type));
-        if (!result) {
+        // An unknown operand is a dynamic boundary, not a type error: the
+        // checker could not classify the operator statically (an untyped
+        // lambda parameter, a dynamic value), and the runtime dispatches on
+        // the actual values exactly as the reference path does. The static
+        // table exists to classify fully typed operands; it must not reject
+        // the dynamic ones or every closure over an untyped parameter would
+        // be unlowerable.
+        const auto dynamic = [this](TypeId id) {
+            const Type* resolved = ctx.builder.types().find(id);
+            return !resolved || resolved->kind == TypeKind::Unknown;
+        };
+        if (!result && !dynamic(left.type) && !dynamic(right.type)) {
             unsupported(&node, "binary operator on " + ctx.builder.types().render(left.type) + " and " +
                                    ctx.builder.types().render(right.type));
             return Operand::none();
         }
-        const TypeId type = typeIdFor(*result);
-        // `1 + 2.5` is legal ZL, and OperatorRules types it as double. Left as
-        // written, though, the MIR would carry an `add` of an int and a double,
-        // so every backend would have to re-derive the promotion rule. Widen the
-        // int operand instead: arithmetic in MIR is homogeneous, and the
-        // conversion the language performs implicitly is visible in the graph.
-        left = coerce(left, type, loc);
-        right = coerce(right, type, loc);
-        if (left.isNone() || right.isNone()) return Operand::none();
+        if (result) {
+            const TypeId type = typeIdFor(*result);
+            // `1 + 2.5` is legal ZL, and OperatorRules types it as double. Left as
+            // written, though, the MIR would carry an `add` of an int and a double,
+            // so every backend would have to re-derive the promotion rule. Widen the
+            // int operand instead: arithmetic in MIR is homogeneous, and the
+            // conversion the language performs implicitly is visible in the graph.
+            // An unknown operand is exempt: it feeds the runtime dispatcher as-is,
+            // and refining it to the table's result would assert a type the
+            // reference never checks (`"got " + x` accepts an int just fine).
+            const auto unknown = [this](TypeId id) {
+                const Type* resolved = ctx.builder.types().find(id);
+                return !resolved || resolved->kind == TypeKind::Unknown;
+            };
+            if (!unknown(left.type)) left = coerce(left, type, loc);
+            if (!unknown(right.type)) right = coerce(right, type, loc);
+            if (left.isNone() || right.isNone()) return Operand::none();
+            return Operand::temp(fb.emitBinary(opcode, left, right, type, loc), type);
+        }
+        // The dynamic boundary takes no coercion: inserting a Refine here would
+        // assert a type the reference never checks (calling `func(x) => x * 2`
+        // with a double is legitimate dynamic arithmetic), so the operands go
+        // through exactly as the checker typed them.
+        const TypeId type = typeOfNode(&node);
         return Operand::temp(fb.emitBinary(opcode, left, right, type, loc), type);
     }
 
@@ -1809,8 +1835,15 @@ struct FunctionLowerer {
     // the verifier rejects. Mutates `arguments` in place.
     void refineArguments(std::vector<Operand>& arguments, const Function& callee,
                          std::size_t skipLeading, SourceLocation loc) {
-        for (std::size_t i = 0; i + skipLeading < arguments.size() && i < callee.parameters.size(); ++i) {
-            const TypeId parameterType = callee.parameters[i].type;
+        // skipLeading operand slots (a constructor's receiver) are skipped on
+        // BOTH sides: arguments[i + skipLeading] is the value for
+        // parameters[i + skipLeading]. Indexing parameters by i alone paired
+        // the first real argument with the receiver's own `this: C<T>` type,
+        // and a generic constructor's unknown argument was then "refined" to
+        // the class type - an assertion the language never makes
+        // (`new Box<int>(transform(...))` asserted Box<int> against an int).
+        for (std::size_t i = 0; i + skipLeading < arguments.size() && i + skipLeading < callee.parameters.size(); ++i) {
+            const TypeId parameterType = callee.parameters[i + skipLeading].type;
             const Type* parameter = ctx.builder.types().find(parameterType);
             if (!parameter) continue;
             if (parameter->kind == TypeKind::TypeParam || parameter->kind == TypeKind::Unknown ||
@@ -1904,6 +1937,14 @@ void declareLayouts(LoweringContext& ctx) {
             ClassLayout& layout = ctx.builder.addClassLayout(cls.name);
             layout.typeParameters = cls.typeParams;
             layout.parent = cls.extendsName;
+            if (!cls.extendsName.empty()) {
+                // The extends clause with the parent's generic arguments, in
+                // the canonical source rendering - reflection's baseTypeName.
+                zl::TypeAnnotation baseType;
+                baseType.name = cls.extendsName;
+                baseType.typeArgs = cls.extendsTypeArgs;
+                layout.parentTypeName = zl::describeTypeAnnotation(baseType);
+            }
             layout.interfaces = cls.implementsNames;
             layout.location.line = static_cast<std::uint32_t>(cls.line);
             TypeConverter converter{ctx.builder.types(), cls.typeParams};
@@ -2033,8 +2074,14 @@ void lowerLambda(LoweringContext& ctx, const zl::LambdaExpr& lambda) {
     if (typeParams != ctx.lambdaTypeParams.end() && !typeParams->second.empty()) {
         fb.setGenericTemplate(typeParams->second);
     }
-    for (const auto& captureName : lambda.captureNames) {
-        fb.addCapture(captureName, ctx.builder.types().unknownType(), lambda.usesThis);
+    for (std::size_t i = 0; i < lambda.captureNames.size(); ++i) {
+        const std::string& name = lambda.captureNames[i];
+        // The storage name is what the runtime snapshot is keyed by; fall back
+        // to the source name when analysis recorded no storage name (the
+        // receiver - "this" is already scope-keyed).
+        const std::string storage = i < lambda.captureStorageNames.size() && !lambda.captureStorageNames[i].empty()
+                                        ? lambda.captureStorageNames[i] : name;
+        fb.addCapture(name, ctx.builder.types().unknownType(), lambda.usesThis, storage);
     }
 }
 
@@ -2273,6 +2320,56 @@ void lowerFunctionBody(LoweringContext& ctx, const zl::FunctionDecl& function, c
 
 } // namespace
 
+// Declares and lowers one zero-parameter function per static field, and points
+// the field's StaticField entry at it. The body is the field's initialiser
+// expression (or nil for a field declared without one), returned as-is - the
+// same lazy, on-first-access shape the reference compiler emits. Failures mark
+// the generated function incomplete like any other body.
+void lowerStaticInitializers(LoweringContext& ctx) {
+    for (const auto& declaration : ctx.program.declarations) {
+        if (declaration->kind != zl::NodeKind::ClassDecl) continue;
+        const auto& cls = static_cast<const zl::ClassDecl&>(*declaration);
+        const std::vector<std::string> typeParams = ctx.typeParamsFor(cls.name);
+        if (!ctx.options.lowerGenericTemplates && !typeParams.empty()) continue;
+        TypeConverter converter{ctx.builder.types(), typeParams};
+
+        for (const auto& member : cls.members) {
+            if (member->kind != zl::NodeKind::VarDecl) continue;
+            const auto& field = static_cast<const zl::VarDecl&>(*member);
+            if (!field.isStatic) continue;
+
+            const SourceLocation loc{{}, static_cast<std::uint32_t>(field.line), 0};
+            FunctionBuilder fb = ctx.builder.addFunction(cls.name + ".<static-init:" + field.name + ">");
+            fb.setStatic(true);
+            fb.setLocation(loc);
+            const TypeId fieldType = field.hasExplicitType
+                                         ? converter.fromAnnotation(field.type)
+                                         : ctx.builder.types().unknownType();
+            // A field declared without an initialiser holds nil, and the
+            // reference's generated initialiser returns nil for it whatever the
+            // field's declared type - the VM never asserts this function's
+            // result. Typing the function `unknown` says exactly that; the
+            // field's own type still governs stores through StaticStore.
+            fb.setReturnType(field.initializer ? fieldType : ctx.builder.types().unknownType());
+            for (auto& entry : ctx.builder.mutableModule().statics) {
+                if (entry.className == cls.name && entry.name == field.name) entry.initializer = fb.function().id;
+            }
+
+            FunctionLowerer lowerer(ctx, fb.function().id, typeParams);
+            lowerer.ownerClass = cls.name;
+            lowerer.isStaticContext = true;
+            (void)lowerer.fb.addBlock(BlockKind::Normal, loc);
+            Operand value;
+            if (field.initializer) value = lowerer.expression(field.initializer.get());
+            else value = Operand::constant(ctx.builder.constantNil(), ctx.builder.types().nilType());
+            if (value.isNone()) continue; // the initialiser failed; the function is marked incomplete
+            value = lowerer.coerce(value, fieldType, loc);
+            if (value.isNone()) continue;
+            lowerer.fb.emitReturn(value, loc);
+        }
+    }
+}
+
 LoweringResult lowerProgram(const zl::Program& program, const zl::TypeChecker& checker,
                             const LoweringOptions& options) {
     LoweringContext ctx(program, checker, options);
@@ -2324,6 +2421,14 @@ LoweringResult lowerProgram(const zl::Program& program, const zl::TypeChecker& c
     for (const zl::LambdaExpr* lambda : ctx.lambdaOrder) {
         lowerLambda(ctx, *lambda);
     }
+
+    // Pass 2.5: static-field initializers. A ZL static is lazily initialised
+    // shared state, so its initialiser becomes a zero-parameter MIR function
+    // the backend (like the reference compiler) wires into the field's static
+    // metadata and the runtime invokes on first access. Declared here so
+    // every named function already exists - an initialiser may call anything -
+    // and so the ids of the functions pass 1 declared stay untouched.
+    lowerStaticInitializers(ctx);
 
     // Pass 3: bodies.
     for (const auto& declaration : program.declarations) {

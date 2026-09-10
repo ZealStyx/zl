@@ -34,9 +34,9 @@ and output. The second runs every program the backend *can* run through
 `--mir-vm` twice - once on the memory form, once with `ZL_MIR_PROMOTE=1` - and
 requires the two to be identical. Because the backend translates a block
 parameter into the memory form of itself, that comparison is a real check of
-`promoteSlotsToBlockParameters` against the interpreter-free path: 29 identical,
-0 differing, with 30 programs the backend cannot run at all skipped (they already
-fail without promotion, so they say nothing about it).
+`promoteSlotsToBlockParameters` against the interpreter-free path: all 50
+corpus programs run on the backend today, and all 50 are identical with and
+without promotion.
 
 Both harnesses put every `_lib` directory on the module search path, the way
 `examples/run_all.sh` does. Without that, every example that imports a sibling
@@ -192,22 +192,24 @@ the harness enforces.
 
 ## Known gaps (fail closed)
 
-These constructs still stub the functions that use them, so the affected
-example programs raise a loud runtime error under `--mir-vm` rather than match:
+None today: the differential corpus is the whole `examples/basics/*` plus all
+of `examples/intermediate/*` (31 programs), each byte-identical on both paths —
+including closures/lambdas with indirect calls, `try`/`catch`/`finally` with
+typed and rethrow handlers, static fields with lazy initializers, generics end
+to end (generic classes, projected inheritance, `Shared<T>`, reflective
+`Method.invoke` on generic receivers), and the collection algorithms built on
+all of that.
 
-- Closures / lambdas and indirect calls (`MakeClosure`, `CallIndirect`, value
-  capture), and the collection algorithms that are built on them.
-- Exceptions (`try`/`catch`/`finally`) and `throw` with exception-object values
-  through handler chains, and `match` with structural or non-constant patterns.
-  Runtime *type* narrowing is no longer in this list: `TypeTest` translates to
-  the VM's `MatchType`, and `Refine` translates to `AssertType`.
-- Static *fields* (`StaticLoad`/`StaticStore`, lazy-init initializer functions).
-- A method call on an interface-typed receiver used to be here. It is not a gap
-  any more: MIR records each interface's method signatures, so the slot is
-  resolved from the interface's own declaration.
-- `Generics.zl` is in this list for a reason that has nothing to do with
-  generics: its `main` builds a closure.
+Constructs that would still fail closed (the gate rejects the function before
+it can misbehave) have no example coverage left; when one turns up, name it
+here and in `KNOWN_GAPS` in `tools/mir_backend_diff.sh`. The mechanism is
+unchanged: a construct the backend cannot translate faithfully stubs the
+functions that use it, and the affected programs raise a loud runtime error
+under `--mir-vm` rather than silently diverge. The last gap to graduate was
+the interface-receiver method call, resolved from the interface's own
+declaration; before that, runtime *type* narrowing (`TypeTest` → `MatchType`,
+`Refine` → `AssertType`).
 
-Each is a documented, localized extension: add the opcode family to the
-supported set (and mark the function translatable) and it graduates from the
-stub list into the differential corpus.
+Each future gap is a documented, localized extension: add the opcode family to
+the supported set (and mark the function translatable) and it graduates from
+the stub list into the differential corpus.

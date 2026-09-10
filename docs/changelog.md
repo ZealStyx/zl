@@ -2,6 +2,66 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-10 — MIR backend: the differential corpus is the whole example set
+
+The last 7 known-gap examples — Generics, Closures, CollectionAlgorithms,
+Exceptions, GenericRuntimeChecks, Lambdas, StaticMembers — now run identically
+on `--mir-vm` and the reference path, so `tools/mir_backend_diff.sh` enforces
+31/31 with an empty `KNOWN_GAPS`, and `tools/mir_promotion_diff.sh` reports all
+50 corpus programs identical with and without promotion. The earlier "24
+matched / 7 gaps" checkpoint's gaps are gone. Semantics stay the reference's:
+every fix below removes a place where the MIR path disagreed with it.
+
+**Closures end to end.** `emitCallIndirect` walked its arguments with
+`i + 1 < size` over `operands[1..]`, silently dropping the last (or only)
+argument of every indirect call — the "VM stack underflow" behind
+Closures/Lambdas. Lowering coerced `unknown` operands inside the dynamic
+binary-result path even when the operator table had already classified the
+operation, emitting a runtime `AssertType` the reference never performs;
+operands of unknown type are now exempt there (with the verifier's binary
+checks early-returning on unknown), which is what let untyped lambdas compose.
+
+**Static members.** A `Thread.start(...)` result nobody reads died at the
+wrong time: `defineTemp` now emits `Pop` for never-read temps
+(`collectReadTemps` scans operands, terminator values and edge arguments), so
+a discarded value's lifetime ends at the pop point exactly like the reference's.
+
+**Generics.** `refineArguments` skipped the receiver slot in the argument
+positions but indexed parameters from 0, pairing the first real argument of
+every constructor call with the receiver's own `this: C<T>` type — a generic
+constructor's unknown argument was then "refined" to the class type, an
+assertion the language never makes (`new Box<int>(transform(...))` asserted
+`Box<int>` against an int). Skip counts now apply to both sides.
+
+**Runtime checks.** `Task.block/ignore/cancel` are runtime task operations,
+not methods (the stdlib `Task` is a marker class), so the backend now emits the
+dedicated opcodes instead of failing to resolve a dispatch slot; `await`
+translates to the VM's `Await`. The verifier accepts `object` parameters from
+any non-nil value (the language's dynamic annotation) and walks generic
+instantiations through their base layout (`List<string>` → `object`).
+
+**The reflection layer is only as honest as the metadata.** Three registrations
+lied, and GenericRuntimeChecks caught each: functions were registered with
+empty `parameterTypeNames` (an empty entry is a mismatch, not a skip — every
+reflective call broke), with bare class names for compound types (an assert
+against `Box` rejects a `Box<int>`), and with no `returnTypeName` (a callable
+whose own return type is unregistered fails every higher-order call).
+`ClassReflectionInfo.baseTypeName` now carries the full extends clause
+(`Base<B>`, not `Base`), so `Proj<A,B> extends Base<B>` threads its bindings
+through to the base's parameters. `share()` tags its box through CallNative's
+factory-type operand, matching the reference.
+
+**Class-layer collections.** A class-spelled literal (`List<int> s = [5]`) used
+to lower to a raw native list — an untyped value where the language promised a
+real object. Class-layer `NewCollection` now builds the object the reference
+builds (`NewObject` tagged with the rendered instantiation + the empty
+constructor), literal filling goes through the class's own `push`/`add`/`put`
+(the typed boundary the language runs), and index reads on class-layer maps go
+through `GetIndex` like every other `c[k]`.
+
+**Regression coverage.** All 5 C++ suites pass (MIR, SSA, lowering, types,
+ownership 16/16); `examples/run_all.sh` stays 50/50.
+
 ## 2026-09-10 — MIR: ownership and lifetime as events, not metadata
 
 ZL's ownership model now survives lowering. The MIR keeps each storage's

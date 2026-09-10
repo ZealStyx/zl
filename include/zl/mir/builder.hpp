@@ -107,7 +107,8 @@ public:
     void setGenericArguments(std::vector<std::uint32_t> arguments);
     void setExceptionBehavior(ExceptionBehavior behavior) { function_.exceptionBehavior = behavior; }
     void setLocation(SourceLocation location) { function_.location = std::move(location); }
-    void addCapture(const std::string& name, std::uint32_t type, bool usesThis = false);
+    void addCapture(const std::string& name, std::uint32_t type, bool usesThis = false,
+                    std::string storage = {});
     void markIncomplete(std::string reason);
 
     // --- slots ------------------------------------------------------------

@@ -248,6 +248,16 @@ private:
         // An unsubstituted generic parameter stands for some concrete type that
         // is not knowable here.
         if (from->kind == TypeKind::TypeParam || to->kind == TypeKind::TypeParam) return true;
+        // Every value boxes to `object`: the checker lets a call pass a string,
+        // number, bool, callable, collection or class instance where an `object`
+        // parameter is declared, and the VM stores any of them in an object
+        // slot. Without this the verifier rejected reference-legal `object`
+        // parameters (the reflection examples' `object target, object value`
+        // helpers) on both counts below.
+        if (to->kind == TypeKind::Object && (to->name == "object" || to->name == "Object") &&
+            from->kind != TypeKind::Nil) {
+            return true;
+        }
         // Nullability is the arena's question, not this function's: only the
         // arena can see through a union to its members.
         if (from->kind == TypeKind::Nil) return module_.types.isNullable(toId);
@@ -301,13 +311,22 @@ private:
                     if (std::find(seen.begin(), seen.end(), currentName) != seen.end()) continue;
                     seen.push_back(currentName);
                     if (baseName(currentName) == wanted) return true;
-                    if (const ClassLayout* current = module_.classLayout(currentName)) {
+                    // A generic instantiation (`List<string>`) has no layout of
+                    // its own - the layout is keyed by the unparameterized base
+                    // name. Falling back to it is what lets `List<string> ->
+                    // object` (and any base thereof) walk the same parent edges
+                    // a non-generic class does.
+                    const ClassLayout* current = module_.classLayout(currentName);
+                    if (!current) current = module_.classLayout(baseName(currentName));
+                    if (current) {
                         if (!current->parent.empty()) pending.push_back(current->parent);
                         for (const auto& implemented : current->interfaces) {
                             pending.push_back(implemented);
                         }
                     }
-                    if (const InterfaceInfo* info = module_.interfaceInfo(currentName)) {
+                    const InterfaceInfo* info = module_.interfaceInfo(currentName);
+                    if (!info) info = module_.interfaceInfo(baseName(currentName));
+                    if (info) {
                         for (const auto& base : info->bases) pending.push_back(base);
                     }
                 }
@@ -1372,6 +1391,17 @@ private:
         // Ask the language's own operator table. This is the single source of
         // truth for what `a op b` means, so the MIR cannot disagree with the
         // type checker about, say, `string + int` or `int - double`.
+        // An unknown operand is a dynamic boundary (an untyped lambda
+        // parameter, a dynamic value): the runtime dispatches the operator on
+        // the actual values, and the recorded result is whatever the checker
+        // inferred. The static table classifies fully typed operands only.
+        const auto dynamic = [this](std::uint32_t id) {
+            const Type* resolved = module_.types.find(id);
+            return !resolved || resolved->kind == TypeKind::Unknown;
+        };
+        if (dynamic(leftId) || dynamic(rightId)) {
+            return;
+        }
         const auto result = zl::OperatorRules::binaryResult(binaryToken(opcode), toZlType(left), toZlType(right));
         if (!result) {
             error(std::string(name) + " on " + render(leftId) + " and " + render(rightId) + ": " +
@@ -1452,6 +1482,15 @@ private:
             return;
         }
 
+        {
+            const auto dynamic = [this](std::uint32_t id) {
+                const Type* resolved = module_.types.find(id);
+                return !resolved || resolved->kind == TypeKind::Unknown;
+            };
+            if (dynamic(leftId) || dynamic(rightId)) {
+                return; // dynamic boundary: see checkBinaryOperator
+            }
+        }
         const auto result = zl::OperatorRules::binaryResult(binaryToken(opcode), toZlType(left), toZlType(right));
         if (!result) {
             error(std::string(name) + " on " + render(leftId) + " and " + render(rightId) + ": " +
