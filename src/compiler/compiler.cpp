@@ -1,4 +1,5 @@
 #include "zl/compiler/compiler.hpp"
+#include "zl/compiler/semantic_types.hpp"
 #include "zl/common/type_annotation.hpp"
 #include "zl/compiler/ir_lowering.hpp"
 #include "zl/vm/gc.hpp"
@@ -1541,10 +1542,8 @@ void Compiler::compileFieldAccess(const FieldAccessExpr* node) {
     }
     if (node->isMathConstantAccess) {
         double value = 0.0;
-        if (node->fieldName == "PI") value = 3.141592653589793238462643383279502884;
-        else if (node->fieldName == "E") value = 2.718281828459045235360287471352662498;
-        else if (node->fieldName == "TAU") value = 6.283185307179586476925286766559005768;
-        else throw std::runtime_error("Compiler: unknown Math constant '" + node->fieldName + "'");
+        if (!mathConstantValue(node->fieldName, value))
+            throw std::runtime_error("Compiler: unknown Math constant '" + node->fieldName + "'");
         emit(OpCode::PushConst, chunk_.addConstant(Value{value}), node->line);
         return;
     }

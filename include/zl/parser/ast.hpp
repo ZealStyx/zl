@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -671,5 +672,25 @@ struct LambdaExpr : AstNode {
     TypeAnnotation declaredReturnType;
     LambdaExpr() : AstNode(NodeKind::LambdaExpr) {}
 };
+
+// Calls `visit` on every child node directly owned by `node`, in a stable order.
+// Leaf nodes simply visit nothing.
+//
+// This exists so that passes which have to scan a body for something - the MIR
+// lowerer looking for lambdas to pre-declare, or for locals a body assigns to -
+// have one exhaustive answer to "what is inside this node?". Hand-rolled
+// switches over a handful of container kinds silently miss everything nested
+// deeper: a walker that only descends into BlockStmt never sees the lambda in
+// `Thread.start(func() => ...)`, because that one is inside a CallExpr.
+//
+// Declaration-level nodes (Program, ClassDecl, InterfaceDecl, DataDecl,
+// EnumDecl, FunctionDecl) are treated as opaque: their members are separate
+// compilation units for these purposes, and a pass that wants them walks
+// Program::declarations itself.
+//
+// `visit` receives the child and decides whether to recurse; nothing here walks
+// transitively. That keeps a pass in control of boundaries it cares about, such
+// as not descending into a lambda body.
+void forEachChild(const AstNode* node, const std::function<void(const AstNode*)>& visit);
 
 } // namespace zl

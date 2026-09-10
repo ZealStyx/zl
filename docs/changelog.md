@@ -2,6 +2,278 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-10 — MIR backend: the differential corpus is the whole example set
+
+The last 7 known-gap examples — Generics, Closures, CollectionAlgorithms,
+Exceptions, GenericRuntimeChecks, Lambdas, StaticMembers — now run identically
+on `--mir-vm` and the reference path, so `tools/mir_backend_diff.sh` enforces
+the whole example tree — 50 runnable programs across `basics/`, `intermediate/`
+and `advanced/` — with an empty `KNOWN_GAPS`, and `tools/mir_promotion_diff.sh`
+reports all 50 identical with and without promotion and 0 skipped (the `_lib`
+module sources are excluded from its listing instead of counted as skips). A
+tree-wide `--mir-vm` run reports zero stub warnings: no example reaches the
+fail-closed path. The earlier "24 matched / 7 gaps" checkpoint's gaps are
+gone. Semantics stay the reference's: every fix below removes a place where
+the MIR path disagreed with it.
+
+**Closures end to end.** `emitCallIndirect` walked its arguments with
+`i + 1 < size` over `operands[1..]`, silently dropping the last (or only)
+argument of every indirect call — the "VM stack underflow" behind
+Closures/Lambdas. Lowering coerced `unknown` operands inside the dynamic
+binary-result path even when the operator table had already classified the
+operation, emitting a runtime `AssertType` the reference never performs;
+operands of unknown type are now exempt there (with the verifier's binary
+checks early-returning on unknown), which is what let untyped lambdas compose.
+
+**Static members.** A `Thread.start(...)` result nobody reads died at the
+wrong time: `defineTemp` now emits `Pop` for never-read temps
+(`collectReadTemps` scans operands, terminator values and edge arguments), so
+a discarded value's lifetime ends at the pop point exactly like the reference's.
+
+**Generics.** `refineArguments` skipped the receiver slot in the argument
+positions but indexed parameters from 0, pairing the first real argument of
+every constructor call with the receiver's own `this: C<T>` type — a generic
+constructor's unknown argument was then "refined" to the class type, an
+assertion the language never makes (`new Box<int>(transform(...))` asserted
+`Box<int>` against an int). Skip counts now apply to both sides.
+
+**Runtime checks.** `Task.block/ignore/cancel` are runtime task operations,
+not methods (the stdlib `Task` is a marker class), so the backend now emits the
+dedicated opcodes instead of failing to resolve a dispatch slot; `await`
+translates to the VM's `Await`. The verifier accepts `object` parameters from
+any non-nil value (the language's dynamic annotation) and walks generic
+instantiations through their base layout (`List<string>` → `object`).
+
+**The reflection layer is only as honest as the metadata.** Three registrations
+lied, and GenericRuntimeChecks caught each: functions were registered with
+empty `parameterTypeNames` (an empty entry is a mismatch, not a skip — every
+reflective call broke), with bare class names for compound types (an assert
+against `Box` rejects a `Box<int>`), and with no `returnTypeName` (a callable
+whose own return type is unregistered fails every higher-order call).
+`ClassReflectionInfo.baseTypeName` now carries the full extends clause
+(`Base<B>`, not `Base`), so `Proj<A,B> extends Base<B>` threads its bindings
+through to the base's parameters. `share()` tags its box through CallNative's
+factory-type operand, matching the reference.
+
+**Class-layer collections.** A class-spelled literal (`List<int> s = [5]`) used
+to lower to a raw native list — an untyped value where the language promised a
+real object. Class-layer `NewCollection` now builds the object the reference
+builds (`NewObject` tagged with the rendered instantiation + the empty
+constructor), literal filling goes through the class's own `push`/`add`/`put`
+(the typed boundary the language runs), and index reads on class-layer maps go
+through `GetIndex` like every other `c[k]`.
+
+**Regression coverage.** All 5 C++ suites pass (MIR, SSA, lowering, types,
+ownership 16/16); `examples/run_all.sh` stays 50/50.
+
+## 2026-09-10 — MIR: ownership and lifetime as events, not metadata
+
+ZL's ownership model now survives lowering. The MIR keeps each storage's
+contract (`gc`/`owned`/`borrow`/`shared` on slots and parameters) and
+represents the lifetime events as instructions: `move` empties a slot and
+continues the value; `borrow`/`end_borrow` bracket a function-scoped view;
+`drop` releases a resource in two exclusive spellings — a value operand, or
+the **storage-release form** (slot named, no operands) that lowering emits
+for the end of an owned local's lifetime. Documented in
+[`docs/mir.md`](mir.md); regression suite in `tests/mir_ownership_tests.cpp`
+(`zl-mir-ownership-tests`).
+
+**Lowering.** Every return site — each `return`, the implicit end of a void
+body, each lambda's exit — emits reverse-order releases for owned slots that
+were not moved and for owned parameters, mirroring the reference compiler's
+`DropVar`-before-`Return` placement. Slots whose value was `move`d are
+skipped: the reference clears the local and the frame teardown releases the
+rest, and the MIR path does the same. GC slots get no events; closure
+captures are always GC values, so `MakeClosure` carries none either.
+
+**Verification.** `checkOwnershipFlow` now tracks
+`{moved, dropped, droppedParams, borrows}` across the CFG with union joins —
+the same rule the type checker's `joinOwnershipStates` uses, so MIR rejects
+exactly the programs the checker does, no stricter and no looser at branch
+and loop joins. The invalid states it catches: use after move, use after
+drop, double drop ("a resource releases exactly once"), drop after move,
+drop while borrowed outside the exit-cleanup region (a ZL borrow is
+function-scoped and ends with the function, so the trailing release cannot
+conflict with it), borrow of a moved or released owner, storage-release of
+non-owned storage, and `end_borrow` without a borrow. A move is final: the
+checker rejects assigning to a moved variable, so no store resurrects one
+here either.
+
+**Backend.** The bytecode backend translates the events to the reference
+runtime's own opcodes — `MoveVar`, `DropVar`, and value rebinding for borrows
+(the runtime has no aliasing; lifetimes are the verifier's job) — and
+registers owned locals in `ownedLocalNames` so the VM's frame teardown
+releases them on early return and exception exactly as the reference path
+does. Differential runs (`tools/mir_backend_diff.sh`) stay at 24 matched /
+7 known gaps; examples stay 50/50.
+
+## 2026-09-10 — MIR: the ZL type system, end to end
+
+MIR now carries the language's *type semantics*, not just its shapes, and the
+boundaries where a dynamic value becomes a typed one are explicit instructions
+instead of silent retypes. Documented in [`docs/mir.md`](mir.md); regression
+suite in `tests/mir_type_tests.cpp` (`zl-mir-type-tests`).
+
+**Types.** `Option<T>` and `Result<T,E>` are first-class kinds carrying their
+payload/[ok, error] type ids; `Some`/`None`/`Ok`/`Err` keep their class spellings
+and relate to the sums by a verified assignability rule (`Some<int>` satisfies
+`Option<int>`, `Some<string>` does not, and the relation composes under
+arguments). Unions are ordinary types everywhere — a function may declare
+`int|string` as its return type, which the verifier previously rejected outright.
+Nested generics survive as structural ids, so `Map<string,List<int>>` and
+`Option<List<int>>` keep their arguments as type ids, not rendered strings.
+Native/resource semantics stay where the language actually has them: FFI values
+are typed by their declared renders and resource behaviour by slot/parameter
+ownership with the move/borrow/drop dataflow.
+
+**Boundaries.** A dynamic (`unknown`) value crossing into typed territory — a
+typed local or assignment, a call argument, a return, a field/element write,
+a `match` arm — now lowers to an explicit `refine` (the runtime type
+assertion), and the verifier rejects any `unknown` operand that reaches a typed
+destination without one, so an invalid type assumption fails at the boundary
+instead of being trusted downstream. The MIR→bytecode backend translates
+`refine` to a real `AssertType`, `type_test` to `MatchType`, and index reads
+through `GetIndex`, which fixed `--mir-vm` on every program that indexes a
+class-spelled collection (`names[0]` on a `List<string>`). SSA promotion
+declines to promote a slot whose stores are retyped relative to the slot's
+declared type, so promotion can no longer erase a declared `unknown` (or any
+declared contract) out from under a `match` subject.
+
+**Compiler type resolution.** Dispatch signatures erased every concrete generic
+instantiation to a bare `object`, so `label(Option<int>)` and `label(List<int>)`
+collided in every function table keyed by the rendered name — the second
+declaration silently replaced the first and calls dispatched to the wrong body,
+caught (when at all) by a runtime assertion. A `GENERIC_OBJECT` parameter now
+keeps the generic class's erased base name (`label(Option)`, `label(List)`):
+still one body per declaration, never per instantiation, but no declaration can
+shadow another.
+
+**Verification:** `zl-mir-type-tests` (new), the three existing MIR suites, the
+50-example corpus, `type_boundaries.py`, the LSP/test-runner Python suites, and
+differential `--mir-vm` runs against the reference path all pass.
+
+## 2026-09-09 — MIR: a typed mid-level IR with a verifier
+
+ZL now has a real mid-level intermediate representation, in `zl::mir`
+(`include/zl/mir/`, `src/mir/`). It is reached with `zl --emit-mir <out|->
+<file.zl>` and is documented in [`docs/mir.md`](mir.md).
+
+**Why.** The compiler had one internal graph, `zl::ir`, and it could not carry
+what a backend needs: types were `std::string` names, terminators were mixed in
+with value-producing instructions, successors were duplicated separately from the
+terminator that implied them, and generics, unions, function types, exceptions,
+field access and indexing had no representation at all. Rather than retrofit
+that, MIR is a new layer beside it. `zl::ir` is unchanged and still feeds
+`--emit-native` and `--emit-machine-code`; the bytecode compiler and the VM are
+untouched, and no language semantics changed.
+
+**What it is.** Types are interned structural values, so a type *is* its id and
+`TypeId` equality is type equality. Nullability is derived from the kind rather
+than stored. Generic parameters, unions and function signatures are first-class
+kinds — nothing was erased to `object` to make a first version tractable.
+Functions are SSA over temps, with mutable locals as explicit slots and
+`Load`/`Store`; parameters stay SSA unless the body writes, moves or borrows
+them. `Instruction` and `Terminator` are separate types with exactly one
+terminator per block, which is the invariant everything else about the CFG rests
+on. Exceptions are unwind edges with handler chains; ownership is a dataflow
+problem the verifier solves over reverse postorder.
+
+**A generic function is a template, not a copy.** `class Set<T>`'s methods are
+lowered once with `this: Set<T>`, and the call site records which instantiation
+it selected. That keeps one source of truth instead of a function per
+instantiation, and it is what makes "passes `Shared<int>` but the parameter is
+`Shared<T>`" checkable rather than a false mismatch.
+
+**Verification.** `verifyModule` enforces 26 documented invariants — SSA
+uniqueness, dominance, block reachability, predecessor consistency, operand and
+result typing, call signatures, field and index legality, ownership flow, and
+the shape of exception edges. `FunctionBuilder::finish()` guarantees two of them
+structurally, so a function that was only partly lowered is still valid MIR and
+carries its caveat in `Function::incomplete` instead of as a broken graph.
+
+**Lowering** covers expressions, statements, classes and inheritance, generics,
+closures including nested ones and ones that capture `this`, `List`/`Map`/`Set`
+calls, `match`, `data` record literals, annotated collection literals,
+try/catch, async and await, and `Shared<T>`. Unsupported constructs produce a
+note and an incomplete function, never malformed MIR. Across `examples/`, 54 of
+57 files lower and verify completely and the rest verify with notes; none fail.
+
+A closure that captures `this` needed two things, not one. `this` is captured by
+name — semantic analysis puts `"this"` in `captureStorageNames` — so the
+enclosing body has to bind it under that name for the capture to resolve; and
+inside the closure the captured slot has to become the body's receiver, because
+`this` there is spelled `ThisExpr` and answered from the receiver rather than
+from the scope. Such a closure written inside `class Box<T>` also closes over
+`this: Box<T>`, and an unsubstituted type parameter is only legal inside a
+template, so the closure's MIR function is declared generic over its owner
+class's parameters.
+
+`match` lowers to a chain of two-way branches, one test block per arm in source
+order, with the subject evaluated exactly once before the first test — so a
+subject with a side effect cannot run once per arm, and a guard that reassigns
+the subject's variable cannot change what a later arm compares against. Arm
+bodies store into a result slot the join block reads back, since this IR has no
+phi. A type pattern emits the new `TypeTest` and then `Refine`s both the arm's
+binding and the subject identifier the body keeps spelling, which is what
+narrows `int|string` to `int` inside an `int n =>` arm.
+
+`TypeTest` was the gap that blocked it: MIR could *assert* a type (`Refine`, the
+typed form of the VM's `AssertType`) but not *ask* about one, and a match arm has
+to survive a "no" and fall through rather than raise. It is the typed form of the
+VM's `MatchType`.
+
+**Compiler fixes made along the way**, each at the layer that owned the problem
+rather than worked around in MIR: `zlTypeName` moved next to its declaration out
+of `type_checker.cpp`; the builtin `Math.PI`/`E`/`TAU` table unified into one
+place instead of three copies; `zl::forEachChild` added to the AST so passes
+scanning a body have one exhaustive answer to "what is inside this node" —
+hand-rolled walkers were silently missing anything nested inside a call
+argument; `array[N]` sizing made optional so a dynamic `array<int>` is not
+recorded as `array[0]<int>`; and nullability made a question for
+`TypeArena::isNullable` rather than for the top-level kind alone. The last was a
+real defect: `string` is nullable in ZL even though the VM holds it inline rather
+than behind a collector handle, and a union is nullable when any member is — so
+`int|string` admits `null` while `int|double` does not. Reading only the kind
+called every union non-nullable and rejected the `null` arm of a match over one.
+
+Two more surfaced once `match` and record literals were lowering. `TypeChecker`
+records each expression's type for the backend seam in one funnel, `inferExpr` —
+but a collection literal written under an annotation (`list<int> xs = [1, 2]`)
+took a special-case branch in `inferExpected` that bypassed it, so the checker
+proved the type and then never told anyone, and every backend saw UNKNOWN. And
+the verifier's `checkIndexAccess` handled lists and arrays but not maps, so it
+rejected `index_store` on a `map<K,V>` even though the instruction taxonomy has
+always said index access covers maps. Both are the kind of gap that only shows up
+once a second consumer starts asking.
+
+The same check turned out to have a third blind spot, found by writing a program
+the example corpus does not contain: `set<int> s = [1, 2, 3]`. The VM runs it
+fine, but MIR rejected it — a literal is built as `new_collection` plus one
+`index_store` per element, and the index check covered lists, arrays and maps
+while a set fell through to "indexed access requires a List<T>". Indexing also
+recognised the `List<T>` class spelling but not `Set<T>` or `Map<K,V>`, and
+`new_collection` recognised none of them, so a spelling could be indexable but
+not constructible. `isCollectionType` is now the single answer to "is this a
+collection" and both construction and indexing ask it, which is what stops the
+two spellings drifting apart again.
+
+One more came from the last two notes in the corpus. `share(x)` is a native with
+no namespace and the catalog keys it by its bare name, but the call lowerer only
+consulted the catalog for qualified names, so a bare `share` fell through to the
+implicit self-call path and reported `call to 'C.()' which was not lowered` —
+the empty dispatch being the giveaway that no method had ever been resolved. The
+bytecode compiler special-cases `share` by name; the lowerer now asks the
+catalog by the bare name instead, which is the same test without the
+hardcoding. That cleared the note and, with it, a downstream one: the value
+`share` produced had been unresolved, so a later method call on it could not
+name a class either.
+
+**Tests.** `tests/mir_tests.cpp` (`zl-mir-tests`) builds MIR by hand and checks
+the verifier rejects each class of malformed module — 47 cases.
+`tests/mir_lowering_tests.cpp` (`zl-mir-lowering-tests`) drives the real
+pipeline end to end and asserts on the specific properties an earlier lowerer
+got wrong — 29 cases.
+
 ## 2026-09-08 — Thread failures are catchable; `shared` usable as an identifier
 
 Adversarial probing of the runtime found three defects.

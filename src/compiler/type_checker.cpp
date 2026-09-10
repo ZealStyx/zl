@@ -105,31 +105,6 @@ bool sameMethodSignature(const ClassMethodInfo& a, const ClassMethodInfo& b) {
 }
 
 // ---------------------------------------------------------------------------
-// zlTypeName
-// ---------------------------------------------------------------------------
-
-std::string zlTypeName(ZlType t) {
-    switch (t) {
-        case ZlType::INT:     return "int";
-        case ZlType::DOUBLE:  return "double";
-        case ZlType::STRING:  return "string";
-        case ZlType::BOOL:    return "bool";
-        case ZlType::VOID_TYPE:    return "void";
-        case ZlType::NIL:     return "nil";
-        case ZlType::LIST:    return "list";
-        case ZlType::MAP:     return "map";
-        case ZlType::SET:     return "set";
-        case ZlType::ARRAY:   return "array";
-        case ZlType::OBJECT:  return "object";
-        case ZlType::FUNCTION: return "func";
-        case ZlType::TASK: return "Task";
-        case ZlType::UNKNOWN: return "unknown";
-        case ZlType::UNION: return "union";
-    }
-    return "unknown";
-}
-
-// ---------------------------------------------------------------------------
 // SymbolTable
 // ---------------------------------------------------------------------------
 
@@ -539,7 +514,12 @@ DispatchSignature TypeChecker::dispatchSignature(const std::string& methodName, 
             !method.paramClassNames[i].empty()) {
             const std::string& className = method.paramClassNames[i];
             if (className.find('<') != std::string::npos) {
-                signature.parameters.push_back({DispatchTypeKind::GENERIC_OBJECT, {}});
+                // A concrete instantiation: keep the generic class's base name
+                // so declarations over different generic classes (`Option<int>`
+                // vs `List<int>`) never collapse into one dispatch identity.
+                const auto open = className.find('<');
+                signature.parameters.push_back({DispatchTypeKind::GENERIC_OBJECT,
+                                                className.substr(0, open)});
             } else {
                 signature.parameters.push_back({DispatchTypeKind::OBJECT, className});
             }
@@ -556,7 +536,7 @@ DispatchSignature TypeChecker::dispatchSignature(const std::string& methodName, 
             case ZlType::SET: signature.parameters.push_back({DispatchTypeKind::SET, {}}); break;
             case ZlType::MAP: signature.parameters.push_back({DispatchTypeKind::MAP, {}}); break;
             case ZlType::FUNCTION: signature.parameters.push_back({DispatchTypeKind::FUNCTION, {}}); break;
-            case ZlType::TASK: signature.parameters.push_back({DispatchTypeKind::GENERIC_OBJECT, {}}); break;
+            case ZlType::TASK: signature.parameters.push_back({DispatchTypeKind::GENERIC_OBJECT, "Task"}); break;
             case ZlType::UNION: signature.parameters.push_back({DispatchTypeKind::OBJECT, method.paramClassNames.at(i)}); break;
             case ZlType::NIL:
             case ZlType::OBJECT:
@@ -964,6 +944,9 @@ bool TypeChecker::checkNamedFunctionConfinement(const FunctionDecl* node, std::s
 
 void TypeChecker::check(const Program& program, bool requireMain) {
     typeResolver_.reset();
+    // The inference record is keyed by AST node identity, so a checker reused
+    // for a second program must not keep the first program's entries alive.
+    expressionTypes_.clear();
 
     // Push a global scope for class-level declarations.
     symbols_.pushScope();
@@ -2146,13 +2129,24 @@ TypeChecker::InferredType TypeChecker::inferExpected(const AstNode* node, ZlType
         }
     }
     if (node->kind == NodeKind::CollectionLiteral) {
+        // Both branches below bypass inferExpr, which is the one place a node's
+        // type is recorded for the backend seam. Record here as well, or a
+        // collection literal written under a type annotation - `list<int> xs =
+        // [1, 2]` - looks untyped to every backend even though the checker just
+        // proved exactly what it is.
+        InferredType result;
         if ((type == ZlType::LIST || type == ZlType::MAP || type == ZlType::SET) && annotation.typeArgs.empty()) {
             const auto* literal = static_cast<const CollectionLiteral*>(node);
             if (type == ZlType::SET) literal->targetCollectionKind = "set";
-            return inferCollectionLiteral(literal);
+            result = inferCollectionLiteral(literal);
+        } else {
+            result = InferredType(
+                inferCollectionLiteralExpected(static_cast<const CollectionLiteral*>(node), type, className,
+                                               annotation),
+                className);
         }
-        const auto inferred = inferCollectionLiteralExpected(static_cast<const CollectionLiteral*>(node), type, className, annotation);
-        return InferredType(inferred, className);
+        expressionTypes_[node] = result;
+        return result;
     }
     return inferExpr(node);
 }
@@ -2875,7 +2869,30 @@ void TypeChecker::validateThreadLambda(const LambdaExpr* node, const char* apiNa
             typeError(std::string(apiName)+" cannot capture '"+name+"' across a thread boundary; use Shared<T>, Atomic, or Mutex for mutable shared state", node->line);
     }
 }
+// --- backend seam (MIR lowering) -------------------------------------------
+
+const TypeChecker::InferredType* TypeChecker::expressionType(const AstNode* node) const {
+    if (!node) return nullptr;
+    const auto it = expressionTypes_.find(node);
+    return it == expressionTypes_.end() ? nullptr : &it->second;
+}
+
+const std::vector<ResolvedTypeArg>& TypeChecker::unionMembers(const std::string& unionName) const {
+    return typeResolver_.unionMembers(unionName);
+}
+
 TypeChecker::InferredType TypeChecker::inferExpr(const AstNode* node) {
+    // Single funnel for every typed expression. Recording here (rather than in
+    // each inferX helper) means the backend seam sees exactly the types the
+    // checker itself used, including for nodes reached only through
+    // inferExpected's collection/lambda special cases, which all route back
+    // through this function.
+    const InferredType result = inferExprInner(node);
+    expressionTypes_[node] = result;
+    return result;
+}
+
+TypeChecker::InferredType TypeChecker::inferExprInner(const AstNode* node) {
     switch (node->kind) {
         case NodeKind::Literal:           return inferLiteral(static_cast<const Literal*>(node));
         case NodeKind::Identifier:        return inferIdentifier(static_cast<const Identifier*>(node));
@@ -4607,8 +4624,8 @@ TypeChecker::InferredType TypeChecker::inferFieldAccess(const FieldAccessExpr* n
     // Keep this before inferExpr(object), because `Math` is not a local variable.
     if (node->object->kind == NodeKind::Identifier) {
         const auto* mathIdNode = static_cast<const Identifier*>(node->object.get());
-        if (mathIdNode->name == "Math" &&
-            (node->fieldName == "PI" || node->fieldName == "E" || node->fieldName == "TAU")) {
+        double constantValue = 0.0;
+        if (mathIdNode->name == "Math" && mathConstantValue(node->fieldName, constantValue)) {
             node->isMathConstantAccess = true;
             return ZlType::DOUBLE;
         }
