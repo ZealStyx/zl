@@ -35,8 +35,9 @@ and output. The second runs every program the backend *can* run through
 requires the two to be identical. Because the backend translates a block
 parameter into the memory form of itself, that comparison is a real check of
 `promoteSlotsToBlockParameters` against the interpreter-free path: all 50
-corpus programs run on the backend today, and all 50 are identical with and
-without promotion.
+runnable programs run on the backend today, all 50 are identical with and
+without promotion, and the skip count is 0 (the `_lib` module sources are
+excluded from the listing rather than counted as permanent skips).
 
 Both harnesses put every `_lib` directory on the module search path, the way
 `examples/run_all.sh` does. Without that, every example that imports a sibling
@@ -187,18 +188,25 @@ The backend reproduces the reference byte-for-byte (see
   reference path exactly (`Reflection.zl`).
 - Native calls (`log`, `Math.*`, `Collection.*`, ...).
 
-`examples/basics/*` and the passing `examples/intermediate/*` set are the corpus
-the harness enforces.
+Every runnable example in the tree — `examples/basics/*`, the whole of
+`examples/intermediate/*`, and `examples/advanced/*` — is the corpus the
+harness enforces (`examples/*/*.zl`; `_lib` directories hold importable
+module sources, not programs).
 
 ## Known gaps (fail closed)
 
-None today: the differential corpus is the whole `examples/basics/*` plus all
-of `examples/intermediate/*` (31 programs), each byte-identical on both paths —
-including closures/lambdas with indirect calls, `try`/`catch`/`finally` with
-typed and rethrow handlers, static fields with lazy initializers, generics end
-to end (generic classes, projected inheritance, `Shared<T>`, reflective
-`Method.invoke` on generic receivers), and the collection algorithms built on
-all of that.
+None today: the differential corpus is every runnable example in the tree —
+`examples/basics/*`, `examples/intermediate/*` and `examples/advanced/*`
+(50 programs, the `_lib` module sources are imports, not programs), each
+byte-identical on both paths — including async tasks, threads, channels and
+mutexes from `advanced/`, closures/lambdas with indirect calls,
+`try`/`catch`/`finally` with typed and rethrow handlers, static fields with
+lazy initializers, generics end to end (generic classes, projected
+inheritance, `Shared<T>`, reflective `Method.invoke` on generic receivers),
+and the collection algorithms built on all of that. No example reaches a
+stub: a tree-wide run of `--mir-vm` reports zero stub warnings, so the
+fail-closed path is never exercised by the corpus — every function the
+examples touch is faithfully translated.
 
 Constructs that would still fail closed (the gate rejects the function before
 it can misbehave) have no example coverage left; when one turns up, name it

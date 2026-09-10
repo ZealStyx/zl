@@ -5,18 +5,21 @@
 #
 # The MIR->bytecode backend must produce the same observable behaviour as the
 # reference compiler->VM path for every ZL program it claims to support. This
-# script runs each corpus program through BOTH paths and compares (exit code +
-# stdout). It fails if any program that is expected to match actually differs.
+# script runs every runnable example through BOTH paths and compares (exit code
+# + stdout). It fails if any program that is expected to match actually differs.
 #
-# Programs whose behaviour the backend does not yet reproduce faithfully (they
-# use constructs it still stubs at runtime - closures/lambdas, exceptions,
-# reflection-generic runtime checks, static fields, nested generic collections)
-# are listed in MIR_BACKEND_KNOWN_GAPS below and are reported but do NOT fail
-# the run: the whole point of the fail-closed backend is that a reachable
-# unsupported function raises loudly instead of miscompiling, so these programs
-# fail the reference path with a clear runtime error rather than differing
-# silently. When one is fixed it must move out of KNOWN_GAPS into the expected
-# list.
+# The corpus is every .zl directly under an examples/ subdirectory - basics,
+# intermediate and advanced alike. (Directories named `_lib` hold importable
+# module sources, not runnable programs; they are one level deeper, so the glob
+# below does not pick them up, and they are put on the module search path
+# instead.)
+#
+# There are no known gaps today. If the backend stops reproducing some
+# construct faithfully, list the affected programs in KNOWN_GAPS below: they
+# are reported but do NOT fail the run, on the fail-closed theory that a
+# reachable unsupported function must raise loudly instead of miscompiling.
+# When a gap is fixed its programs move out of KNOWN_GAPS (back into the
+# glob-covered corpus) and the entry is deleted.
 #
 # Usage:
 #   tools/mir_backend_diff.sh [path/to/zl_language]
@@ -55,35 +58,19 @@ while IFS= read -r libdir; do
 done < <(find "$ROOT/examples" -type d -name '_lib' | sort)
 export ZL_EXTRA_ROOTS="${ROOTS}${ZL_EXTRA_ROOTS:+:$ZL_EXTRA_ROOTS}"
 
-# Programs that must produce identical output on both paths.
+# Programs that must produce identical output on both paths: every runnable
+# example. `examples/*/*.zl` covers basics, intermediate and advanced (and any
+# future directory) without descending into `_lib` module sources.
 EXPECTED=(
-    examples/basics/*.zl
-    examples/intermediate/Classes.zl
-    examples/intermediate/Closures.zl
-    examples/intermediate/CollectionAlgorithms.zl
-    examples/intermediate/ControlFlowMerge.zl
-    examples/intermediate/DataRecords.zl
-    examples/intermediate/Encapsulation.zl
-    examples/intermediate/Enums.zl
-    examples/intermediate/Exceptions.zl
-    examples/intermediate/Generics.zl
-    examples/intermediate/GenericRuntimeChecks.zl
-    examples/intermediate/Inheritance.zl
-    examples/intermediate/Interfaces.zl
-    examples/intermediate/Lambdas.zl
-    examples/intermediate/MatchExpressions.zl
-    examples/intermediate/Modules.zl
-    examples/intermediate/NestedGenerics.zl
-    examples/intermediate/OperatorOverloading.zl
-    examples/intermediate/Reflection.zl
-    examples/intermediate/StaticMembers.zl
+    examples/*/*.zl
 )
 
 # Programs using constructs the backend still stubs (fail-closed), so they are
 # expected NOT to run cleanly yet; report but do not fail the run. Empty today:
 # every former gap (closures, lambdas, try/catch, statics, generics end to end)
 # now runs identically on both paths. New gaps land here with a comment naming
-# the missing construct.
+# the missing construct. Entries are exact file paths; they are skipped from
+# the EXPECTED glob when the run executes.
 KNOWN_GAPS=()
 
 pass=0
@@ -115,6 +102,13 @@ run_one() {
 
 for f in "${EXPECTED[@]}"; do
     [[ -f "$f" ]] || continue
+    # A KNOWN_GAPS entry is excluded from the glob: it is run (and reported)
+    # by the gap loop below, where a match is a warning rather than a failure.
+    in_gaps=false
+    for g in "${KNOWN_GAPS[@]}"; do
+        if [[ "$f" == "$g" ]]; then in_gaps=true; break; fi
+    done
+    if $in_gaps; then continue; fi
     if run_one "$f"; then
         pass=$((pass + 1))
     else

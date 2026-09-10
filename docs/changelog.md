@@ -7,10 +7,14 @@ Dated progress notes, newest first. These were previously appended to `README.md
 The last 7 known-gap examples — Generics, Closures, CollectionAlgorithms,
 Exceptions, GenericRuntimeChecks, Lambdas, StaticMembers — now run identically
 on `--mir-vm` and the reference path, so `tools/mir_backend_diff.sh` enforces
-31/31 with an empty `KNOWN_GAPS`, and `tools/mir_promotion_diff.sh` reports all
-50 corpus programs identical with and without promotion. The earlier "24
-matched / 7 gaps" checkpoint's gaps are gone. Semantics stay the reference's:
-every fix below removes a place where the MIR path disagreed with it.
+the whole example tree — 50 runnable programs across `basics/`, `intermediate/`
+and `advanced/` — with an empty `KNOWN_GAPS`, and `tools/mir_promotion_diff.sh`
+reports all 50 identical with and without promotion and 0 skipped (the `_lib`
+module sources are excluded from its listing instead of counted as skips). A
+tree-wide `--mir-vm` run reports zero stub warnings: no example reaches the
+fail-closed path. The earlier "24 matched / 7 gaps" checkpoint's gaps are
+gone. Semantics stay the reference's: every fix below removes a place where
+the MIR path disagreed with it.
 
 **Closures end to end.** `emitCallIndirect` walked its arguments with
 `i + 1 < size` over `operands[1..]`, silently dropping the last (or only)
