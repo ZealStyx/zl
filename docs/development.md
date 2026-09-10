@@ -130,10 +130,16 @@ tools/mir_backend_diff.sh ./build/zl_language     # backend vs reference path
 tools/mir_promotion_diff.sh ./build/zl_language   # block params vs store/load
 ```
 
-The first must stay at 23 matching with the 8 documented fail-closed gaps. The
+The first must stay at 22 matching with the 9 documented fail-closed gaps. The
 second compares `--mir-vm` with and without `ZL_MIR_PROMOTE=1`; it must report 0
-differing. Both are the check that a change to the IR, the promotion pass, or the
-backend did not alter behaviour.
+differing (27 compared, 32 not yet runnable by the backend). Both are the check
+that a change to the IR, the promotion pass, or the backend did not alter
+behaviour.
+
+Both discover the `_lib` module roots themselves and set `ZL_EXTRA_ROOTS`, so a
+program that imports a sibling module is genuinely compared instead of failing to
+load on both paths and being counted as a match. If a corpus program stops being
+compared, that shows up as a change in the counts, not as a silent pass.
 
 ## Distribution builds
 

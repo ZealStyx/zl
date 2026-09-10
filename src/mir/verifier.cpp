@@ -255,17 +255,23 @@ private:
                                [&](std::uint32_t member) { return assignable(member, toId); });
         }
         if (from->kind == TypeKind::Object && to->kind == TypeKind::Object) {
-            // Walk the layout parent chain and the implemented-interface sets.
-            // Only the unparameterized base name is compared, which matches how
-            // the semantic model keys inheritance for instantiations.
+            // Walk every subtype edge a name can have. Only the unparameterized
+            // base name is compared, which matches how the semantic model keys
+            // inheritance for instantiations.
             //
-            // Interfaces matter as much as parents here: a class typed as the
-            // interface it implements is the ordinary way to write a
-            // polymorphic local, so a walk that only follows `parent` rejects a
-            // legal program (`Shape masked = new Circle(...)`). The search is
-            // breadth-first over both edge kinds, with a visited set because a
-            // diamond of interfaces would otherwise be exponential, and a depth
-            // guard because the layout table is data, not a guarantee.
+            // There are three such edges, and leaving any one out rejects a
+            // legal program rather than merely missing an optimisation:
+            //
+            //   class   --extends-->     class       (layout.parent)
+            //   class   --implements-->  interface   (layout.interfaces)
+            //   interface --extends-->   interface   (InterfaceInfo.bases)
+            //
+            // The first two are what makes `Shape masked = new Circle(...)`
+            // verify; the third is what makes `Named n = shape` verify when
+            // `interface Shape extends Named`. The search is breadth-first with
+            // a visited set, because diamonds in either hierarchy would
+            // otherwise be re-expanded, and a step guard because both tables are
+            // input data rather than a guarantee.
             if (baseName(from->name) != baseName(to->name)) {
                 const std::string wanted = baseName(to->name);
                 std::vector<std::string> pending{from->name};
@@ -277,10 +283,15 @@ private:
                     if (std::find(seen.begin(), seen.end(), currentName) != seen.end()) continue;
                     seen.push_back(currentName);
                     if (baseName(currentName) == wanted) return true;
-                    const ClassLayout* current = module_.classLayout(currentName);
-                    if (!current) continue;
-                    if (!current->parent.empty()) pending.push_back(current->parent);
-                    for (const auto& implemented : current->interfaces) pending.push_back(implemented);
+                    if (const ClassLayout* current = module_.classLayout(currentName)) {
+                        if (!current->parent.empty()) pending.push_back(current->parent);
+                        for (const auto& implemented : current->interfaces) {
+                            pending.push_back(implemented);
+                        }
+                    }
+                    if (const InterfaceInfo* info = module_.interfaceInfo(currentName)) {
+                        for (const auto& base : info->bases) pending.push_back(base);
+                    }
                 }
                 return false;
             }

@@ -458,17 +458,46 @@ conversion rules (`Set<T>` against bare `set`, list/set interchangeability when
 generics agree). That is a known gap, not an oversight — widening it means
 exposing the checker's rules at the right layer rather than duplicating them.
 
-Subtyping is decided from the layout table, and it follows **both** edge kinds a
-class can have: the `extends` parent chain and the `implements` set. Following
-only `extends` is a live false positive rather than a technicality — `Shape
-masked = new Circle(...)` where `Shape` is an interface is the ordinary way to
-write a polymorphic local, and it is exactly what `examples/intermediate/
-Interfaces.zl` does. The search is a breadth-first walk over both edges with a
-visited set (an interface diamond would otherwise be re-expanded) and a depth
-guard, since the layout table is input data rather than a guarantee. An
-`interface` declaration has no layout of its own — only a class records the
-interfaces it implements — so `interface A extends B` is still unmodelled here;
-that is the next edge to add if the language starts using it.
+Subtyping is decided from the module's type tables, and it follows **all three**
+subtype edges the language has:
+
+| edge | recorded in |
+| --- | --- |
+| `class` → `class` (`extends`) | `ClassLayout::parent` |
+| `class` → `interface` (`implements`) | `ClassLayout::interfaces` |
+| `interface` → `interface` (`extends`) | `InterfaceInfo::bases` |
+
+Leaving any one out rejects a legal program rather than merely missing an
+optimisation. `Shape masked = new Circle(...)` is the ordinary way to write a
+polymorphic local and needs the second edge; `Named n = shape` for `interface
+Shape extends Named` needs the third, because the store's value type is an
+*interface* and there is no class to hang the relationship on. The search is a
+breadth-first walk with a visited set — either hierarchy can contain a diamond —
+and a step guard, since both tables are input data rather than a guarantee.
+
+### Interfaces are contracts, not classes
+
+An `interface` declaration gets no `ClassLayout`: it has no fields, no instance
+layout and no dispatch row, and putting it in `Module::classes` would make the
+backend build reflection metadata and vtable rows for a type that can never be
+instantiated. What it gets instead is an `InterfaceInfo`, which records the two
+things the rest of the IR actually needs:
+
+- **its bases**, for assignability (above); and
+- **its method signatures**, because a call through an interface-typed receiver
+  still has to be dispatched. Dispatching from the interface's own declaration
+  is the exact answer; inferring it from whichever class happens to implement
+  the interface would be a guess, and the interface is the only thing that fixes
+  the signature the call must match.
+
+Generics are not currently part of this: interfaces take no type parameters in
+this language, so the recorded signatures are concrete types.
+
+Member **visibility** is carried into MIR too (`MemberAccess` on `FieldLayout`
+and `Function`). It is not bookkeeping: `Type.fields()` prints each field's
+access, so a backend with nothing to consult prints `public` for a `private`
+field and the program's output changes. Reflection metadata is program output,
+which makes an omitted part of it a miscompile rather than a missing feature.
 
 An **unsubstituted generic parameter is compatible with anything**. Inside a
 template, `T` stands for some type that is not knowable at verification time, so
@@ -542,7 +571,7 @@ rather than emitted. `ZL_MIR_SSA_VERBOSE=1` adds one line per declined slot
 saying why. `--mir-vm` runs the same pass when `ZL_MIR_PROMOTE=1` is set, which
 is how the backend is checked to behave identically on both forms - see
 `tools/mir_promotion_diff.sh`, which does exactly that comparison across the
-example corpus (22 identical, 0 differing; the programs the bytecode backend
+example corpus (27 identical, 0 differing; the programs the bytecode backend
 cannot run yet are skipped as uninformative).
 
 Exit codes: `0` verified, `2` bad usage, `3` stdlib version mismatch, `4`
@@ -558,12 +587,13 @@ errors, and a module with notes can still verify.
   and checks the verifier rejects each class of malformed module. A
   lowering-only test could never reach most of these shapes, because the builder
   refuses to produce them.
-- `tests/mir_lowering_tests.cpp` (`zl-mir-lowering-tests`) — 31 regressions.
+- `tests/mir_lowering_tests.cpp` (`zl-mir-lowering-tests`) — 33 regressions.
   Drives the real pipeline on small programs and asserts on the MIR that comes
   out — including the specific properties an earlier lowerer got wrong, and the
   end-to-end merge (`if/else` writing one variable, then read) coming out as a
-  block parameter with one argument per edge.
-- `tests/mir_ssa_tests.cpp` (`zl-mir-ssa-tests`) — 23 regressions. Covers the
+  block parameter with one argument per edge, interface widening verifying, and
+  member visibility surviving into the module.
+- `tests/mir_ssa_tests.cpp` (`zl-mir-ssa-tests`) — 27 regressions. Covers the
   CFG queries (predecessors/successors, reachability, dominance, dominator tree,
   dominance frontiers, dead blocks), the data-flow layer (def-use, liveness,
   constants), every way a block parameter or edge argument can be malformed, and
@@ -571,9 +601,9 @@ errors, and a module with notes can still verify.
   declined promotion leaves the function untouched.
 
 Lowering is also exercised across `examples/`: every file is lowered and
-verified. 55 of the 58 lower and verify completely; the other 3 verify with
+verified. 56 of the 59 lower and verify completely; the other 3 verify with
 notes (8 notes between them). That count is the measure of coverage — and
-because `--emit-ssa` re-verifies after promoting, every one of the 58 also
+because `--emit-ssa` re-verifies after promoting, every one of the 59 also
 promotes and re-verifies clean.
 
 The 8 remaining notes are all one root cause: a bare `func` parameter.

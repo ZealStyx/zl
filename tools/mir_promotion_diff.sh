@@ -49,6 +49,18 @@ if [[ -z "$ZL" || ! -x "$ZL" ]]; then
     exit 2
 fi
 
+# Directories named `_lib` hold importable module sources rather than runnable
+# programs. Without them on the module search path every program that imports a
+# sibling module fails to load, and "the backend cannot run it" would silently
+# excuse it from the comparison - the same trap tools/mir_backend_diff.sh fell
+# into. ZL_EXTRA_ROOTS is honoured by the reference path and by --mir-vm alike.
+ROOTS=""
+while IFS= read -r libdir; do
+    [[ -d "$libdir" ]] || continue
+    ROOTS="${ROOTS:+$ROOTS:}$libdir"
+done < <(find "$ROOT/examples" -type d -name '_lib' | sort)
+export ZL_EXTRA_ROOTS="${ROOTS}${ZL_EXTRA_ROOTS:+:$ZL_EXTRA_ROOTS}"
+
 FILES=("$@")
 if [[ ${#FILES[@]} -eq 0 ]]; then
     cd "$ROOT" || exit 2

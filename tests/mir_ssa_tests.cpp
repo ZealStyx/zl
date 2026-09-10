@@ -563,6 +563,163 @@ void testUnrelatedClassIsStillRejected() {
 }
 
 // ---------------------------------------------------------------------------
+// Verifier: interface-to-interface widening
+// ---------------------------------------------------------------------------
+
+//   interface Named { name(): string }
+//   interface Shape extends Named { area(): double }
+//   class Circle implements Shape { ... }
+//   Named n = shape          // shape : Shape
+//
+// The store's value type is the *derived interface* and the slot's type the base
+// one, so the subtype walk has to follow interface-to-interface edges as well as
+// class-to-interface ones. An interface has no layout of its own (it is a
+// contract, not a class), which is exactly why those edges live in their own
+// table rather than in `Module::classes`.
+ModuleBuilder buildInterfaceHierarchy() {
+    ModuleBuilder builder("interfaces");
+    TypeArena& types = builder.types();
+
+    InterfaceInfo& named = builder.addInterface("Named");
+    named.methods.push_back(InterfaceMethod{"name", {}, types.stringType()});
+
+    InterfaceInfo& shape = builder.addInterface("Shape");
+    shape.bases.push_back("Named");
+    shape.methods.push_back(InterfaceMethod{"area", {}, types.doubleType()});
+
+    (void)builder.addClassLayout("Circle").interfaces.push_back("Shape");
+    return builder;
+}
+
+void testDerivedInterfaceIsAssignableToItsBase() {
+    ModuleBuilder builder = buildInterfaceHierarchy();
+    TypeArena& types = builder.types();
+    const std::uint32_t shapeType = types.objectType("Shape");
+    const std::uint32_t namedType = types.objectType("Named");
+    const std::uint32_t circleType = types.objectType("Circle");
+
+    FunctionBuilder fb = builder.addFunction("Interfaces.widen()");
+    fb.setReturnType(types.voidType());
+    const SlotId shapeSlot = fb.addSlot("shape", shapeType);
+    const SlotId namedSlot = fb.addSlot("named", namedType);
+    const BlockId b1 = fb.addBlock();
+    fb.setCurrentBlock(b1);
+    fb.emitStore(shapeSlot, Operand::temp(fb.emitAlloc("Circle", {}, circleType), circleType));
+    // Shape -> Named, both interfaces, through the hierarchy table.
+    fb.emitStore(namedSlot, Operand::temp(fb.emitLoad(shapeSlot), shapeType));
+    fb.emitReturn();
+    fb.finish();
+
+    const auto report = verifyModule(builder.take());
+    require(report.ok(),
+            "a derived interface should be assignable to the interface it extends:\\n" +
+                report.describe());
+    std::cout << "mir interface widening: PASS\n";
+}
+
+// Two hops: Circle -> Shape -> Named -> Base, so the walk has to keep going
+// through interface bases rather than stopping at the first interface.
+// Circle -> Shape -> Named -> Base: three hops, and the last two are
+// interface-to-interface, so a walk that stops at the first interface misses it.
+void testInterfaceChainIsFollowedTransitively() {
+    ModuleBuilder builder("interfaces-chain");
+    TypeArena& types = builder.types();
+    InterfaceInfo& base = builder.addInterface("Base");
+    base.methods.push_back(InterfaceMethod{"kind", {}, types.intType()});
+    InterfaceInfo& named = builder.addInterface("Named");
+    named.bases.push_back("Base");
+    named.methods.push_back(InterfaceMethod{"name", {}, types.stringType()});
+    InterfaceInfo& shape = builder.addInterface("Shape");
+    shape.bases.push_back("Named");
+    shape.methods.push_back(InterfaceMethod{"area", {}, types.doubleType()});
+    (void)builder.addClassLayout("Circle").interfaces.push_back("Shape");
+
+    const std::uint32_t shapeType = types.objectType("Shape");
+    const std::uint32_t baseType = types.objectType("Base");
+    const std::uint32_t circleType = types.objectType("Circle");
+
+    FunctionBuilder fb = builder.addFunction("Interfaces.transitive()");
+    fb.setReturnType(types.voidType());
+    const SlotId shapeSlot = fb.addSlot("shape", shapeType);
+    const SlotId baseSlot = fb.addSlot("base", baseType);
+    const BlockId b1 = fb.addBlock();
+    fb.setCurrentBlock(b1);
+    fb.emitStore(shapeSlot, Operand::temp(fb.emitAlloc("Circle", {}, circleType), circleType));
+    fb.emitStore(baseSlot, Operand::temp(fb.emitLoad(shapeSlot), shapeType));
+    fb.emitReturn();
+    fb.finish();
+
+    const auto report = verifyModule(builder.take());
+    require(report.ok(),
+            "the interface hierarchy should be followed transitively:\\n" + report.describe());
+    std::cout << "mir interface widening (transitive): PASS\n";
+}
+
+// A diamond must still terminate: Shape extends both Named and Drawable, and
+// both extend Base.
+// Shape extends Named and Drawable, and both extend Base, so Base is reachable
+// two ways. The visited set has to collapse that; without it the walk re-expands
+// the diamond and the step guard is what stops it.
+void testInterfaceDiamondTerminates() {
+    ModuleBuilder builder("interfaces-diamond");
+    TypeArena& types = builder.types();
+    InterfaceInfo& base = builder.addInterface("Base");
+    base.methods.push_back(InterfaceMethod{"kind", {}, types.intType()});
+    InterfaceInfo& named = builder.addInterface("Named");
+    named.bases.push_back("Base");
+    InterfaceInfo& drawable = builder.addInterface("Drawable");
+    drawable.bases.push_back("Base");
+    InterfaceInfo& shape = builder.addInterface("Shape");
+    shape.bases.push_back("Named");
+    shape.bases.push_back("Drawable");
+    (void)builder.addClassLayout("Circle").interfaces.push_back("Shape");
+
+    const std::uint32_t shapeType = types.objectType("Shape");
+    const std::uint32_t baseType = types.objectType("Base");
+    const std::uint32_t circleType = types.objectType("Circle");
+
+    FunctionBuilder fb = builder.addFunction("Interfaces.diamond()");
+    fb.setReturnType(types.voidType());
+    const SlotId shapeSlot = fb.addSlot("shape", shapeType);
+    const SlotId baseSlot = fb.addSlot("base", baseType);
+    const BlockId b1 = fb.addBlock();
+    fb.setCurrentBlock(b1);
+    fb.emitStore(shapeSlot, Operand::temp(fb.emitAlloc("Circle", {}, circleType), circleType));
+    fb.emitStore(baseSlot, Operand::temp(fb.emitLoad(shapeSlot), shapeType));
+    fb.emitReturn();
+    fb.finish();
+
+    const auto report = verifyModule(builder.take());
+    require(report.ok(), "a diamond of interfaces should verify and terminate:\\n" + report.describe());
+    std::cout << "mir interface widening (diamond): PASS\n";
+}
+
+// An interface is not a licence to assign anything: an unrelated class is
+// still rejected, so following more edges did not weaken the check.
+void testUnrelatedClassIsStillRejectedAcrossInterfaces() {
+    ModuleBuilder builder = buildInterfaceHierarchy();
+    TypeArena& types = builder.types();
+    (void)builder.addClassLayout("Square");   // implements nothing
+
+    const std::uint32_t shapeType = types.objectType("Shape");
+    const std::uint32_t squareType = types.objectType("Square");
+
+    FunctionBuilder fb = builder.addFunction("Interfaces.bad()");
+    fb.setReturnType(types.voidType());
+    const SlotId slot = fb.addSlot("shape", shapeType);
+    const BlockId b1 = fb.addBlock();
+    fb.setCurrentBlock(b1);
+    fb.emitStore(slot, Operand::temp(fb.emitAlloc("Square", {}, squareType), squareType));
+    fb.emitReturn();
+    fb.finish();
+
+    const auto report = verifyModule(builder.take());
+    require(!report.ok(), "an unrelated class must still not be assignable to an interface");
+    require(hasError(report, "store of"), "the store mismatch was not reported");
+    std::cout << "mir interface widening (unrelated rejected): PASS\n";
+}
+
+// ---------------------------------------------------------------------------
 // Promotion: the store/load merge becomes an explicit merged value
 // ---------------------------------------------------------------------------
 
@@ -790,6 +947,10 @@ int main() {
     testStoreIntoImplementedInterfaceVerifies();
     testSubclassOfImplementerIsAssignable();
     testUnrelatedClassIsStillRejected();
+    testDerivedInterfaceIsAssignableToItsBase();
+    testInterfaceChainIsFollowedTransitively();
+    testInterfaceDiamondTerminates();
+    testUnrelatedClassIsStillRejectedAcrossInterfaces();
 
     testPromotionProducesMergedValue();
     testPromotionIsIdempotentAndDeclinesSecondTime();

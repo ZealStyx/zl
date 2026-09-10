@@ -70,6 +70,17 @@ std::string dispatchKeyFor(const Function& fn, const TypeArena& types) {
     return out.str();
 }
 
+// Visibility as reflection spells it. The reference path maps an omitted
+// modifier to "public", so the mirror-image mapping lives here.
+std::string accessName(MemberAccess access) {
+    switch (access) {
+        case MemberAccess::Private: return "private";
+        case MemberAccess::Protected: return "protected";
+        case MemberAccess::Public: break;
+    }
+    return "public";
+}
+
 // ---------------------------------------------------------------------------
 // The translator
 // ---------------------------------------------------------------------------
@@ -139,7 +150,9 @@ public:
             result.stubbed = std::count_if(fnInfo_.begin(), fnInfo_.end(),
                                            [](const PerFunctionInfo& i) { return !i.supported; });
             for (std::size_t i = 0; i < module_.functions.size(); ++i) {
-                if (!fnInfo_[i].supported) result.stubbedFunctions.push_back(module_.functions[i].name);
+                if (fnInfo_[i].supported) continue;
+                result.stubbedFunctions.push_back(module_.functions[i].name);
+                result.stubbedReasons.push_back(fnInfo_[i].unsupportedReason);
             }
             return result;
         } catch (const std::exception& e) {
@@ -367,10 +380,58 @@ private:
                     info.name = field.name;
                     info.ownerClassName = (*it)->name;
                     info.typeName = runtimeTypeName(module_.types, field.type);
-                    info.access = "public";
+                    info.access = accessName(field.access);
                     info.isStatic = field.isStatic;
                     info.ownership = field.ownership;
                     if (!field.isStatic) meta.fields.push_back(std::move(info));
+                }
+                // Methods and constructors: base classes first, so a derived
+                // declaration replaces an inherited one with the same name and
+                // parameter list - the same merge the reference path performs.
+                //
+                // This used to be left empty, which was not a harmless omission:
+                // `Type.methods()` is observable, so a program that lists a
+                // class's methods printed "method count 0" here and the real
+                // count on the reference path. Reflection metadata is program
+                // output, so omitting a part of it is a miscompile.
+                for (const Function& fn : module_.functions) {
+                    if (fn.ownerClass != (*it)->name) continue;
+                    if (fn.isLambda) continue;
+                    RuntimeMethodInfo info;
+                    info.ownerClassName = (*it)->name;
+                    for (std::size_t i = fn.hasThisParameter ? 1 : 0; i < fn.parameters.size(); ++i) {
+                        info.parameterTypes.push_back(runtimeTypeName(module_.types, fn.parameters[i].type));
+                    }
+                    info.dispatchSignature = dispatchKeyFor(fn, module_.types);
+                    // `describe()` carries the name as a prefix; reflection stores
+                    // only the parameter suffix.
+                    const std::string prefix = fn.isConstructor ? fn.ownerClass : fn.simpleName;
+                    if (info.dispatchSignature.rfind(prefix, 0) == 0) {
+                        info.dispatchSignature.erase(0, prefix.size());
+                    }
+                    info.access = accessName(fn.access);
+                    info.isStatic = fn.isStatic;
+                    info.isAsync = fn.isAsync;
+                    info.functionIndex = fn.id - 1;
+                    if (fn.isConstructor) {
+                        RuntimeConstructorInfo ctor;
+                        ctor.ownerClassName = (*it)->name;
+                        ctor.access = info.access;
+                        ctor.parameterTypes = info.parameterTypes;
+                        ctor.dispatchSignature = info.dispatchSignature;
+                        meta.constructors.push_back(std::move(ctor));
+                        continue;
+                    }
+                    // MIR's `simpleName` carries the parameter list ("area()");
+                    // reflection reports the bare name.
+                    info.name = methodToken(fn.simpleName);
+                    info.returnType = runtimeTypeName(module_.types, fn.returnType);
+                    const auto duplicate = std::find_if(
+                        meta.methods.begin(), meta.methods.end(),
+                        [&](const RuntimeMethodInfo& existing) {
+                            return existing.name == info.name && existing.parameterTypes == info.parameterTypes;
+                        });
+                    if (duplicate == meta.methods.end()) meta.methods.push_back(std::move(info));
                 }
             }
             RuntimeTypeInfo runtimeType;
@@ -382,6 +443,8 @@ private:
             runtimeType.isEnumType = cls.isEnum;
             runtimeType.enumMembers = cls.enumMembers;
             runtimeType.fields = meta.fields;
+            runtimeType.methods = meta.methods;
+            runtimeType.constructors = meta.constructors;
             meta.runtimeType = std::make_shared<RuntimeTypeInfo>(std::move(runtimeType));
             chunk_.classReflection[cls.name] = std::move(meta);
         }
@@ -949,6 +1012,43 @@ private:
             if (found) return requireSlot(dispatchKeyFor(*found, module_.types), loc);
             const auto pit = parents.find(cur);
             cur = (pit != parents.end()) ? pit->second : std::string();
+        }
+
+        // The declared receiver may be an interface, which declares signatures
+        // and no bodies, so nothing above can match it. Its slot is still
+        // perfectly well defined: dispatch slots are keyed globally by
+        // signature, and every implementer of the interface declares that
+        // signature, so the interface's own declaration fixes the key. Reading
+        // it from the interface is the exact answer; inferring it from whichever
+        // class happens to implement the interface would be a guess.
+        std::string ifaceName = className;
+        for (std::size_t guard = 0; guard < 64 && !ifaceName.empty(); ++guard) {
+            if (const InterfaceInfo* info = module_.interfaceInfo(ifaceName)) {
+                if (const InterfaceMethod* method = info->method(methodName)) {
+                    if (method->parameterTypes.size() == argCount) {
+                        // The key the implementing methods were registered under,
+                        // rebuilt exactly as dispatchKeyFor builds it from a real
+                        // declaration: a MIR `simpleName` already carries the
+                        // parameter list ("name()"), and the key appends the
+                        // parameter list again. Mirroring that convention is
+                        // what makes the interface's key equal the implementer's
+                        // key - deriving a "prettier" key here would silently
+                        // fail to find the slot.
+                        std::string parameters;
+                        for (std::size_t i = 0; i < method->parameterTypes.size(); ++i) {
+                            if (i) parameters += ',';
+                            parameters += runtimeTypeName(module_.types, method->parameterTypes[i]);
+                        }
+                        const std::string simpleName = methodName + "(" + parameters + ")";
+                        return requireSlot(simpleName + "(" + parameters + ")", loc);
+                    }
+                }
+                // A method the interface inherits from a base interface.
+                if (info->bases.empty()) break;
+                ifaceName = info->bases.front();
+                continue;
+            }
+            break;
         }
         throw std::runtime_error("MIR backend: cannot resolve method '" + className + "." +
                                  methodName + "' to a dispatch slot");

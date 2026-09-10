@@ -49,6 +49,9 @@ public:
                                      std::uint32_t type, FunctionId initializer = kNoFunction,
                                      SourceLocation location = {});
     [[nodiscard]] ClassLayout& addClassLayout(const std::string& name);
+    // An interface declaration's hierarchy entry. Interfaces are not classes
+    // (see InterfaceInfo), so this is a separate table rather than a layout.
+    [[nodiscard]] InterfaceInfo& addInterface(const std::string& name);
     [[nodiscard]] ConstId addConstant(const Constant& value);
 
     // Constant constructors, deduplicated.
@@ -99,6 +102,7 @@ public:
     void setStatic(bool value) { function_.isStatic = value; }
     void setLambda(bool value) { function_.isLambda = value; }
     void setOperator(bool value) { function_.isOperator = value; }
+    void setAccess(MemberAccess value) { function_.access = value; }
     void setGenericTemplate(std::vector<std::string> typeParameters);
     void setGenericArguments(std::vector<std::uint32_t> arguments);
     void setExceptionBehavior(ExceptionBehavior behavior) { function_.exceptionBehavior = behavior; }

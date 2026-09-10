@@ -55,6 +55,13 @@ StaticId ModuleBuilder::addStatic(const std::string& className, const std::strin
     return module_.statics.back().id;
 }
 
+InterfaceInfo& ModuleBuilder::addInterface(const std::string& name) {
+    InterfaceInfo info;
+    info.name = name;
+    module_.interfaces.push_back(std::move(info));
+    return module_.interfaces.back();
+}
+
 ClassLayout& ModuleBuilder::addClassLayout(const std::string& name) {
     ClassLayout layout;
     layout.name = name;

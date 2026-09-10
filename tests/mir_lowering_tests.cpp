@@ -771,7 +771,122 @@ class MatchWildcard {
 }
 
 // ---------------------------------------------------------------------------
-// Explicit data flow: a variable written on two branches
+// Interfaces: hierarchy, and visibility recorded well enough for reflection
+// ---------------------------------------------------------------------------
+
+// `interface Shape extends Named` and then `Named n = shape`: widening from a
+// derived interface to the interface it extends. The store's value type is
+// `Shape`, which is an interface, so the verifier's subtype walk has to follow
+// interface-to-interface edges - there is no class named Shape to hang them on.
+//
+// This lower-and-verify used to fail with
+//   "store of Shape into slot ... of type Named"
+// on a program the reference path runs correctly.
+void testInterfaceWideningVerifies() {
+    auto lowered = lower("InterfaceWidening", R"ZL(
+interface Named {
+    name(): string
+}
+
+interface Shape extends Named {
+    area(): double
+}
+
+class Circle implements Shape {
+    public double radius
+
+    func Circle(double radius): void {
+        this.radius = radius
+    }
+
+    @Override
+    public func area(): double {
+        return 3.0 * this.radius * this.radius
+    }
+
+    @Override
+    public func name(): string {
+        return "circle"
+    }
+}
+
+class InterfaceWidening {
+    static func widen(): string {
+        Shape shape = new Circle(2.0)
+        Named named = shape
+        return named.name()
+    }
+}
+)ZL");
+    require(lowered.ok, "interface widening should lower and verify: " + lowered.errors);
+    require(zl::mir::verifyModule(lowered.module).ok(), "the interface hierarchy must verify");
+
+    // The hierarchy itself is recorded, because it is the only thing that
+    // answers whether a Shape may be used as a Named.
+    const auto* named = lowered.module.interfaceInfo("Named");
+    const auto* shape = lowered.module.interfaceInfo("Shape");
+    require(named != nullptr, "the base interface should be recorded");
+    require(shape != nullptr, "the derived interface should be recorded");
+    if (shape != nullptr) {
+        require(shape->bases.size() == 1 && shape->bases[0] == "Named",
+                "`interface Shape extends Named` should record Named as a base");
+        const auto* area = shape->method("area");
+        require(area != nullptr, "the interface's own method signature should be recorded");
+        if (area != nullptr) {
+            require(area->parameterTypes.empty(), "area() takes no parameters");
+        }
+    }
+    if (named != nullptr) {
+        require(named->method("name") != nullptr,
+                "an interface method signature should be recorded for dispatch");
+    }
+    // An interface is a contract, not a class: it must not appear as a layout,
+    // or the backend would build reflection and dispatch rows for a type that
+    // can never be instantiated.
+    require(lowered.module.classLayout("Shape") == nullptr,
+            "an interface should not be recorded as a class layout");
+    std::cout << "lowering interface widening: PASS\n";
+}
+
+// Member visibility has to survive into MIR. It is observable - Type.fields()
+// prints each field's access - so a backend with nothing to consult prints
+// `public` for a `private` field and the program's output silently changes.
+void testMemberVisibilityIsRecorded() {
+    auto lowered = lower("MemberVisibility", R"ZL(
+class MemberVisibility {
+    public int shown
+    private string hidden
+    protected double guarded
+
+    static func total(): int {
+        return 1
+    }
+}
+)ZL");
+    require(lowered.ok, "member visibility should lower: " + lowered.errors);
+    const auto* layout = lowered.module.classLayout("MemberVisibility");
+    require(layout != nullptr, "the class should have a layout");
+    if (layout == nullptr) return;
+
+    const auto accessOf = [&](const std::string& field) {
+        const auto* f = layout->field(field);
+        return f == nullptr ? zl::mir::MemberAccess::Public : f->access;
+    };
+    require(layout->field("shown") != nullptr, "the public field should be recorded");
+    require(accessOf("shown") == zl::mir::MemberAccess::Public, "`public` should be public");
+    require(accessOf("hidden") == zl::mir::MemberAccess::Private, "`private` should be private");
+    require(accessOf("guarded") == zl::mir::MemberAccess::Protected, "`protected` should be protected");
+
+    const auto* total = findFunction(lowered, "MemberVisibility.total");
+    require(total != nullptr, "the static method should be lowered");
+    if (total != nullptr) {
+        require(total->access == zl::mir::MemberAccess::Public,
+                "a method's visibility should be recorded too");
+    }
+    std::cout << "lowering member visibility: PASS\n";
+}
+
+
 // ---------------------------------------------------------------------------
 
 void testBranchMergeBecomesBlockParameter() {
@@ -1030,6 +1145,8 @@ int main() {
     testMatchFallsThroughToAThrow();
     testMatchWildcardPrunesItsFallthrough();
 
+    testInterfaceWideningVerifies();
+    testMemberVisibilityIsRecorded();
     testBranchMergeBecomesBlockParameter();
     testDataFlowQueriesAnswerForLoweredCode();
 

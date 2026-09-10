@@ -134,6 +134,18 @@ struct Parameter {
 };
 
 // One lowered function.
+// Member visibility, as the surface language spells it.
+//
+// MIR records this because reflection reports it and a backend cannot invent
+// it. Leaving it out is not a missing optimization: `Type.fields()` prints each
+// field's access, so a backend with no visibility to consult prints `public` for
+// a `private` field and the program's observable output changes. That is a
+// silent miscompile, which is the one thing the backends must never do.
+//
+// `DEFAULT` (no modifier written) maps to Public, matching how the reference
+// path reports it.
+enum class MemberAccess { Public, Protected, Private };
+
 struct Function {
     FunctionId id{kNoFunction};
     // Fully qualified identity, e.g. "Greeter.greet(string)". Unique within a
@@ -172,6 +184,8 @@ struct Function {
     bool isStatic{false};
     bool isLambda{false};
     bool isOperator{false};
+    // Visibility of a class member, carried for reflection (see MemberAccess).
+    MemberAccess access{MemberAccess::Public};
     // True for a generic class member lowered as a template: its body may use
     // TypeParam types named in `typeParameters`. A concrete instantiation
     // records the substitution in `genericArguments` instead.
@@ -228,6 +242,7 @@ struct FieldLayout {
     std::uint32_t type{0};
     zl::OwnershipKind ownership{zl::OwnershipKind::GC};
     bool isStatic{false};
+    MemberAccess access{MemberAccess::Public};
 };
 
 struct ClassLayout {
@@ -244,6 +259,40 @@ struct ClassLayout {
     [[nodiscard]] const FieldLayout* field(const std::string& fieldName) const;
 };
 
+// An interface declaration's place in the interface hierarchy:
+//   interface Derived extends Base1, Base2 { ... }
+//
+// An interface is a contract, not a class: it has no fields, no dispatch rows
+// and no instance layout, so it deliberately does not get a `ClassLayout` and
+// does not appear in `Module::classes`. What the rest of the IR needs from it is
+// exactly one thing - which contract entails which other one - because that is
+// what decides whether a value of one interface type may be used where another
+// is expected (`Named n = shape`). Keeping only that edge means the backend's
+// reflection and dispatch tables never see a phantom class.
+// One method an interface declares. Interfaces carry signatures rather than
+// bodies, so this is a signature and not a `Function`: there is no block to
+// verify and no slot to address. It is recorded because a call through an
+// interface-typed receiver has to be dispatched, and the interface's own
+// declaration is the only place that fixes the signature the call must match -
+// guessing from whichever class happens to implement the interface would be
+// exactly the kind of inference this IR exists to avoid.
+struct InterfaceMethod {
+    std::string name;
+    // Explicit parameter types. There is no receiver parameter: an interface
+    // method is only ever called through an instance.
+    std::vector<std::uint32_t> parameterTypes;
+    std::uint32_t returnType{0};
+};
+
+struct InterfaceInfo {
+    std::string name;
+    std::vector<std::string> bases;
+    std::vector<InterfaceMethod> methods;
+    SourceLocation location;
+
+    [[nodiscard]] const InterfaceMethod* method(const std::string& methodName) const;
+};
+
 // One MIR translation unit.
 struct Module {
     std::string name;
@@ -253,6 +302,10 @@ struct Module {
     std::vector<Function> functions;
     std::vector<StaticField> statics;
     std::vector<ClassLayout> classes;
+    // Interface hierarchy, for assignability. Empty when the module declares no
+    // interfaces; interfaces with no bases still get an entry, so "is this name
+    // an interface?" is answerable.
+    std::vector<InterfaceInfo> interfaces;
     std::vector<Constant> constants;
     // The program entry point, or kNoFunction when the module has none.
     FunctionId entryPoint{kNoFunction};
@@ -260,6 +313,9 @@ struct Module {
     [[nodiscard]] const Function* function(FunctionId id) const;
     [[nodiscard]] Function* function(FunctionId id);
     [[nodiscard]] const ClassLayout* classLayout(const std::string& name) const;
+    // The declared bases of an interface, or nullptr when `name` is not an
+    // interface this module declares.
+    [[nodiscard]] const InterfaceInfo* interfaceInfo(const std::string& name) const;
     [[nodiscard]] const Constant* constant(ConstId id) const;
     [[nodiscard]] const StaticField* staticField(StaticId id) const;
 

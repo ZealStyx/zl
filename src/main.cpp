@@ -323,8 +323,12 @@ int main(int argc, char** argv) {
                     std::cerr << "MIR bytecode: " << backend.stubbed
                               << " function(s) not translatable (stubbed; reachable ones raise at runtime)\n";
                 }
-                for (std::size_t i = 0; i < backend.stubbedFunctions.size() && i < 400; ++i)
-                    std::cerr << "  stub: " << backend.stubbedFunctions[i] << "\n";
+                for (std::size_t i = 0; i < backend.stubbedFunctions.size() && i < 400; ++i) {
+                    std::cerr << "  stub: " << backend.stubbedFunctions[i];
+                    if (i < backend.stubbedReasons.size() && !backend.stubbedReasons[i].empty())
+                        std::cerr << " - " << backend.stubbedReasons[i];
+                    std::cerr << "\n";
+                }
                 std::vector<std::string> programArgs;
                 for (int i = 3; i < argc; ++i) programArgs.emplace_back(argv[i]);
                 zl::VM vm;

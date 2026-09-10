@@ -296,6 +296,28 @@ std::string printModule(const Module& module, const PrinterOptions& options) {
                     << module.types.render(field.type) << "\n";
             }
         }
+        if (!module.interfaces.empty()) {
+            out << "  interfaces:\n";
+            for (const auto& info : module.interfaces) {
+                out << "    " << info.name;
+                if (!info.bases.empty()) {
+                    out << " extends ";
+                    for (std::size_t i = 0; i < info.bases.size(); ++i) {
+                        if (i) out << ", ";
+                        out << info.bases[i];
+                    }
+                }
+                out << "\n";
+                for (const auto& method : info.methods) {
+                    out << "      " << method.name << "(";
+                    for (std::size_t i = 0; i < method.parameterTypes.size(); ++i) {
+                        if (i) out << ", ";
+                        out << module.types.render(method.parameterTypes[i]);
+                    }
+                    out << "): " << module.types.render(method.returnType) << "\n";
+                }
+            }
+        }
         if (!module.classes.empty()) {
             out << "  classes:\n";
             for (const auto& layout : module.classes) {
@@ -309,6 +331,13 @@ std::string printModule(const Module& module, const PrinterOptions& options) {
                     out << ">";
                 }
                 if (!layout.parent.empty()) out << " extends " << layout.parent;
+                if (!layout.interfaces.empty()) {
+                    out << " implements ";
+                    for (std::size_t i = 0; i < layout.interfaces.size(); ++i) {
+                        if (i) out << ", ";
+                        out << layout.interfaces[i];
+                    }
+                }
                 if (layout.isData) out << " [data]";
                 if (layout.isEnum) out << " [enum]";
                 out << "\n";

@@ -153,6 +153,18 @@ const ClassLayout* Module::classLayout(const std::string& name) const {
     return it == classes.end() ? nullptr : &*it;
 }
 
+const InterfaceMethod* InterfaceInfo::method(const std::string& methodName) const {
+    const auto it = std::find_if(methods.begin(), methods.end(),
+                                 [&](const InterfaceMethod& m) { return m.name == methodName; });
+    return it == methods.end() ? nullptr : &*it;
+}
+
+const InterfaceInfo* Module::interfaceInfo(const std::string& name) const {
+    const auto it = std::find_if(interfaces.begin(), interfaces.end(),
+                                 [&](const InterfaceInfo& i) { return i.name == name; });
+    return it == interfaces.end() ? nullptr : &*it;
+}
+
 const Constant* Module::constant(ConstId id) const {
     if (id == kNoConst || id > constants.size()) return nullptr;
     return &constants[id - 1];

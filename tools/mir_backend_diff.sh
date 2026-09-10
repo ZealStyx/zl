@@ -41,6 +41,20 @@ if [[ -z "$ZL" || ! -x "$ZL" ]]; then
     exit 2
 fi
 
+# Directories named `_lib` hold importable module sources rather than runnable
+# programs. They are not examples, but the programs that import them need them on
+# the module search path - exactly as examples/run_all.sh arranges. Without this,
+# every example that imports a sibling module fails to load on BOTH paths, and
+# "both paths failed identically" would be reported as a pass: a green line that
+# measured nothing. ZL_EXTRA_ROOTS is honoured by the reference path and by
+# --mir-vm alike, so one setting covers both sides of the comparison.
+ROOTS=""
+while IFS= read -r libdir; do
+    [[ -d "$libdir" ]] || continue
+    ROOTS="${ROOTS:+$ROOTS:}$libdir"
+done < <(find "$ROOT/examples" -type d -name '_lib' | sort)
+export ZL_EXTRA_ROOTS="${ROOTS}${ZL_EXTRA_ROOTS:+:$ZL_EXTRA_ROOTS}"
+
 # Programs that must produce identical output on both paths.
 EXPECTED=(
     examples/basics/*.zl
@@ -49,7 +63,6 @@ EXPECTED=(
     examples/intermediate/DataRecords.zl
     examples/intermediate/Encapsulation.zl
     examples/intermediate/Enums.zl
-    examples/intermediate/Generics.zl
     examples/intermediate/Inheritance.zl
     examples/intermediate/Interfaces.zl
     examples/intermediate/Modules.zl
@@ -60,6 +73,12 @@ EXPECTED=(
 # Programs using constructs the backend still stubs (fail-closed), so they are
 # expected NOT to run cleanly yet; report but do not fail the run.
 KNOWN_GAPS=(
+    # Generics.zl builds a closure in main (`opcode make_closure`), so it is the
+    # same gap as Closures/Lambdas rather than a generics problem. It sat in
+    # EXPECTED only because the harness used to count "both paths failed
+    # identically" as a pass - the reference path could not load it either, for
+    # want of the _lib search path.
+    examples/intermediate/Generics.zl
     examples/intermediate/Closures.zl
     examples/intermediate/CollectionAlgorithms.zl
     examples/intermediate/Exceptions.zl
@@ -81,7 +100,14 @@ run_one() {
     local ref_out mir_out ref_rc mir_rc
     ref_out="$("$ZL" "$f" 2>/dev/null)"; ref_rc=$?
     mir_out="$("$ZL" --mir-vm "$f" 2>/dev/null)"; mir_rc=$?
-    if [[ "$ref_out" == "$mir_out" && "$ref_rc" == "$mir_rc" ]]; then
+    # Two failures are not agreement. If the reference path cannot even load the
+    # program, the comparison carries no information about the backend, so it is
+    # reported as a failure of the harness rather than as a pass.
+    if [[ $ref_rc -ne 0 ]]; then
+        echo "ERROR $f  (reference path failed, rc=$ref_rc - nothing compared)"
+        return 1
+    fi
+    if [[ "$ref_out" == "$mir_out" && "$mir_rc" == 0 ]]; then
         echo "PASS  $f"
         return 0
     else

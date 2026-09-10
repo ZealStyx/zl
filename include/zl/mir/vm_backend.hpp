@@ -39,6 +39,11 @@ struct BytecodeResult {
     std::size_t stubbed{0};
     // Functions whose body was stubbed (informational).
     std::vector<std::string> stubbedFunctions;
+    // Why each one was stubbed, parallel to `stubbedFunctions` and only as long
+    // as it can usefully be. A stub is a deliberate refusal, and a refusal is
+    // only defensible if it says what it refused, so the reason is carried out
+    // to the caller instead of being swallowed with the exception.
+    std::vector<std::string> stubbedReasons;
     // Hard errors that prevent translation altogether (empty on success).
     std::vector<std::string> errors;
     bool ok() const noexcept { return errors.empty(); }
