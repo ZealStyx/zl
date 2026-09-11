@@ -4,11 +4,13 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "zl/compiler/operator_rules.hpp"
 #include "zl/mir/analysis.hpp"
+#include "zl/mir/safety.hpp"
 
 namespace zl::mir {
 namespace {
@@ -32,6 +34,23 @@ zl::ZlType toZlType(const Type* type) {
         case TypeKind::Array: return zl::ZlType::ARRAY;
         case TypeKind::Object: return zl::ZlType::OBJECT;
         case TypeKind::Task: return zl::ZlType::TASK;
+        // The concurrency and native-resource kinds are all ordinary classes at
+        // runtime (Thread, Channel, Mutex, ...) or registry tokens the operator
+        // table has never heard of. Either way the operator rules see objects,
+        // which rejects arithmetic on them while leaving equality to the same
+        // rule every other reference follows.
+        case TypeKind::Thread:
+        case TypeKind::Channel:
+        case TypeKind::Mutex:
+        case TypeKind::RwLock:
+        case TypeKind::Atomic:
+        case TypeKind::Semaphore:
+        case TypeKind::Condition:
+        case TypeKind::NativeHandle:
+        case TypeKind::NativeBuffer:
+        case TypeKind::NativeStruct:
+        case TypeKind::NativeCallback:
+            return zl::ZlType::OBJECT;
         // `Shared<T>` is an ordinary generic class in ZL, not a runtime kind of
         // its own, so it types as an object.
         case TypeKind::Shared: return zl::ZlType::OBJECT;
@@ -131,7 +150,7 @@ const char* severityName(DiagnosticSeverity severity) noexcept {
 
 std::string Diagnostic::describe() const {
     std::ostringstream out;
-    out << severityName(severity) << ": ";
+    out << severityName(severity) << " [mir." << propertyName(property) << "]: ";
     if (!function.empty()) out << "in " << function << ": ";
     if (block != kNoBlock) out << "block b" << block;
     if (instructionIndex >= 0) out << "[" << instructionIndex << "]";
@@ -175,32 +194,91 @@ public:
 
     void run(VerificationReport& report) {
         report_ = &report;
+        property_ = SafetyProperty::TypeFlow;
         checkSignature();
         if (function_.blocks.empty()) return;
+        property_ = SafetyProperty::Definition;
         collectDefinitions();
+        property_ = SafetyProperty::ControlFlow;
         checkControlFlow();
         checkInstructions();
+        property_ = SafetyProperty::Definition;
         checkDominance();
         if (options_.checkOwnership) checkOwnershipFlow();
+        property_ = SafetyProperty::Concurrency;
+        checkSharedAtomicity();
+        appendSafetyAnalysis(module_, function_, options_, report);
         report_ = nullptr;
+    }
+
+    // `Shared<T>` synchronises each access, not a read-modify-write sequence:
+    // `setValue(get() + 1)` can lose updates when two threads interleave
+    // between the load and the store. A function that loads and stores but
+    // never holds the cell's lock gets one warning naming the pattern, so the
+    // non-atomicity is visible in MIR rather than discovered in production.
+    void checkSharedAtomicity() {
+        bool loads = false;
+        bool stores = false;
+        bool locks = false;
+        BlockId firstLoad = kNoBlock;
+        long firstLoadIndex = -1;
+        SourceLocation firstLoadLoc;
+        for (const auto& block : function_.blocks) {
+            for (std::size_t i = 0; i < block.instructions.size(); ++i) {
+                switch (block.instructions[i].opcode) {
+                    case Opcode::SharedGet:
+                        if (!loads) {
+                            firstLoad = block.id;
+                            firstLoadIndex = static_cast<long>(i);
+                            firstLoadLoc = block.instructions[i].location;
+                        }
+                        loads = true;
+                        break;
+                    case Opcode::SharedSet:
+                        stores = true;
+                        break;
+                    case Opcode::SharedWithLock:
+                        locks = true;
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+        if (loads && stores && !locks) {
+            warn("shared_get/shared_set without shared_with_lock: each access is synchronised, but a " +
+                 std::string("read-modify-write sequence is not atomic and can lose updates; ") +
+                 "use shared_with_lock (or Atomic for counters)",
+                 firstLoad, firstLoadIndex, firstLoadLoc);
+        }
     }
 
 private:
     // --- diagnostics ------------------------------------------------------
+    SafetyProperty property_{SafetyProperty::Structure};
+    bool emitFlowDiagnostics_{true};
+
     bool saturated() const {
         return options_.maxErrors != 0 && report_ && report_->errorCount() >= options_.maxErrors;
     }
 
     void error(const std::string& message, BlockId block = kNoBlock, long index = -1,
                SourceLocation location = {}) {
-        if (!report_ || saturated()) return;
+        if (!report_ || saturated() || !emitFlowDiagnostics_) return;
         Diagnostic d;
         d.severity = DiagnosticSeverity::Error;
         d.function = function_.name;
         d.block = block;
         d.instructionIndex = index;
         d.message = message;
+        if (location.file.empty()) location.file = function_.location.file;
+        if (!location.valid()) {
+            if (const auto* b = function_.block(block)) location = b->location;
+            if (!location.valid()) location = function_.location;
+        }
+        if (location.file.empty()) location.file = function_.location.file;
         d.location = location;
+        d.property = property_;
         report_->diagnostics.push_back(std::move(d));
     }
 
@@ -213,7 +291,14 @@ private:
         d.block = block;
         d.instructionIndex = index;
         d.message = message;
+        if (location.file.empty()) location.file = function_.location.file;
+        if (!location.valid()) {
+            if (const auto* b = function_.block(block)) location = b->location;
+            if (!location.valid()) location = function_.location;
+        }
+        if (location.file.empty()) location.file = function_.location.file;
         d.location = location;
+        d.property = property_;
         report_->diagnostics.push_back(std::move(d));
     }
 
@@ -339,6 +424,21 @@ private:
             }
             return true;
         }
+        // Dual spellings: lowering may produce either the dedicated kind or the
+        // plain class spelling (`Mutex` vs object "Mutex") depending on how
+        // much the source resolved. Both name the same runtime value, so they
+        // relate when the base names agree and the payloads (Task/Shared/
+        // Channel carry one) relate.
+        if (const char* fromBase = syncBaseName(*from)) {
+            if (const char* toBase = syncBaseName(*to)) {
+                if (std::string(fromBase) != toBase) return false;
+                if (from->arguments.size() != to->arguments.size()) return false;
+                for (std::size_t i = 0; i < from->arguments.size(); ++i) {
+                    if (!assignable(from->arguments[i], to->arguments[i])) return false;
+                }
+                return true;
+            }
+        }
         // Same kind, different shape: compare structurally.
         if (from->kind != to->kind) return false;
         if (from->name != to->name) return false;
@@ -352,6 +452,23 @@ private:
     static std::string baseName(const std::string& name) {
         const auto open = name.find('<');
         return open == std::string::npos ? name : name.substr(0, open);
+    }
+
+    // The shared base name when a type is one of the concurrency/native kinds
+    // in either spelling, or nullptr when it is neither. Keeps assignable's
+    // dual-spelling rule in one place.
+    static const char* syncBaseName(const Type& type) noexcept {
+        if (isTaskType(type)) return "Task";
+        if (isSharedType(type)) return "Shared";
+        if (isThreadType(type)) return "Thread";
+        if (isChannelType(type)) return "Channel";
+        if (isMutexType(type)) return "Mutex";
+        if (isRwLockType(type)) return "RwLock";
+        if (isAtomicType(type)) return "Atomic";
+        if (isSemaphoreType(type)) return "Semaphore";
+        if (isConditionType(type)) return "Condition";
+        if (isNativeHandleType(type)) return "NativeHandle";
+        return nullptr;
     }
 
     // A dynamic value may cross into statically typed territory only through
@@ -369,6 +486,7 @@ private:
         if (!from || !to) return;
         if (from->kind != TypeKind::Unknown) return;
         if (to->kind == TypeKind::Unknown || to->kind == TypeKind::TypeParam || to->kind == TypeKind::Void) return;
+        property_ = SafetyProperty::DynamicBoundary;
         error(what + " passes a dynamic (unknown) value where " + render(targetId) +
               " is declared without a runtime type assertion; lower the boundary as refine",
               block, index, loc);
@@ -430,6 +548,15 @@ private:
                 warn(what + " is owned but its type is an unsubstituted generic parameter",
                      kNoBlock, -1, parameter.location);
             }
+            // Mirrors TypeChecker::validateOwnership: a borrow is a region
+            // proof, and tasks settle on another thread/scheduler, so there is
+            // no region to prove. The checker rejects Task only (thread handles
+            // stay expressible as borrows there), and this layer rejects exactly
+            // what the checker rejects - no more.
+            if (parameter.ownership == zl::OwnershipKind::BORROW && isTaskType(*type)) {
+                error(what + " borrows a Task; borrow is not supported for task handles",
+                      kNoBlock, -1, parameter.location);
+            }
             checkTypeParamScope(parameter.type, "parameter " + std::to_string(i), kNoBlock, -1, parameter.location);
         }
 
@@ -462,6 +589,10 @@ private:
                 error(what + " has storage '" + std::string(zl::ownershipName(slot.ownership)) +
                       "' but its type " + render(slot.type) + " is not a reference type",
                      kNoBlock, -1, slot.location);
+            }
+            if (slot.ownership == zl::OwnershipKind::BORROW && isTaskType(*type)) {
+                error(what + " borrows a Task; borrow is not supported for task handles",
+                      kNoBlock, -1, slot.location);
             }
             checkTypeParamScope(slot.type, what, kNoBlock, -1, slot.location);
         }
@@ -517,6 +648,7 @@ private:
 
         for (std::size_t i = 0; i < function_.blocks.size(); ++i) {
             const auto& block = function_.blocks[i];
+            property_ = SafetyProperty::ControlFlow;
             if (!seenIds.insert(block.id).second) {
                 error("duplicate block id b" + std::to_string(block.id));
                 continue;
@@ -578,6 +710,7 @@ private:
             checkTerminator(block);
         }
 
+        property_ = SafetyProperty::ControlFlow;
         // A catch block must be reachable only by raising. If it also has a
         // normal predecessor, two different executions arrive with different
         // expectations about the catch slot, which no backend can honour.
@@ -609,15 +742,20 @@ private:
             if (cfg_.reachableWithUnwind().count(block.id)) continue;
             const std::string message = "block b" + std::to_string(block.id) +
                                         " is unreachable from the entry block";
+            property_ = SafetyProperty::Reachability;
             if (options_.unreachableBlocksAreErrors) error(message, block.id, -1, block.location);
             else warn(message, block.id, -1, block.location);
         }
 
+        property_ = SafetyProperty::TypeFlow;
         checkBlockParameters();
+        property_ = SafetyProperty::ControlFlow;
         checkEdgesConsistency();
     }
 
     void checkTerminator(const BasicBlock& block) {
+        property_ = block.terminator.kind == TerminatorKind::Return
+            ? SafetyProperty::Return : SafetyProperty::ControlFlow;
         const auto& t = block.terminator;
         const BlockId id = block.id;
         if (t.kind == TerminatorKind::None) {
@@ -631,6 +769,14 @@ private:
                     error("return terminator of block b" + std::to_string(id) + " carries branch targets",
                           id, -1, t.location);
                 }
+                // In an async function this terminator IS task completion: the
+                // payload settles the caller's Task (succeed), and there is no
+                // separate "complete" instruction because completion has no
+                // other spelling. Throw in an async function is the failure
+                // side (fail, or Cancelled for CancellationException). The
+                // checks below therefore already type the completion value;
+                // backends must translate return/throw in async functions to
+                // the terminal transition, not to a direct return.
                 const Type* returnType = typeOf(function_.returnType);
                 const bool returnsVoid = returnType && returnType->kind == TypeKind::Void;
                 if (returnsVoid) {
@@ -908,11 +1054,13 @@ private:
             }
             case OperandKind::Temp: {
                 if (operand.index == kNoTemp) {
+                    property_ = SafetyProperty::Definition;
                     error(what + " refers to no temp", block, index, loc);
                     return false;
                 }
                 const auto it = definitions_.find(operand.index);
                 if (it == definitions_.end()) {
+                    property_ = SafetyProperty::Definition;
                     error(what + " refers to temp %" + std::to_string(operand.index) +
                           ", which is never defined in this function", block, index, loc);
                     return false;
@@ -1003,6 +1151,7 @@ private:
     }
 
     void checkInstruction(const BasicBlock& block, const Instruction& instruction, long index) {
+        property_ = instructionProperty(instruction.opcode);
         const BlockId id = block.id;
         const OpcodeShape& shape = opcodeShape(instruction.opcode);
         const SourceLocation& loc = instruction.location;
@@ -1141,6 +1290,7 @@ private:
             }
             case Opcode::Move:
                 if (slot.ownership != zl::OwnershipKind::OWNED) {
+                    property_ = SafetyProperty::Ownership;
                     error("move from " + slotName + " whose storage is '" +
                           std::string(zl::ownershipName(slot.ownership)) + "'; only an owned slot can be moved",
                           id, index, loc);
@@ -1321,6 +1471,100 @@ private:
                 }
                 break;
             }
+            case Opcode::TaskSpawn:
+                checkTaskSpawn(block, instruction, index);
+                break;
+            case Opcode::TaskBlock:
+                checkTaskBlock(block, instruction, index);
+                break;
+            case Opcode::TaskIgnore:
+            case Opcode::TaskCancel:
+                checkTaskUnary(block, instruction, index);
+                break;
+            case Opcode::ThreadStart:
+                checkThreadStart(block, instruction, index);
+                break;
+            case Opcode::ThreadJoin:
+                checkThreadJoin(block, instruction, index);
+                break;
+            case Opcode::ThreadIsAlive:
+                checkThreadIsAlive(block, instruction, index);
+                break;
+            case Opcode::ChannelCreate:
+                checkChannelCreate(block, instruction, index);
+                break;
+            case Opcode::ChannelSend:
+                checkChannelSend(block, instruction, index);
+                break;
+            case Opcode::ChannelReceive:
+                checkChannelReceive(block, instruction, index);
+                break;
+            case Opcode::ChannelSize:
+                checkChannelSize(block, instruction, index);
+                break;
+            case Opcode::ChannelSendAsync:
+                checkChannelSendAsync(block, instruction, index);
+                break;
+            case Opcode::ChannelReceiveAsync:
+                checkChannelReceiveAsync(block, instruction, index);
+                break;
+            case Opcode::MutexWithLock:
+            case Opcode::RwLockWithRead:
+            case Opcode::RwLockWithWrite:
+            case Opcode::SharedWithLock:
+                checkScopedLock(block, instruction, index);
+                break;
+            case Opcode::AtomicLoad:
+            case Opcode::AtomicStore:
+            case Opcode::AtomicAdd:
+            case Opcode::AtomicLoadBool:
+            case Opcode::AtomicStoreBool:
+            case Opcode::AtomicLoadDouble:
+            case Opcode::AtomicStoreDouble:
+            case Opcode::AtomicLoadRef:
+            case Opcode::AtomicStoreRef:
+                checkAtomic(block, instruction, index);
+                break;
+            case Opcode::SemaphoreAcquire:
+            case Opcode::SemaphoreRelease:
+            case Opcode::SemaphoreAvailable:
+            case Opcode::SemaphoreSetPermits:
+            case Opcode::SemaphoreTryAcquire:
+            case Opcode::SemaphoreReleaseMany:
+                checkSemaphore(block, instruction, index);
+                break;
+            case Opcode::ConditionWait:
+            case Opcode::ConditionWaitFor:
+            case Opcode::ConditionNotifyOne:
+            case Opcode::ConditionNotifyAll:
+                checkCondition(block, instruction, index);
+                break;
+            case Opcode::SharedCreate:
+                checkSharedCreate(block, instruction, index);
+                break;
+            case Opcode::SharedGet:
+                checkSharedGet(block, instruction, index);
+                break;
+            case Opcode::SharedSet:
+                checkSharedSet(block, instruction, index);
+                break;
+            case Opcode::FfiCall:
+                checkFfiCall(block, instruction, index);
+                break;
+            case Opcode::HandleBorrow:
+            case Opcode::HandleConsume:
+            case Opcode::HandleClose:
+                checkHandle(block, instruction, index);
+                break;
+            case Opcode::CallbackRegister:
+                checkCallbackRegister(block, instruction, index);
+                break;
+            case Opcode::CallbackInvoke:
+                checkCallbackInvoke(block, instruction, index);
+                break;
+            case Opcode::CallbackClose:
+                checkCallbackClose(block, instruction, index);
+                break;
             case Opcode::Drop: {
                 // The slot form was handled by checkSlotRules; what follows
                 // checks the value form. Dropping a borrowed value would
@@ -1370,6 +1614,17 @@ private:
                 // verifier, not a licence for the instruction. Say so loudly.
                 error(std::string("verifier has no typing rule for opcode '") + name + "'", id, index, loc);
                 break;
+        }
+
+        // Blocking inside an async function stalls the thread that runs the
+        // cooperative scheduler; the runtime allows it (roots are published),
+        // but it is almost never intended. TaskBlock is the exception: the
+        // checker rejects it in async code outright, so its own rule reports an
+        // error rather than reaching this warning.
+        if (function_.isAsync && opcodeIsBlocking(opcode) && opcode != Opcode::TaskBlock) {
+            warn(std::string(name) + " blocks the current thread inside an async function; " +
+                 "prefer await on a Task so the scheduler can make progress",
+                 id, index, loc);
         }
     }
 
@@ -1697,9 +1952,14 @@ private:
         // heap reference to an instance of a class just the same, so it is a
         // legal thing for a construction to produce. The builtin sums are the
         // same shape: `new Some<int>(..)` produces Some<int>, and the abstract
-        // `new Option<int>()` produces the Option kind itself.
+        // `new Option<int>()` produces the Option kind itself. The concurrency
+        // kinds are likewise heap instances (`new Mutex()`, `new Atomic()`),
+        // only with a dedicated kind instead of the plain class spelling.
         if (result->kind != TypeKind::Object && result->kind != TypeKind::Shared &&
-            result->kind != TypeKind::Option && result->kind != TypeKind::Result) {
+            result->kind != TypeKind::Option && result->kind != TypeKind::Result &&
+            !isThreadType(*result) && !isChannelType(*result) && !isMutexType(*result) &&
+            !isRwLockType(*result) && !isAtomicType(*result) && !isSemaphoreType(*result) &&
+            !isConditionType(*result)) {
             error("alloc must produce an object but produces " + render(instruction.resultType), id, index, loc);
             return;
         }
@@ -1862,10 +2122,20 @@ private:
                 const Type* receiverType = typeOf(receiver.type);
                 // Shared<T> and Task<T> are reference types with methods of
                 // their own (Shared.withLock, Task.block, ...), so a method call
-                // on one is ordinary, not malformed.
+                // on one is ordinary, not malformed. The same holds for every
+                // concurrency/native kind: Thread, Channel, Mutex, RwLock,
+                // Atomic, Semaphore, Condition, and the native resource tokens
+                // all expose methods in their facades.
                 if (receiverType && receiverType->kind != TypeKind::Object &&
                     receiverType->kind != TypeKind::Shared && receiverType->kind != TypeKind::Task &&
                     receiverType->kind != TypeKind::Option && receiverType->kind != TypeKind::Result &&
+                    receiverType->kind != TypeKind::Thread && receiverType->kind != TypeKind::Channel &&
+                    receiverType->kind != TypeKind::Mutex && receiverType->kind != TypeKind::RwLock &&
+                    receiverType->kind != TypeKind::Atomic && receiverType->kind != TypeKind::Semaphore &&
+                    receiverType->kind != TypeKind::Condition &&
+                    receiverType->kind != TypeKind::NativeHandle && receiverType->kind != TypeKind::NativeBuffer &&
+                    receiverType->kind != TypeKind::NativeStruct &&
+                    receiverType->kind != TypeKind::NativeCallback &&
                     receiverType->kind != TypeKind::Unknown && receiverType->kind != TypeKind::TypeParam) {
                     error("invoke_method receiver has type " + render(receiver.type) +
                           " but must be an object", id, index, loc);
@@ -1921,6 +2191,28 @@ private:
                     error("call_native has no native target name", id, index, loc);
                     return;
                 }
+                if (instruction.target.argumentTypes.size() != operands.size()) {
+                    error("call_native argument contract arity disagrees with operands", id, index, loc);
+                } else {
+                    for (std::size_t i = 0; i < operands.size(); ++i) {
+                        const auto expected = instruction.target.argumentTypes[i];
+                        if (!validType(expected, "native argument contract", id, index, loc)) continue;
+                        if (!assignable(operands[i].type, expected))
+                            error("call_native argument " + std::to_string(i) + " violates recorded type contract",
+                                  id, index, loc);
+                    }
+                }
+                // Ownership metadata, when present, must cover every argument:
+                // a partial list would leave a backend guessing which argument
+                // transfers. An empty list is the audited legacy default (all
+                // NONE), recorded by builders that predate the audit.
+                if (!instruction.target.nativeParamOwnership.empty() &&
+                    instruction.target.nativeParamOwnership.size() != operands.size()) {
+                    error("call_native records " +
+                          std::to_string(instruction.target.nativeParamOwnership.size()) +
+                          " ownership entrie(s) but has " + std::to_string(operands.size()) +
+                          " argument(s)", id, index, loc);
+                }
                 expectedResult = instruction.target.resultType;
                 returnsVoid = isVoidType(expectedResult);
                 break;
@@ -1950,6 +2242,19 @@ private:
     bool isVoidType(std::uint32_t id) const {
         const Type* type = typeOf(id);
         return type && type->kind == TypeKind::Void;
+    }
+
+    // True when the instruction's result temp is compatible with a void body or
+    // payload. A void operation still leaves the runtime nil on the stack, and
+    // ZL code may name it: the checker types `Mutex.withLock(m, voidBody)` as
+    // nil (the callback's own empty-body type), and the withLock-likes more
+    // generally as unknown. An unknown- or nil-typed temp is therefore the
+    // honest spelling of "this call yields the runtime nil"; only a
+    // concretely-typed temp contradicts the void body.
+    bool resultIsVoidCompatible(const Instruction& instruction) const {
+        const Type* recorded = typeOf(instruction.resultType);
+        return recorded &&
+               (recorded->kind == TypeKind::Unknown || recorded->kind == TypeKind::Nil);
     }
 
     void checkMakeClosure(const BasicBlock& block, const Instruction& instruction, long index) {
@@ -2017,7 +2322,12 @@ private:
         }
         const std::uint32_t payload = task->arguments.empty() ? module_.types.voidType() : task->arguments.front();
         if (isVoidType(payload)) {
-            if (instruction.result != kNoTemp) {
+            // The checker leaves some void-awaits unnamed (an await of a
+            // Channel.sendAsync task observes unknown, not void), while the
+            // runtime still resumes with nil. An unknown- or nil-typed temp is
+            // the honest spelling of that nil; only a concretely-typed temp
+            // contradicts the void payload.
+            if (instruction.result != kNoTemp && !resultIsVoidCompatible(instruction)) {
                 error("await of Task<void> must not define a temp", id, index, loc);
             }
             return;
@@ -2026,6 +2336,733 @@ private:
             error("await of " + render(instruction.operands[0].type) + " produces " + render(payload) +
                   " but the temp is typed " + render(instruction.resultType), id, index, loc);
         }
+    }
+
+    // --- concurrency / FFI operand helpers --------------------------------
+    //
+    // Every operation in this family validates its receiver at runtime and
+    // raises on a mismatch, so the operation itself is the explicit check the
+    // requireRefined rule would otherwise demand: an `unknown` (or
+    // unsubstituted type parameter) operand is accepted and the runtime
+    // decides, while a definitely-wrong concrete type is a verifier error.
+    template <typename Predicate>
+    bool expectReceiver(const Operand& operand, Predicate holds, const char* expected, const char* what,
+                        BlockId id, long index, SourceLocation loc) {
+        const Type* type = typeOf(operand.type);
+        if (!type) return false;
+        if (type->kind == TypeKind::Unknown || type->kind == TypeKind::TypeParam) return true;
+        if (holds(*type)) return true;
+        error(std::string(what) + " expects " + expected + " but has " + render(operand.type), id, index, loc);
+        return false;
+    }
+
+    bool expectTask(const Operand& operand, const char* what, BlockId id, long index, SourceLocation loc) {
+        return expectReceiver(operand, [](const Type& t) { return isTaskType(t); }, "a Task", what, id, index, loc);
+    }
+
+    // The MakeClosure instruction that defines `operand`, when the operand is a
+    // temp with exactly that definition in this function. Anything else (a
+    // parameter, a call result, a value from another function) is opaque here:
+    // the runtime gate backstops what the verifier cannot see.
+    const Instruction* findMakeClosure(const Operand& operand) const {
+        if (operand.kind != OperandKind::Temp) return nullptr;
+        for (const auto& block : function_.blocks) {
+            for (const auto& instruction : block.instructions) {
+                if (instruction.opcode == Opcode::MakeClosure && instruction.result == operand.index) {
+                    return &instruction;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    // The closure body behind an operand, resolved through its MakeClosure.
+    const Function* closureBody(const Operand& operand) const {
+        const Instruction* make = findMakeClosure(operand);
+        if (!make) return nullptr;
+        return module_.function(make->target.function);
+    }
+
+    // TaskSpawn, ThreadStart, and the scoped locks all take a synchronous,
+    // zero-argument closure. Checks the operand's own func type when it carries
+    // a signature, then - when the body resolves - the body's actual shape.
+    // Returns the body when it resolved, so callers can run their own checks.
+    const Function* checkSyncZeroArgClosure(const Operand& operand, const char* what, BlockId id, long index,
+                                            SourceLocation loc) {
+        const Type* type = typeOf(operand.type);
+        if (type && type->kind != TypeKind::Unknown && type->kind != TypeKind::TypeParam &&
+            type->kind != TypeKind::Function) {
+            error(std::string(what) + " expects a func value but has " + render(operand.type), id, index, loc);
+            return nullptr;
+        }
+        if (type && type->kind == TypeKind::Function && type->signature.hasSignature) {
+            if (type->signature.isAsync) {
+                error(std::string(what) + " expects a synchronous func but the value is async", id, index, loc);
+            }
+            if (!type->signature.parameterTypes.empty()) {
+                error(std::string(what) + " expects a zero-argument func but the value takes " +
+                      std::to_string(type->signature.parameterTypes.size()), id, index, loc);
+            }
+        }
+        const Function* body = closureBody(operand);
+        if (!body) return nullptr;
+        if (body->isAsync) {
+            error(std::string(what) + " passes async function '" + body->name + "'; the closure must be synchronous",
+                  id, index, loc);
+        }
+        const std::size_t declaredParameters =
+            body->parameters.size() >= body->captures.size() ? body->parameters.size() - body->captures.size() : 0;
+        if (declaredParameters != 0) {
+            error(std::string(what) + " passes '" + body->name + "' taking " +
+                  std::to_string(declaredParameters) + " argument(s); the closure must take none",
+                  id, index, loc);
+        }
+        return body;
+    }
+
+    // The confinement rule, mirrored from capturedValueCrossesThreadBoundary:
+    // only Shared<T> and the synchronisation primitives may cross to a worker.
+    // Runs only when the closure body resolved; anything else is the runtime
+    // gate's job (capturesAreExplicitlyShared raises there).
+    void checkThreadSafeCaptures(const Function& body, const char* what, BlockId id, long index,
+                                 SourceLocation loc) {
+        for (const auto& capture : body.captures) {
+            if (capture.usesThis) {
+                error(std::string(what) + " passes closure '" + body.name +
+                      "' capturing 'this'; a bare receiver may not cross a thread boundary",
+                      id, index, loc);
+                continue;
+            }
+            const Type* type = typeOf(capture.type);
+            if (!type) continue;
+            if (type->kind == TypeKind::Unknown || type->kind == TypeKind::TypeParam) continue;
+            if (isThreadSafeCaptureType(*type)) continue;
+            error(std::string(what) + " passes closure '" + body.name + "' capturing '" + capture.name + "' of type " +
+                  render(capture.type) + "; only Shared<T> and the synchronisation primitives " +
+                  "(Atomic, Mutex, RwLock, Semaphore, Channel, Condition) may cross a thread boundary",
+                  id, index, loc);
+        }
+    }
+
+    // Scans a resolved closure body for operations banned while a scoped lock
+    // is held. Mirrors the checker's heldLockDepth rule lexically: a direct
+    // await, spawn, or thread start inside the body. An indirect suspension
+    // (the body calls a function that awaits) is NOT caught here, exactly as
+    // the checker does not catch it either - the lock is still held at
+    // runtime, which is a known gap documented alongside the opcode.
+    void checkScopedLockBody(const Function& body, const char* what, BlockId id, long index, SourceLocation loc) {
+        for (const auto& block : body.blocks) {
+            for (const auto& instruction : block.instructions) {
+                switch (instruction.opcode) {
+                    case Opcode::Await:
+                        error(std::string(what) + " body '" + body.name +
+                              "' awaits while the lock is held; release the lock before suspension",
+                              id, index, loc);
+                        return;
+                    case Opcode::TaskSpawn:
+                    case Opcode::ThreadStart:
+                        error(std::string(what) + " body '" + body.name + "' transfers work to another thread (" +
+                              opcodeName(instruction.opcode) + ") while the lock is held",
+                              id, index, loc);
+                        return;
+                    default:
+                        break;
+                }
+            }
+        }
+    }
+
+    // --- task lifecycle ---------------------------------------------------
+    void checkTaskSpawn(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        const Function* body = checkSyncZeroArgClosure(instruction.operands[0], "task_spawn", id, index, loc);
+        if (body) checkThreadSafeCaptures(*body, "task_spawn", id, index, loc);
+        const Type* result = typeOf(instruction.resultType);
+        if (!result || !isTaskType(*result)) {
+            error("task_spawn must produce Task<T> but produces " + render(instruction.resultType), id, index, loc);
+            return;
+        }
+        // The task's payload is the closure's return. When the body resolved,
+        // the two must agree; an opaque func value keeps whatever payload the
+        // builder recorded, checked at the await/block boundary instead.
+        if (body && !result->arguments.empty()) {
+            if (!assignable(body->returnType, result->arguments.front())) {
+                error("task_spawn of '" + body->name + "' returning " + render(body->returnType) +
+                      " produces " + render(instruction.resultType), id, index, loc);
+            }
+        }
+    }
+
+    void checkTaskBlock(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        if (function_.isAsync) {
+            // The checker rejects Task.block() in async code outright; async
+            // code suspends with await instead of pumping the scheduler.
+            error("task_block in an async function; await the task instead", id, index, loc);
+            return;
+        }
+        if (!expectTask(instruction.operands[0], "task_block", id, index, loc)) return;
+        const Type* task = typeOf(instruction.operands[0].type);
+        const std::uint32_t payload =
+            task && !task->arguments.empty() ? task->arguments.front() : module_.types.voidType();
+        if (isVoidType(payload)) {
+            if (instruction.result != kNoTemp && !resultIsVoidCompatible(instruction)) {
+                error("task_block of Task<void> must not define a temp", id, index, loc);
+            }
+            return;
+        }
+        if (instruction.result == kNoTemp) return; // shape rule already reported
+        if (!assignable(payload, instruction.resultType)) {
+            error("task_block of " + render(instruction.operands[0].type) + " produces " + render(payload) +
+                  " but the temp is typed " + render(instruction.resultType), id, index, loc);
+        }
+    }
+
+    void checkTaskUnary(const BasicBlock& block, const Instruction& instruction, long index) {
+        expectTask(instruction.operands[0], opcodeName(instruction.opcode), block.id, index,
+                   instruction.location);
+    }
+
+    // --- threads ----------------------------------------------------------
+    void checkThreadStart(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        const Function* body = checkSyncZeroArgClosure(instruction.operands[0], "thread_start", id, index, loc);
+        if (body) checkThreadSafeCaptures(*body, "thread_start", id, index, loc);
+        const Type* result = typeOf(instruction.resultType);
+        if (!result || !isThreadType(*result)) {
+            error("thread_start must produce a Thread but produces " + render(instruction.resultType),
+                  id, index, loc);
+        }
+    }
+
+    void checkThreadJoin(const BasicBlock& block, const Instruction& instruction, long index) {
+        expectReceiver(instruction.operands[0], [](const Type& t) { return isThreadType(t); }, "a Thread",
+                       "thread_join", block.id, index, instruction.location);
+    }
+
+    void checkThreadIsAlive(const BasicBlock& block, const Instruction& instruction, long index) {
+        expectReceiver(instruction.operands[0], [](const Type& t) { return isThreadType(t); }, "a Thread",
+                       "thread_is_alive", block.id, index, instruction.location);
+        requireResultType(instruction, module_.types.boolType(), "thread_is_alive", block.id, index,
+                          instruction.location);
+    }
+
+    // --- channels ---------------------------------------------------------
+    bool expectChannel(const Operand& operand, const char* what, BlockId id, long index, SourceLocation loc) {
+        return expectReceiver(operand, [](const Type& t) { return isChannelType(t); }, "a Channel", what, id,
+                              index, loc);
+    }
+
+    void checkChannelCreate(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        const Type* capacity = typeOf(instruction.operands[0].type);
+        if (capacity && capacity->kind != TypeKind::Unknown && capacity->kind != TypeKind::TypeParam &&
+            capacity->kind != TypeKind::Int) {
+            error("channel_create capacity has type " + render(instruction.operands[0].type) +
+                  " but must be int", id, index, loc);
+        }
+        const Type* result = typeOf(instruction.resultType);
+        if (!result || !isChannelType(*result)) {
+            error("channel_create must produce a Channel but produces " + render(instruction.resultType),
+                  id, index, loc);
+        }
+    }
+
+    void checkChannelSend(const BasicBlock& block, const Instruction& instruction, long index) {
+        // The channel is untyped, so the value operand is unchecked: any value
+        // may be sent, and receive produces whatever was sent.
+        expectChannel(instruction.operands[0], "channel_send", block.id, index, instruction.location);
+    }
+
+    void checkChannelReceive(const BasicBlock& block, const Instruction& instruction, long index) {
+        expectChannel(instruction.operands[0], "channel_receive", block.id, index, instruction.location);
+    }
+
+    void checkChannelSize(const BasicBlock& block, const Instruction& instruction, long index) {
+        expectChannel(instruction.operands[0], "channel_size", block.id, index, instruction.location);
+        requireResultType(instruction, module_.types.intType(), "channel_size", block.id, index,
+                          instruction.location);
+    }
+
+    void checkChannelSendAsync(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        expectChannel(instruction.operands[0], "channel_send_async", id, index, loc);
+        const Type* result = typeOf(instruction.resultType);
+        if (!result || !isTaskType(*result)) {
+            error("channel_send_async must produce Task<void> but produces " + render(instruction.resultType),
+                  id, index, loc);
+            return;
+        }
+        const std::uint32_t payload = taskPayloadFor(*result);
+        if (payload != 0 && !isVoidType(payload)) {
+            error("channel_send_async must produce Task<void> but produces " + render(instruction.resultType),
+                  id, index, loc);
+        }
+    }
+
+    void checkChannelReceiveAsync(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        expectChannel(instruction.operands[0], "channel_receive_async", id, index, loc);
+        const Type* result = typeOf(instruction.resultType);
+        if (!result || !isTaskType(*result)) {
+            error("channel_receive_async must produce a Task but produces " + render(instruction.resultType),
+                  id, index, loc);
+        }
+    }
+
+    // --- scoped locks -----------------------------------------------------
+    void checkScopedLock(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        const char* name = opcodeName(instruction.opcode);
+        switch (instruction.opcode) {
+            case Opcode::MutexWithLock:
+                expectReceiver(instruction.operands[0], [](const Type& t) { return isMutexType(t); },
+                               "a Mutex", name, id, index, loc);
+                break;
+            case Opcode::RwLockWithRead:
+            case Opcode::RwLockWithWrite:
+                expectReceiver(instruction.operands[0], [](const Type& t) { return isRwLockType(t); },
+                               "an RwLock", name, id, index, loc);
+                break;
+            case Opcode::SharedWithLock:
+                expectReceiver(instruction.operands[0], [](const Type& t) { return isSharedType(t); },
+                               "a Shared<T>", name, id, index, loc);
+                break;
+            default:
+                break;
+        }
+        const Function* body = checkSyncZeroArgClosure(instruction.operands[1], name, id, index, loc);
+        if (body) {
+            checkScopedLockBody(*body, name, id, index, loc);
+            // The operation produces the closure body's value.
+            if (isVoidType(body->returnType)) {
+                if (instruction.result != kNoTemp && !resultIsVoidCompatible(instruction)) {
+                    error(std::string(name) + " of void closure '" + body->name + "' must not define a temp",
+                          id, index, loc);
+                }
+            } else if (instruction.result != kNoTemp &&
+                       !assignable(body->returnType, instruction.resultType)) {
+                error(std::string(name) + " of '" + body->name + "' returning " + render(body->returnType) +
+                      " produces " + render(instruction.resultType), id, index, loc);
+            }
+        }
+    }
+
+    // --- atomics ----------------------------------------------------------
+    bool expectAtomic(const Operand& operand, const char* what, BlockId id, long index, SourceLocation loc) {
+        return expectReceiver(operand, [](const Type& t) { return isAtomicType(t); }, "an Atomic", what, id,
+                              index, loc);
+    }
+
+    void checkAtomic(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        const char* name = opcodeName(instruction.opcode);
+        expectAtomic(instruction.operands[0], name, id, index, loc);
+        const auto expectValueKind = [&](std::size_t operand, TypeKind kind, const char* kindName) {
+            if (operand >= instruction.operands.size()) return;
+            const Type* type = typeOf(instruction.operands[operand].type);
+            if (!type || type->kind == TypeKind::Unknown || type->kind == TypeKind::TypeParam) return;
+            if (type->kind != kind) {
+                error(std::string(name) + " value has type " + render(instruction.operands[operand].type) +
+                      " but must be " + kindName, id, index, loc);
+            }
+        };
+        switch (instruction.opcode) {
+            case Opcode::AtomicLoad:
+                requireResultType(instruction, module_.types.intType(), name, id, index, loc);
+                break;
+            case Opcode::AtomicStore:
+                expectValueKind(1, TypeKind::Int, "int");
+                break;
+            case Opcode::AtomicAdd:
+                expectValueKind(1, TypeKind::Int, "int");
+                requireResultType(instruction, module_.types.intType(), name, id, index, loc);
+                break;
+            case Opcode::AtomicLoadBool:
+                requireResultType(instruction, module_.types.boolType(), name, id, index, loc);
+                break;
+            case Opcode::AtomicStoreBool:
+                expectValueKind(1, TypeKind::Bool, "bool");
+                break;
+            case Opcode::AtomicLoadDouble:
+                requireResultType(instruction, module_.types.doubleType(), name, id, index, loc);
+                break;
+            case Opcode::AtomicStoreDouble:
+                expectValueKind(1, TypeKind::Double, "double");
+                break;
+            case Opcode::AtomicLoadRef: {
+                const Type* result = typeOf(instruction.resultType);
+                if (result && result->kind != TypeKind::Unknown && result->kind != TypeKind::TypeParam &&
+                    !isReferenceKind(result->kind)) {
+                    error("atomic_load_ref must produce a reference type but produces " +
+                          render(instruction.resultType), id, index, loc);
+                }
+                break;
+            }
+            case Opcode::AtomicStoreRef: {
+                if (instruction.operands.size() < 2) break;
+                const Type* value = typeOf(instruction.operands[1].type);
+                if (value && value->kind != TypeKind::Unknown && value->kind != TypeKind::TypeParam &&
+                    value->kind != TypeKind::Nil && !isReferenceKind(value->kind)) {
+                    error("atomic_store_ref value has type " + render(instruction.operands[1].type) +
+                          " but must be an object or nil", id, index, loc);
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    // --- semaphores -------------------------------------------------------
+    bool expectSemaphore(const Operand& operand, const char* what, BlockId id, long index, SourceLocation loc) {
+        return expectReceiver(operand, [](const Type& t) { return isSemaphoreType(t); }, "a Semaphore", what,
+                              id, index, loc);
+    }
+
+    void expectIntValue(const Instruction& instruction, std::size_t operand, const char* name, BlockId id,
+                        long index, SourceLocation loc) {
+        if (operand >= instruction.operands.size()) return;
+        const Type* type = typeOf(instruction.operands[operand].type);
+        if (!type || type->kind == TypeKind::Unknown || type->kind == TypeKind::TypeParam) return;
+        if (type->kind != TypeKind::Int) {
+            error(std::string(name) + " count has type " + render(instruction.operands[operand].type) +
+                  " but must be int", id, index, loc);
+        }
+    }
+
+    void checkSemaphore(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        const char* name = opcodeName(instruction.opcode);
+        expectSemaphore(instruction.operands[0], name, id, index, loc);
+        switch (instruction.opcode) {
+            case Opcode::SemaphoreAvailable:
+                requireResultType(instruction, module_.types.intType(), name, id, index, loc);
+                break;
+            case Opcode::SemaphoreSetPermits:
+            case Opcode::SemaphoreReleaseMany:
+                expectIntValue(instruction, 1, name, id, index, loc);
+                break;
+            case Opcode::SemaphoreTryAcquire:
+                requireResultType(instruction, module_.types.boolType(), name, id, index, loc);
+                break;
+            default:
+                break;
+        }
+    }
+
+    // --- conditions -------------------------------------------------------
+    bool expectCondition(const Operand& operand, const char* what, BlockId id, long index, SourceLocation loc) {
+        return expectReceiver(operand, [](const Type& t) { return isConditionType(t); }, "a Condition", what,
+                              id, index, loc);
+    }
+
+    void checkCondition(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        const char* name = opcodeName(instruction.opcode);
+        expectCondition(instruction.operands[0], name, id, index, loc);
+        switch (instruction.opcode) {
+            case Opcode::ConditionWait:
+                // The bare wait loses notifications that arrive before it
+                // blocks and returns early on spurious wakeups. Every site is
+                // warned so the hazard is visible in MIR, not just in a doc.
+                warn("condition_wait has no predicate and no timeout: a notify delivered before the wait " +
+                     std::string("begins is lost and the waiter sleeps until the next notification; ") +
+                     "pair it with a state check or use condition_wait_for",
+                     id, index, loc);
+                break;
+            case Opcode::ConditionWaitFor: {
+                if (instruction.operands.size() >= 2) {
+                    const Type* timeout = typeOf(instruction.operands[1].type);
+                    if (timeout && timeout->kind != TypeKind::Unknown && timeout->kind != TypeKind::TypeParam &&
+                        !isNumericKind(timeout->kind)) {
+                        error("condition_wait_for timeout has type " + render(instruction.operands[1].type) +
+                              " but must be numeric (seconds)", id, index, loc);
+                    }
+                }
+                requireResultType(instruction, module_.types.boolType(), name, id, index, loc);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    // --- shared state -----------------------------------------------------
+    void checkSharedCreate(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        const Type* result = typeOf(instruction.resultType);
+        if (!result || !isSharedType(*result)) {
+            error("shared_create must produce Shared<T> but produces " + render(instruction.resultType),
+                  id, index, loc);
+            return;
+        }
+        const std::uint32_t payload = sharedPayloadFor(*result);
+        if (payload != 0 && !assignable(instruction.operands[0].type, payload)) {
+            error("shared_create wraps " + render(instruction.operands[0].type) + " but produces " +
+                  render(instruction.resultType), id, index, loc);
+        }
+    }
+
+    void checkSharedGet(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        if (!expectReceiver(instruction.operands[0], [](const Type& t) { return isSharedType(t); },
+                            "a Shared<T>", "shared_get", id, index, loc)) {
+            return;
+        }
+        const Type* shared = typeOf(instruction.operands[0].type);
+        const std::uint32_t payload = shared ? sharedPayloadFor(*shared) : 0;
+        if (payload != 0 && !assignable(payload, instruction.resultType)) {
+            error("shared_get of " + render(instruction.operands[0].type) + " produces " + render(payload) +
+                  " but the temp is typed " + render(instruction.resultType), id, index, loc);
+        }
+    }
+
+    void checkSharedSet(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        if (!expectReceiver(instruction.operands[0], [](const Type& t) { return isSharedType(t); },
+                            "a Shared<T>", "shared_set", id, index, loc)) {
+            return;
+        }
+        // The store is type-checked at runtime (the cell rejects a replacement
+        // whose type does not match), so an unknown value is accepted and a
+        // definitely-wrong one is an error - the same rule as the receivers.
+        const Type* shared = typeOf(instruction.operands[0].type);
+        const std::uint32_t payload = shared ? sharedPayloadFor(*shared) : 0;
+        if (payload == 0) return;
+        const Type* value = typeOf(instruction.operands[1].type);
+        if (!value || value->kind == TypeKind::Unknown || value->kind == TypeKind::TypeParam) return;
+        if (!assignable(instruction.operands[1].type, payload)) {
+            error("shared_set stores " + render(instruction.operands[1].type) + " into " +
+                  render(instruction.operands[0].type), id, index, loc);
+        }
+    }
+
+    // --- FFI --------------------------------------------------------------
+    void checkFfiCall(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        if (instruction.target.ffiSymbol.empty()) {
+            error("ffi_call names no exported symbol", id, index, loc);
+            return;
+        }
+        if (instruction.target.ffiParamTags.size() != instruction.operands.size()) {
+            error("ffi_call '" + instruction.target.ffiSymbol + "' records " +
+                  std::to_string(instruction.target.ffiParamTags.size()) + " ABI tag(s) but has " +
+                  std::to_string(instruction.operands.size()) + " argument(s)", id, index, loc);
+            return;
+        }
+        if (!instruction.target.ffiParamOwnership.empty() &&
+            instruction.target.ffiParamOwnership.size() != instruction.operands.size()) {
+            error("ffi_call '" + instruction.target.ffiSymbol + "' records " +
+                  std::to_string(instruction.target.ffiParamOwnership.size()) +
+                  " ownership entrie(s) but has " + std::to_string(instruction.operands.size()) +
+                  " argument(s)", id, index, loc);
+            return;
+        }
+        for (std::size_t i = 0; i < instruction.operands.size(); ++i) {
+            checkFfiParam(instruction, i, id, index, loc);
+        }
+        // Views are borrowed into the call and can never come back out: the
+        // boundary rejects a buffer/struct return outright.
+        if (instruction.target.ffiReturnTag == NativeAbiTag::BufferView ||
+            instruction.target.ffiReturnTag == NativeAbiTag::StructView) {
+            error("ffi_call '" + instruction.target.ffiSymbol + "' returns a " +
+                  nativeAbiTagName(instruction.target.ffiReturnTag) +
+                  " view; views are borrowed into the call and cannot be returned",
+                  id, index, loc);
+            return;
+        }
+        // The return-ownership contract: primitives carry none, a handle comes
+        // back Owned. A primitive tagged Owned/Borrowed/Consumed, or a handle
+        // tagged anything but Owned, contradicts what the boundary enforces.
+        const NativeOwnership returnOwnership = instruction.target.ffiReturnOwnership;
+        switch (instruction.target.ffiReturnTag) {
+            case NativeAbiTag::I64:
+            case NativeAbiTag::F64:
+            case NativeAbiTag::Bool:
+                if (returnOwnership != NativeOwnership::None) {
+                    error("ffi_call '" + instruction.target.ffiSymbol + "' tags a primitive return '" +
+                          std::string(nativeOwnershipName(returnOwnership)) +
+                          "'; ownership metadata is rejected on primitives",
+                          id, index, loc);
+                }
+                break;
+            case NativeAbiTag::Handle:
+                if (returnOwnership != NativeOwnership::Owned) {
+                    error("ffi_call '" + instruction.target.ffiSymbol + "' returns a handle tagged '" +
+                          std::string(nativeOwnershipName(returnOwnership)) +
+                          "'; only an Owned handle may be returned",
+                          id, index, loc);
+                }
+                break;
+            default:
+                break;
+        }
+        if (instruction.result == kNoTemp) return;
+        checkFfiResultType(instruction, id, index, loc);
+    }
+
+    void checkFfiParam(const Instruction& instruction, std::size_t i, BlockId id, long index,
+                       SourceLocation loc) {
+        const NativeAbiTag tag = instruction.target.ffiParamTags[i];
+        const Type* type = typeOf(instruction.operands[i].type);
+        // An unknown operand is marshalled by the runtime's own pack(); only a
+        // definitely-wrong concrete type is rejected here.
+        if (type && type->kind != TypeKind::Unknown && type->kind != TypeKind::TypeParam) {
+            bool ok = false;
+            switch (tag) {
+                case NativeAbiTag::I64: ok = type->kind == TypeKind::Int; break;
+                case NativeAbiTag::F64:
+                    ok = type->kind == TypeKind::Double || type->kind == TypeKind::Int;
+                    break;
+                case NativeAbiTag::Bool: ok = type->kind == TypeKind::Bool; break;
+                case NativeAbiTag::Handle: ok = isNativeHandleType(*type); break;
+                case NativeAbiTag::BufferView: ok = isNativeBufferType(*type); break;
+                case NativeAbiTag::StructView: ok = isNativeStructType(*type); break;
+                case NativeAbiTag::Callback:
+                    ok = isNativeCallbackType(*type) || type->kind == TypeKind::Function;
+                    break;
+            }
+            if (!ok) {
+                error("ffi_call '" + instruction.target.ffiSymbol + "' argument " + std::to_string(i) +
+                      " has type " + render(instruction.operands[i].type) + " but the ABI tag is " +
+                      nativeAbiTagName(tag), id, index, loc);
+            }
+        }
+        if (i >= instruction.target.ffiParamOwnership.size()) return;
+        const NativeOwnership ownership = instruction.target.ffiParamOwnership[i];
+        // Views cross only as borrows; a handle may additionally transfer
+        // (Owned/Consumed are consumed on success, retained on failure).
+        if ((tag == NativeAbiTag::BufferView || tag == NativeAbiTag::StructView) &&
+            ownership != NativeOwnership::None && ownership != NativeOwnership::Borrowed) {
+            error("ffi_call '" + instruction.target.ffiSymbol + "' argument " + std::to_string(i) +
+                  " tags a " + nativeAbiTagName(tag) + " view '" +
+                  nativeOwnershipName(ownership) + "'; views cross only as borrows",
+                  id, index, loc);
+        }
+    }
+
+    void checkFfiResultType(const Instruction& instruction, BlockId id, long index, SourceLocation loc) {
+        const Type* result = typeOf(instruction.resultType);
+        if (!result || result->kind == TypeKind::Unknown || result->kind == TypeKind::TypeParam) return;
+        bool ok = false;
+        switch (instruction.target.ffiReturnTag) {
+            case NativeAbiTag::I64: ok = result->kind == TypeKind::Int; break;
+            case NativeAbiTag::F64:
+                ok = result->kind == TypeKind::Double || result->kind == TypeKind::Int;
+                break;
+            case NativeAbiTag::Bool: ok = result->kind == TypeKind::Bool; break;
+            case NativeAbiTag::Handle: ok = isNativeHandleType(*result); break;
+            case NativeAbiTag::Callback:
+                ok = isNativeCallbackType(*result) || result->kind == TypeKind::Function;
+                break;
+            case NativeAbiTag::BufferView:
+            case NativeAbiTag::StructView:
+                return; // already reported above
+        }
+        if (!ok) {
+            error("ffi_call '" + instruction.target.ffiSymbol + "' produces " +
+                  render(instruction.resultType) + " but the ABI return tag is " +
+                  nativeAbiTagName(instruction.target.ffiReturnTag), id, index, loc);
+        }
+    }
+
+    void checkHandle(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        const char* name = opcodeName(instruction.opcode);
+        expectReceiver(instruction.operands[0], [](const Type& t) { return isNativeHandleType(t); },
+                       "a NativeHandle", name, id, index, loc);
+        if (instruction.opcode == Opcode::HandleClose) return;
+        const Type* result = typeOf(instruction.resultType);
+        if (result && result->kind != TypeKind::Unknown && result->kind != TypeKind::TypeParam &&
+            !isNativeHandleType(*result)) {
+            error(std::string(name) + " must produce a NativeHandle but produces " +
+                  render(instruction.resultType), id, index, loc);
+        }
+    }
+
+    void checkCallbackRegister(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        const Type* type = typeOf(instruction.operands[0].type);
+        if (type && type->kind != TypeKind::Unknown && type->kind != TypeKind::TypeParam &&
+            type->kind != TypeKind::Function) {
+            error("callback_register expects a func value but has " + render(instruction.operands[0].type),
+                  id, index, loc);
+        }
+        // Native callbacks never suspend: the registry invokes them
+        // synchronously under a lease, with no scheduler to park on.
+        if (type && type->kind == TypeKind::Function && type->signature.hasSignature &&
+            type->signature.isAsync) {
+            error("callback_register of an async func; native callbacks must be synchronous", id, index, loc);
+        }
+        if (const Function* body = closureBody(instruction.operands[0])) {
+            if (body->isAsync) {
+                error("callback_register passes async function '" + body->name +
+                      "'; native callbacks must be synchronous", id, index, loc);
+            }
+        }
+        const Type* result = typeOf(instruction.resultType);
+        if (!result || !isNativeCallbackType(*result)) {
+            error("callback_register must produce a NativeCallback but produces " +
+                  render(instruction.resultType), id, index, loc);
+        }
+    }
+
+    void checkCallbackInvoke(const BasicBlock& block, const Instruction& instruction, long index) {
+        const BlockId id = block.id;
+        const SourceLocation& loc = instruction.location;
+        if (!expectReceiver(instruction.operands[0],
+                            [](const Type& t) { return isNativeCallbackType(t); }, "a NativeCallback",
+                            "callback_invoke", id, index, loc)) {
+            return;
+        }
+        // A token typed with a signature carries the arity and result the
+        // registry will marshal; check the call against it when present.
+        const Type* token = typeOf(instruction.operands[0].type);
+        if (!token || token->kind != TypeKind::NativeCallback || !token->signature.hasSignature) return;
+        const FunctionSignature& signature = token->signature;
+        if (signature.parameterTypes.size() != instruction.operands.size() - 1) {
+            error("callback_invoke passes " + std::to_string(instruction.operands.size() - 1) +
+                  " argument(s) but the callback takes " + std::to_string(signature.parameterTypes.size()),
+                  id, index, loc);
+            return;
+        }
+        for (std::size_t i = 0; i < signature.parameterTypes.size(); ++i) {
+            if (!assignable(instruction.operands[i + 1].type, signature.parameterTypes[i])) {
+                error("callback_invoke argument " + std::to_string(i) + " passes " +
+                      render(instruction.operands[i + 1].type) + " but the callback takes " +
+                      render(signature.parameterTypes[i]), id, index, loc);
+            }
+        }
+        if (isVoidType(signature.returnType)) {
+            if (instruction.result != kNoTemp) {
+                error("callback_invoke of a void callback must not define a temp", id, index, loc);
+            }
+        } else if (instruction.result != kNoTemp && !assignable(signature.returnType, instruction.resultType)) {
+            error("callback_invoke produces " + render(signature.returnType) + " but the temp is typed " +
+                  render(instruction.resultType), id, index, loc);
+        }
+    }
+
+    void checkCallbackClose(const BasicBlock& block, const Instruction& instruction, long index) {
+        expectReceiver(instruction.operands[0], [](const Type& t) { return isNativeCallbackType(t); },
+                       "a NativeCallback", "callback_close", block.id, index, instruction.location);
     }
 
     // --- dominance --------------------------------------------------------
@@ -2091,12 +3128,15 @@ private:
         // Same, for owned *parameters* released by slot-less drops (the
         // parameter index is the identity; params cannot move).
         std::set<SlotId> droppedParams;
-        // borrow slot -> owner slot (0 when the owner is not a known slot)
+        // Borrow slot -> root: local slot id, or slots.size()+1+parameter
+        // index. Zero means conflicting/unknown roots. This is MAY-active.
         std::map<SlotId, SlotId> borrows;
+        std::set<SlotId> mustBorrows;
 
         friend bool operator==(const FlowState& a, const FlowState& b) noexcept {
             return a.moved == b.moved && a.dropped == b.dropped &&
-                   a.droppedParams == b.droppedParams && a.borrows == b.borrows;
+                   a.droppedParams == b.droppedParams && a.borrows == b.borrows &&
+                   a.mustBorrows == b.mustBorrows;
         }
     };
 
@@ -2113,55 +3153,88 @@ private:
         out.dropped.insert(b.dropped.begin(), b.dropped.end());
         out.droppedParams = a.droppedParams;
         out.droppedParams.insert(b.droppedParams.begin(), b.droppedParams.end());
-        // A borrow survives the join only if it is active on every incoming
-        // path. Conflicting owners collapse to "unknown owner" rather than
-        // being dropped, so a later move still sees the claim.
-        for (const auto& [slot, owner] : a.borrows) {
-            const auto other = b.borrows.find(slot);
-            if (other == b.borrows.end()) continue;
-            out.borrows.emplace(slot, other->second == owner ? owner : 0);
+        // Exclusion needs MAY-active borrows: one predecessor retaining a
+        // borrow is enough to make a move/drop unsafe. Valid use/end needs
+        // MUST-active borrows. Do not confuse these two lattice components.
+        out.borrows = a.borrows;
+        for (const auto& [slot, owner] : b.borrows) {
+            auto it = out.borrows.find(slot);
+            if (it == out.borrows.end()) out.borrows.emplace(slot, owner);
+            else if (it->second != owner) it->second = 0;
         }
+        std::set_intersection(a.mustBorrows.begin(), a.mustBorrows.end(),
+                              b.mustBorrows.begin(), b.mustBorrows.end(),
+                              std::inserter(out.mustBorrows, out.mustBorrows.end()));
         return out;
     }
 
     void checkOwnershipFlow() {
+        std::set<BlockId> identities;
+        for (const auto& b : function_.blocks) if (!identities.insert(b.id).second) return;
+        if (!cfg_.isValid(function_.entryBlock)) return;
         const std::size_t count = function_.blocks.size();
-        std::vector<FlowState> outState(count);
+        std::vector<FlowState> inputs(count), outState(count), unwindState(count);
         std::vector<bool> hasOut(count, false);
-
-        // Iterate in reverse post-order until the state stops changing. Both
-        // components are monotone (moved only grows, borrows only shrink), so
-        // this terminates.
+        // Solve before emitting. Emitting during iteration reports transient
+        // facts and duplicates errors once per loop traversal. No iteration cap:
+        // the finite may/must lattice converges, or it is an analysis bug.
+        emitFlowDiagnostics_ = false;
         bool changed = true;
-        std::size_t guard = 0;
-        while (changed && guard++ < count + 8) {
+        while (changed) {
             changed = false;
-            for (BlockId id : cfg_.reversePostOrder()) {
+            for (const auto& block : function_.blocks) {
+                const BlockId id = block.id;
+                if (!cfg_.reachableWithUnwind().count(id)) continue;
                 const std::size_t index = cfg_.indexOf(id);
                 FlowState input;
-                bool first = true;
+                bool first = id != function_.entryBlock;
+                const auto merge = [&](const FlowState& incoming) {
+                    if (first) { input = incoming; first = false; }
+                    else input = join(input, incoming);
+                };
                 for (BlockId pred : cfg_.predecessors(id)) {
-                    const std::size_t predIndex = cfg_.indexOf(pred);
-                    if (!hasOut[predIndex]) continue;
-                    if (first) { input = outState[predIndex]; first = false; }
-                    else input = join(input, outState[predIndex]);
+                    const auto pi = cfg_.indexOf(pred);
+                    if (hasOut[pi]) merge(outState[pi]);
                 }
-                FlowState next = input;
-                transfer(*function_.block(id), input, next, id);
-                if (!hasOut[index] || !(outState[index] == next)) {
+                for (BlockId pred : cfg_.unwindPredecessors(id)) {
+                    const auto pi = cfg_.indexOf(pred);
+                    if (hasOut[pi]) merge(unwindState[pi]);
+                }
+                if (first) continue;
+                inputs[index] = input;
+                FlowState next, unwind;
+                transfer(block, input, next, id, &unwind);
+                if (!hasOut[index] || !(outState[index] == next) || !(unwindState[index] == unwind)) {
                     outState[index] = next;
+                    unwindState[index] = unwind;
                     hasOut[index] = true;
                     changed = true;
                 }
             }
         }
+        emitFlowDiagnostics_ = true;
+        for (const auto& block : function_.blocks) {
+            const auto index = cfg_.indexOf(block.id);
+            if (!hasOut[index]) continue;
+            FlowState ignored;
+            transfer(block, inputs[index], ignored, block.id);
+        }
     }
 
-    void transfer(const BasicBlock& block, const FlowState& input, FlowState& state, BlockId id) {
+    void transfer(const BasicBlock& block, const FlowState& input, FlowState& state, BlockId id,
+                  FlowState* unwind = nullptr) {
         state = input;
+        bool hasUnwind = false;
+        const auto captureUnwind = [&] {
+            if (!unwind) return;
+            *unwind = hasUnwind ? join(*unwind, state) : state;
+            hasUnwind = true;
+        };
         for (std::size_t i = 0; i < block.instructions.size(); ++i) {
             const auto& instruction = block.instructions[i];
             const long index = static_cast<long>(i);
+            property_ = instructionProperty(instruction.opcode);
+            if (opcodeShape(instruction.opcode).mayThrow) captureUnwind();
             const SourceLocation& loc = instruction.location;
             const Slot* slot = function_.slot(instruction.slot);
             const std::string slotName = slot ? "local '" + slot->name + "'" : "an unknown local";
@@ -2171,8 +3244,10 @@ private:
             // attempted use for the diagnostic.
             const auto checkLive = [&](SlotId slot, const std::string& what) {
                 if (state.moved.count(slot)) {
+                    property_ = SafetyProperty::Move;
                     error(what + " " + slotName + " after it was moved", id, index, loc);
                 } else if (state.dropped.count(slot)) {
+                    property_ = SafetyProperty::ResourceLifetime;
                     error(what + " " + slotName + " after it was dropped", id, index, loc);
                 }
             };
@@ -2188,6 +3263,11 @@ private:
                     state.dropped.erase(instruction.slot);
                     break;
                 case Opcode::Load:
+                    if (slot && slot->ownership == zl::OwnershipKind::BORROW &&
+                        !state.mustBorrows.count(instruction.slot)) {
+                        property_ = SafetyProperty::Borrow;
+                        error("read of " + slotName + " without an active borrow on every path", id, index, loc);
+                    }
                     checkLive(instruction.slot, "read of");
                     break;
                 case Opcode::Move:
@@ -2206,9 +3286,14 @@ private:
                     state.moved.insert(instruction.slot);
                     break;
                 case Opcode::Borrow: {
-                    const SlotId ownerSlot = ownerSlotOf(instruction.operands.empty()
-                                                             ? Operand::none()
-                                                             : instruction.operands[0]);
+                    const Operand ownerValue = instruction.operands.empty() ? Operand::none() : instruction.operands[0];
+                    // Keep parameter roots distinct from slot roots. Zero is
+                    // reserved for an unknown/conflicting root at a join.
+                    const SlotId ownerSlot = ownerValue.kind == OperandKind::Param
+                        ? static_cast<SlotId>(function_.slots.size() + 1 + ownerValue.index)
+                        : ownerSlotOf(ownerValue);
+                    if (ownerValue.kind == OperandKind::Param && state.droppedParams.count(ownerValue.index))
+                        error("borrow of parameter after it was dropped", id, index, loc);
                     if (ownerSlot != 0 && state.moved.count(ownerSlot)) {
                         const Slot* owner = function_.slot(ownerSlot);
                         error("borrow of " + (owner ? "local '" + owner->name + "'" : "an unknown local") +
@@ -2219,14 +3304,16 @@ private:
                               " after it was dropped; a borrow cannot outlive a released owner", id, index, loc);
                     }
                     state.borrows[instruction.slot] = ownerSlot;
+                    state.mustBorrows.insert(instruction.slot);
                     break;
                 }
                 case Opcode::EndBorrow:
-                    if (!state.borrows.count(instruction.slot)) {
+                    if (!state.mustBorrows.count(instruction.slot)) {
                         error("end_borrow of " + slotName + ", which does not hold an active borrow here",
                               id, index, loc);
                     }
                     state.borrows.erase(instruction.slot);
+                    state.mustBorrows.erase(instruction.slot);
                     break;
                 case Opcode::Drop: {
                     // The two spellings: release of a slot's storage (slot is
@@ -2256,9 +3343,9 @@ private:
                         error("drop of " + slotName + " after it was dropped; a resource releases exactly once",
                               id, index, loc);
                     }
-                    // A ZL borrow is function-scoped: it ends when the
-                    // function does, at the same point as the exit cleanup.
-                    // A release in that trailing cleanup region therefore
+                    // Borrows whose scopes extend to function exit end at
+                    // the same point as the exit cleanup. A release in that
+                    // trailing cleanup region therefore
                     // cannot invalidate a still-used borrow - there is no
                     // later use. Anywhere else, dropping an owner while a
                     // borrow is live leaves that borrow pointing at a
@@ -2267,7 +3354,7 @@ private:
                     const bool exitRelease = isTrailingCleanup(block, i);
                     if (!exitRelease) {
                         for (const auto& [borrowSlot, owner] : state.borrows) {
-                            if (owner != target || owner == 0) continue;
+                            if (owner != target && owner != 0) continue;
                             const Slot* borrow = function_.slot(borrowSlot);
                             error("drop of " + slotName + " while it is borrowed by " +
                                   (borrow ? "local '" + borrow->name + "'" : "an unknown local") +
@@ -2278,10 +3365,38 @@ private:
                     state.dropped.insert(target);
                     break;
                 }
+                case Opcode::Await: {
+                    // Suspension preserves the frame, but only values rooted in
+                    // it survive: a borrow may cross an await only when its
+                    // lifetime anchors to an owned value whose storage is part
+                    // of the suspended frame. Mirrors the checker's
+                    // inferAwait rule (borrowRootOwner): borrow-of-borrow
+                    // chains resolve transitively, a caller-owned borrow
+                    // parameter never roots, and anything else (a GC owner, a
+                    // computed temp, a constant) is unsafe. The transfer runs
+                    // during solving without emitting; the reporting replay
+                    // observes only converged facts.
+                    for (const auto& [borrowSlot, owner] : state.borrows) {
+                        (void)owner;
+                        if (!borrowRootsInOwned(borrowSlot, state)) {
+                            const Slot* borrow = function_.slot(borrowSlot);
+                            error("await while borrow " +
+                                  (borrow ? "local '" + borrow->name + "'" : "slot " + std::to_string(borrowSlot)) +
+                                  " without an owned-frame lifetime is active; end the borrow or use an "
+                                  "owned/shared value before suspension", id, index, loc);
+                        }
+                    }
+                    break;
+                }
                 default:
                     break;
             }
+            if (opcodeShape(instruction.opcode).mayThrow) captureUnwind();
         }
+        if (block.terminator.kind == TerminatorKind::Throw) captureUnwind();
+        // A nominal handler edge with no identifiable throwing instruction is
+        // conservatively seeded from entry, never from successful block exit.
+        if (unwind && !hasUnwind) *unwind = input;
     }
 
     // True when instruction `index` sits in a block's trailing cleanup region:
@@ -2302,6 +3417,29 @@ private:
         if (operand.kind != OperandKind::Temp) return 0;
         const auto it = provenance_.find(operand.index);
         return it == provenance_.end() ? 0 : it->second;
+    }
+
+    // Resolve the converged flow root, NOT the first syntactic Borrow in
+    // the function. Rebinding or merging different owners cannot inherit a
+    // proof from an unrelated path. Unknown roots conservatively fail proof.
+    bool borrowRootsInOwned(SlotId borrowSlot, const FlowState& state) const {
+        std::set<SlotId> seen;
+        while (seen.insert(borrowSlot).second) {
+            const auto it = state.borrows.find(borrowSlot);
+            if (it == state.borrows.end() || it->second == 0) return false;
+            const SlotId owner = it->second;
+            if (owner > function_.slots.size()) {
+                const auto param = owner - function_.slots.size() - 1;
+                return param < function_.parameters.size() && !state.droppedParams.count(param) &&
+                       function_.parameters[param].ownership == zl::OwnershipKind::OWNED;
+            }
+            const Slot* slot = function_.slot(owner);
+            if (!slot || state.moved.count(owner) || state.dropped.count(owner)) return false;
+            if (slot->ownership == zl::OwnershipKind::OWNED) return true;
+            if (slot->ownership != zl::OwnershipKind::BORROW) return false;
+            borrowSlot = owner;
+        }
+        return false;
     }
 
     const Module& module_;

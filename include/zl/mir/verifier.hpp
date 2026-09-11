@@ -35,6 +35,14 @@ enum class DiagnosticSeverity : std::uint8_t {
 
 [[nodiscard]] const char* severityName(DiagnosticSeverity severity) noexcept;
 
+// Stable property identifiers for tooling/research; never classify English messages.
+enum class SafetyProperty : std::uint8_t {
+    Structure, TypeFlow, Definition, Move, Ownership, Borrow, Reachability,
+    ControlFlow, TypeAssumption, DynamicBoundary, Return, NativeCall,
+    ResourceLifetime, Concurrency,
+};
+[[nodiscard]] const char* propertyName(SafetyProperty property) noexcept;
+
 struct Diagnostic {
     DiagnosticSeverity severity{DiagnosticSeverity::Error};
     // Empty for a module-level problem, otherwise the function being verified.
@@ -46,6 +54,7 @@ struct Diagnostic {
     long instructionIndex{-1};
     std::string message;
     SourceLocation location;
+    SafetyProperty property{SafetyProperty::Structure};
 
     [[nodiscard]] std::string describe() const;
 };
@@ -63,6 +72,7 @@ struct VerificationReport {
     [[nodiscard]] std::size_t warningCount() const;
     // All messages, one per line, in the order they were found.
     [[nodiscard]] std::string describe() const;
+    [[nodiscard]] std::string toJson() const;
 };
 
 struct VerifierOptions {
@@ -75,6 +85,8 @@ struct VerifierOptions {
     bool unreachableBlocksAreErrors{true};
     // Stop after this many errors. 0 means no limit.
     std::size_t maxErrors{0};
+    // Audit warnings identify runtime obligations, not static rejections.
+    bool auditBoundaries{false};
 };
 
 // Verifies a whole module: types, statics, class layouts, function signatures,

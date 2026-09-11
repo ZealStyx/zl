@@ -187,6 +187,17 @@ The backend reproduces the reference byte-for-byte (see
   field visibility and method names, return types and modifiers matching the
   reference path exactly (`Reflection.zl`).
 - Native calls (`log`, `Math.*`, `Collection.*`, ...).
+- Every concurrency operation lowers to the same runtime call the reference
+  compiler emits for the same source, so the bytes are identical: `task_spawn`/
+  `task_block`/`task_ignore`/`task_cancel` to the `Task.*` natives,
+  `thread_start`/`join`/`is_alive` to `Thread.*`, the channel family to
+  `Channel.*` (including the `sendAsync`/`receiveAsync` task constructors),
+  the scoped locks to `Mutex.withLock`/`RwLock.withRead`/`withWrite`/
+  `Shared.withLock`, every atomic lane to its `Atomic.*` native, semaphores
+  and conditions to theirs, and `shared_create`/`get`/`set` to
+  `share`/`Shared.get`/`Shared.setValue`. Awaiting a `Task<void>` into an
+  `unknown` temp (the spelling the checker leaves for some void-awaits)
+  emits the same `Await`+`Pop` the reference path does.
 
 Every runnable example in the tree — `examples/basics/*`, the whole of
 `examples/intermediate/*`, and `examples/advanced/*` — is the corpus the
@@ -208,9 +219,14 @@ stub: a tree-wide run of `--mir-vm` reports zero stub warnings, so the
 fail-closed path is never exercised by the corpus — every function the
 examples touch is faithfully translated.
 
-Constructs that would still fail closed (the gate rejects the function before
-it can misbehave) have no example coverage left; when one turns up, name it
-here and in `KNOWN_GAPS` in `tools/mir_backend_diff.sh`. The mechanism is
+The one family that still fails closed by design is FFI: `ffi_call` and the
+handle/callback lifecycle have no bytecode spelling, so any function using
+them is stubbed rather than mistranslated. No example uses FFI, so the corpus
+never exercises that path.
+
+Other constructs that would still fail closed (the gate rejects the function
+before it can misbehave) have no example coverage left; when one turns up,
+name it here and in `KNOWN_GAPS` in `tools/mir_backend_diff.sh`. The mechanism is
 unchanged: a construct the backend cannot translate faithfully stubs the
 functions that use it, and the affected programs raise a loud runtime error
 under `--mir-vm` rather than silently diverge. The last gap to graduate was

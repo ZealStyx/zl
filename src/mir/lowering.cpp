@@ -63,8 +63,30 @@ struct TypeConverter {
             return arena.arrayType(arguments.empty() ? arena.unknownType() : arguments.front(),
                                    name.fixedSize);
         }
-        if (base == "Task") return arena.taskType(arguments.empty() ? arena.voidType() : arguments.front());
+        if (base == "Task") {
+            TypeId payload = arguments.empty() ? arena.voidType() : arguments.front();
+            if (const Type* payloadType = arena.find(payload)) {
+                if (payloadType->kind == TypeKind::Nil) payload = arena.voidType();
+            }
+            return arena.taskType(payload);
+        }
         if (base == "Shared") return arena.sharedType(arguments.empty() ? arena.unknownType() : arguments.front());
+        // The concurrency primitives are semantic kinds, not plain classes: a
+        // backend reading a `channel_send` operand must see "a channel" without
+        // string-matching the name, and the verifier's confinement and
+        // synchronisation rules key on these kinds (accepting the plain class
+        // spelling wherever it still appears). Channels are currently untyped,
+        // so a bare `Channel` carries an unknown element.
+        if (base == "Thread") return arena.threadType();
+        if (base == "Channel") {
+            return arena.channelType(arguments.empty() ? arena.unknownType() : arguments.front());
+        }
+        if (base == "Mutex") return arena.mutexType();
+        if (base == "RwLock") return arena.rwLockType();
+        if (base == "Atomic") return arena.atomicType();
+        if (base == "Semaphore") return arena.semaphoreType();
+        if (base == "Condition") return arena.conditionType();
+        if (base == "NativeHandle") return arena.nativeHandleType();
         // The builtin sums are semantic kinds, not plain classes: a backend
         // reading `Option<List<int>>` must see "a List<int> or nothing"
         // without string-matching the name. `Some`/`None`/`Ok`/`Err` stay
@@ -234,6 +256,7 @@ struct LoopContext {
     // continue from inside the loop runs the finalizers opened after loop
     // entry (innermost first) before leaving, exactly as the reference does.
     std::size_t finallyDepth{0};
+    std::size_t scopeDepth{0};
 };
 
 // A name in scope resolves either to a mutable slot or directly to a parameter.
@@ -326,6 +349,7 @@ struct FunctionLowerer {
 
     [[nodiscard]] SourceLocation location(const zl::AstNode* node) const {
         SourceLocation loc;
+        loc.file = node && !node->sourceFile.empty() ? node->sourceFile : fb.function().location.file;
         if (node) loc.line = static_cast<std::uint32_t>(node->line);
         return loc;
     }
@@ -349,7 +373,27 @@ struct FunctionLowerer {
 
     // --- scopes and locals ------------------------------------------------
     void pushScope() { scopes.emplace_back(); }
-    void popScope() { scopes.pop_back(); }
+    void endBorrowsFromScope(std::size_t depth, SourceLocation loc = {}) {
+        if (isDead()) return;
+        std::set<SlotId> borrows;
+        for (std::size_t i = depth; i < scopes.size(); ++i) {
+            for (const auto& [name, local] : scopes[i]) {
+                (void)name;
+                const Slot* slot = fb.function().slot(local.slot);
+                if (slot && slot->ownership == zl::OwnershipKind::BORROW) borrows.insert(local.slot);
+            }
+        }
+        for (SlotId slot : borrows) {
+            const auto& declared = fb.function().slot(slot)->location;
+            fb.emitEndBorrow(slot, loc.valid() ? loc : declared);
+        }
+    }
+    void popScope() {
+        // The checker ends lexical borrows on scope exit. Make that event
+        // explicit: a may-borrow join must not "forget" it by accident.
+        endBorrowsFromScope(scopes.size() - 1);
+        scopes.pop_back();
+    }
 
     [[nodiscard]] LocalRef lookupLocal(const std::string& name) const {
         for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
@@ -698,6 +742,234 @@ struct FunctionLowerer {
         return Operand::temp(fb.emitMove(slot, location(&node)), type);
     }
 
+    // Lowers a qualified native call that names a concurrency primitive to its
+    // dedicated MIR operation. Sets `lowered` and returns the call's operand on
+    // success; returns none() with `lowered == false` when the name is not a
+    // concurrency primitive and the generic CallNative path applies.
+    //
+    // Deliberately NOT intercepted: `Shared.__get/__set/__withLock` (the dunder
+    // natives backing the builtin Shared methods - intercepting them would make
+    // the backend's SharedGet lower back into the same method infinitely) and
+    // `Time.sleepAsync` (a timer that happens to return a Task, not one of the
+    // synchronisation primitives; it stays an ordinary async CallNative).
+    [[nodiscard]] Operand concurrencyNativeCall(const std::string& qualifiedName,
+                                                std::vector<Operand>& arguments, TypeId resultType,
+                                                SourceLocation loc, bool& lowered) {
+        lowered = false;
+        const TypeArena& arena = ctx.builder.types();
+        const bool returnsVoid = isVoid(resultType);
+
+        // The Task a spawn produces. The checker types Task.spawn from the
+        // closure's own return; when the closure is dynamically typed there is
+        // no payload to name, and unknown is the honest answer.
+        const auto spawnResult = [&](const Operand& closure) -> TypeId {
+            if (const Type* recorded = arena.find(resultType)) {
+                if (isTaskType(*recorded)) return resultType;
+            }
+            TypeId payload = arena.unknownType();
+            if (const Type* closureType = arena.find(closure.type)) {
+                if (closureType->kind == TypeKind::Function && closureType->signature.hasSignature) {
+                    payload = closureType->signature.returnType;
+                }
+            }
+            // An empty-body lambda reports nil, not void; the task it spawns
+            // completes with the runtime nil either way, and Task<void> is the
+            // spelling that agrees with the closure body's own void return.
+            if (const Type* payloadType = arena.find(payload)) {
+                if (payloadType->kind == TypeKind::Nil) payload = arena.voidType();
+            }
+            return arena.taskType(payload);
+        };
+
+        if (qualifiedName == "Task.spawn" && arguments.size() == 1) {
+            lowered = true;
+            const TypeId task = spawnResult(arguments[0]);
+            const TempId temp = fb.emitTaskSpawn(std::move(arguments[0]), task, loc);
+            return Operand::temp(temp, task);
+        }
+        if (qualifiedName == "Thread.start" && arguments.size() == 1) {
+            lowered = true;
+            const TypeId thread = arena.threadType();
+            const TempId temp = fb.emitThreadStart(std::move(arguments[0]), thread, loc);
+            return Operand::temp(temp, thread);
+        }
+        if (qualifiedName == "Thread.join" && arguments.size() == 1) {
+            lowered = true;
+            fb.emitThreadJoin(std::move(arguments[0]), loc);
+            return Operand::none();
+        }
+        if (qualifiedName == "Thread.isAlive" && arguments.size() == 1) {
+            lowered = true;
+            const TempId temp = fb.emitThreadIsAlive(std::move(arguments[0]), loc);
+            return Operand::temp(temp, arena.boolType());
+        }
+        if (qualifiedName == "Mutex.withLock" && arguments.size() == 2) {
+            lowered = true;
+            if (returnsVoid) {
+                const TempId ignored =
+                    fb.emitMutexWithLock(std::move(arguments[0]), std::move(arguments[1]), 0, loc);
+                (void)ignored;
+                return Operand::none();
+            }
+            const TempId temp =
+                fb.emitMutexWithLock(std::move(arguments[0]), std::move(arguments[1]), resultType, loc);
+            return Operand::temp(temp, resultType);
+        }
+        if ((qualifiedName == "RwLock.withRead" || qualifiedName == "RwLock.withWrite") &&
+            arguments.size() == 2) {
+            lowered = true;
+            TempId temp = kNoTemp;
+            if (qualifiedName == "RwLock.withRead") {
+                temp = fb.emitRwLockWithRead(std::move(arguments[0]), std::move(arguments[1]),
+                                             returnsVoid ? 0 : resultType, loc);
+            } else {
+                temp = fb.emitRwLockWithWrite(std::move(arguments[0]), std::move(arguments[1]),
+                                              returnsVoid ? 0 : resultType, loc);
+            }
+            return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
+        }
+        if (qualifiedName == "Atomic.load" && arguments.size() == 1) {
+            lowered = true;
+            const TempId temp = fb.emitAtomicLoad(std::move(arguments[0]), loc);
+            return Operand::temp(temp, arena.intType());
+        }
+        if (qualifiedName == "Atomic.store" && arguments.size() == 2) {
+            lowered = true;
+            fb.emitAtomicStore(std::move(arguments[0]), std::move(arguments[1]), loc);
+            return Operand::none();
+        }
+        if (qualifiedName == "Atomic.add" && arguments.size() == 2) {
+            lowered = true;
+            const TempId temp = fb.emitAtomicAdd(std::move(arguments[0]), std::move(arguments[1]), loc);
+            return Operand::temp(temp, arena.intType());
+        }
+        if (qualifiedName == "Atomic.loadBool" && arguments.size() == 1) {
+            lowered = true;
+            const TempId temp = fb.emitAtomicLoadBool(std::move(arguments[0]), loc);
+            return Operand::temp(temp, arena.boolType());
+        }
+        if (qualifiedName == "Atomic.storeBool" && arguments.size() == 2) {
+            lowered = true;
+            fb.emitAtomicStoreBool(std::move(arguments[0]), std::move(arguments[1]), loc);
+            return Operand::none();
+        }
+        if (qualifiedName == "Atomic.loadDouble" && arguments.size() == 1) {
+            lowered = true;
+            const TempId temp = fb.emitAtomicLoadDouble(std::move(arguments[0]), loc);
+            return Operand::temp(temp, arena.doubleType());
+        }
+        if (qualifiedName == "Atomic.storeDouble" && arguments.size() == 2) {
+            lowered = true;
+            fb.emitAtomicStoreDouble(std::move(arguments[0]), std::move(arguments[1]), loc);
+            return Operand::none();
+        }
+        if (qualifiedName == "Atomic.loadRef" && arguments.size() == 1) {
+            lowered = true;
+            const TempId temp = fb.emitAtomicLoadRef(std::move(arguments[0]), resultType, loc);
+            return Operand::temp(temp, resultType);
+        }
+        if (qualifiedName == "Atomic.storeRef" && arguments.size() == 2) {
+            lowered = true;
+            fb.emitAtomicStoreRef(std::move(arguments[0]), std::move(arguments[1]), loc);
+            return Operand::none();
+        }
+        if (qualifiedName == "Semaphore.acquire" && arguments.size() == 1) {
+            lowered = true;
+            fb.emitSemaphoreAcquire(std::move(arguments[0]), loc);
+            return Operand::none();
+        }
+        if (qualifiedName == "Semaphore.release" && arguments.size() == 1) {
+            lowered = true;
+            fb.emitSemaphoreRelease(std::move(arguments[0]), loc);
+            return Operand::none();
+        }
+        if (qualifiedName == "Semaphore.available" && arguments.size() == 1) {
+            lowered = true;
+            const TempId temp = fb.emitSemaphoreAvailable(std::move(arguments[0]), loc);
+            return Operand::temp(temp, arena.intType());
+        }
+        if (qualifiedName == "Semaphore.setPermits" && arguments.size() == 2) {
+            lowered = true;
+            fb.emitSemaphoreSetPermits(std::move(arguments[0]), std::move(arguments[1]), loc);
+            return Operand::none();
+        }
+        if (qualifiedName == "Semaphore.tryAcquire" && arguments.size() == 1) {
+            lowered = true;
+            const TempId temp = fb.emitSemaphoreTryAcquire(std::move(arguments[0]), loc);
+            return Operand::temp(temp, arena.boolType());
+        }
+        if (qualifiedName == "Semaphore.releaseMany" && arguments.size() == 2) {
+            lowered = true;
+            fb.emitSemaphoreReleaseMany(std::move(arguments[0]), std::move(arguments[1]), loc);
+            return Operand::none();
+        }
+        if (qualifiedName == "Condition.wait" && arguments.size() == 1) {
+            lowered = true;
+            fb.emitConditionWait(std::move(arguments[0]), loc);
+            return Operand::none();
+        }
+        if (qualifiedName == "Condition.notifyOne" && arguments.size() == 1) {
+            lowered = true;
+            fb.emitConditionNotifyOne(std::move(arguments[0]), loc);
+            return Operand::none();
+        }
+        if (qualifiedName == "Condition.notifyAll" && arguments.size() == 1) {
+            lowered = true;
+            fb.emitConditionNotifyAll(std::move(arguments[0]), loc);
+            return Operand::none();
+        }
+        if (qualifiedName == "Condition.waitFor" && arguments.size() == 2) {
+            lowered = true;
+            const TempId temp =
+                fb.emitConditionWaitFor(std::move(arguments[0]), std::move(arguments[1]), loc);
+            return Operand::temp(temp, arena.boolType());
+        }
+        if (qualifiedName == "Channel.create" && arguments.size() == 1) {
+            lowered = true;
+            TypeId channel = resultType;
+            if (const Type* recorded = arena.find(channel)) {
+                if (!isChannelType(*recorded)) channel = arena.channelType(arena.unknownType());
+            } else {
+                channel = arena.channelType(arena.unknownType());
+            }
+            const TempId temp = fb.emitChannelCreate(std::move(arguments[0]), channel, loc);
+            return Operand::temp(temp, channel);
+        }
+        if (qualifiedName == "Channel.send" && arguments.size() == 2) {
+            lowered = true;
+            fb.emitChannelSend(std::move(arguments[0]), std::move(arguments[1]), loc);
+            return Operand::none();
+        }
+        if (qualifiedName == "Channel.receive" && arguments.size() == 1) {
+            lowered = true;
+            const TempId temp = fb.emitChannelReceive(std::move(arguments[0]), resultType, loc);
+            return Operand::temp(temp, resultType);
+        }
+        if (qualifiedName == "Channel.size" && arguments.size() == 1) {
+            lowered = true;
+            const TempId temp = fb.emitChannelSize(std::move(arguments[0]), loc);
+            return Operand::temp(temp, arena.intType());
+        }
+        // The checker leaves the async channel operations' Task payloads
+        // unnamed (Task<void> by default rendering), which is right for the
+        // send side and wrong for receive: a receive Task carries the next
+        // value. Name both explicitly so await sees the honest payload.
+        if (qualifiedName == "Channel.sendAsync" && arguments.size() == 2) {
+            lowered = true;
+            const TypeId task = arena.taskType(arena.voidType());
+            const TempId temp =
+                fb.emitChannelSendAsync(std::move(arguments[0]), std::move(arguments[1]), task, loc);
+            return Operand::temp(temp, task);
+        }
+        if (qualifiedName == "Channel.receiveAsync" && arguments.size() == 1) {
+            lowered = true;
+            const TypeId task = arena.taskType(arena.unknownType());
+            const TempId temp = fb.emitChannelReceiveAsync(std::move(arguments[0]), task, loc);
+            return Operand::temp(temp, task);
+        }
+        return Operand::none();
+    }
+
     [[nodiscard]] Operand call(const zl::CallExpr& node) {
         const SourceLocation loc = location(&node);
 
@@ -710,7 +982,7 @@ struct FunctionLowerer {
             }
             Operand callee = local.isParameter
                                  ? fb.parameterOperand(local.param)
-                                 : Operand::temp(fb.emitLoad(local.slot, loc),
+                                 : local.isValue ? local.value : Operand::temp(fb.emitLoad(local.slot, loc),
                                                  fb.function().slot(local.slot)->type);
             std::vector<Operand> arguments;
             for (const auto& argument : node.arguments) {
@@ -750,6 +1022,16 @@ struct FunctionLowerer {
             // method on another class.
             const std::string qualifiedName = node.namespaceName + "." + node.calleeName;
             if (const auto native = zl::findNativeSignature(qualifiedName)) {
+                // The concurrency primitives lower to dedicated MIR operations
+                // rather than to a generic CallNative, so suspension, blocking,
+                // thread transfer, and synchronisation are explicit in MIR. The
+                // backend translates each back to the same runtime mechanism
+                // (the same catalog entry or opcode), so the generated bytecode
+                // is unchanged - only the MIR is more precise.
+                bool lowered = false;
+                Operand concurrency =
+                    concurrencyNativeCall(qualifiedName, arguments, resultType, loc, lowered);
+                if (lowered) return concurrency;
                 // The native catalog's declared parameter names are the FFI
                 // boundary's contract; assert dynamics against them here.
                 for (std::size_t i = 0; i < arguments.size() && i < (*native)->parameterTypeNames.size(); ++i) {
@@ -785,6 +1067,12 @@ struct FunctionLowerer {
         // same test without the hardcoding.
         if (node.namespaceName.empty()) {
             if (const auto native = zl::findNativeSignature(node.calleeName)) {
+                // `share(value)` is the Shared<T> allocation spelled as a
+                // global native; see the qualified path above.
+                if (node.calleeName == "share" && arguments.size() == 1) {
+                    const TempId temp = fb.emitSharedCreate(std::move(arguments[0]), resultType, loc);
+                    return Operand::temp(temp, resultType);
+                }
                 for (std::size_t i = 0; i < arguments.size() && i < (*native)->parameterTypeNames.size(); ++i) {
                     const std::string& declared = (*native)->parameterTypeNames[i];
                     if (declared.empty()) continue;
@@ -840,6 +1128,51 @@ struct FunctionLowerer {
         const TypeId resultType = typeOfNode(&node);
         const bool returnsVoid = isVoid(resultType);
         const Type* receiverType = ctx.builder.types().find(receiver.type);
+        // Task and Shared instance methods are runtime operations, not ordinary
+        // dispatch: Task.block/ignore/cancel are task lifecycle (the reference
+        // compiler emits dedicated opcodes for them), and Shared.get/setValue/
+        // withLock are synchronised cell access. Lowering them to dedicated
+        // MIR keeps that explicit; the backend translates each back to the same
+        // mechanism the generic path used, so the bytecode is unchanged.
+        if (receiverType && isTaskType(*receiverType) && arguments.empty()) {
+            if (node.methodName == "block") {
+                if (returnsVoid) {
+                    const TempId ignored = fb.emitTaskBlock(receiver, 0, loc);
+                    (void)ignored;
+                    return Operand::none();
+                }
+                const TempId temp = fb.emitTaskBlock(receiver, resultType, loc);
+                return Operand::temp(temp, resultType);
+            }
+            if (node.methodName == "ignore") {
+                fb.emitTaskIgnore(receiver, loc);
+                return Operand::none();
+            }
+            if (node.methodName == "cancel") {
+                fb.emitTaskCancel(receiver, loc);
+                return Operand::none();
+            }
+        }
+        if (receiverType && isSharedType(*receiverType)) {
+            if (node.methodName == "get" && arguments.empty()) {
+                const TempId temp = fb.emitSharedGet(receiver, resultType, loc);
+                return Operand::temp(temp, resultType);
+            }
+            if (node.methodName == "setValue" && arguments.size() == 1) {
+                fb.emitSharedSet(receiver, std::move(arguments[0]), loc);
+                return Operand::none();
+            }
+            if (node.methodName == "withLock" && arguments.size() == 1) {
+                if (returnsVoid) {
+                    const TempId ignored =
+                        fb.emitSharedWithLock(receiver, std::move(arguments[0]), 0, loc);
+                    (void)ignored;
+                    return Operand::none();
+                }
+                const TempId temp = fb.emitSharedWithLock(receiver, std::move(arguments[0]), resultType, loc);
+                return Operand::temp(temp, resultType);
+            }
+        }
         // A virtual dispatch names the class it dispatches on. When semantic
         // analysis could not resolve the receiver to a class - which happens
         // where a generic's own type parameter comes back out, as with
@@ -1205,7 +1538,25 @@ struct FunctionLowerer {
         const SourceLocation loc = location(&node);
         Operand task = expression(node.operand.get());
         if (task.isNone()) return Operand::none();
-        const TypeId resultType = typeOfNode(&node);
+        TypeId resultType = typeOfNode(&node);
+        if (isVoid(resultType)) {
+            // The checker leaves some Task payloads unnamed (`Channel.
+            // receiveAsync` observes Task<void> no matter what the channel
+            // carries), while lowering names the honest payload on the Task
+            // itself. A void await of a non-void payload would contradict the
+            // task operand, so the payload is what the temp carries; when the
+            // payload really is void there is no temp at all.
+            if (const Type* taskType = ctx.builder.types().find(task.type)) {
+                if (isTaskType(*taskType)) {
+                    const std::uint32_t payload = taskPayloadFor(*taskType);
+                    if (payload != 0) {
+                        if (const Type* payloadType = ctx.builder.types().find(payload)) {
+                            if (payloadType->kind != TypeKind::Void) resultType = payload;
+                        }
+                    }
+                }
+            }
+        }
         if (isVoid(resultType)) {
             (void)fb.emitAwait(task, 0, loc);
             return Operand::none();
@@ -1229,7 +1580,7 @@ struct FunctionLowerer {
             }
             captures.push_back(local.isParameter
                                    ? fb.parameterOperand(local.param)
-                                   : Operand::temp(fb.emitLoad(local.slot, loc),
+                                   : local.isValue ? local.value : Operand::temp(fb.emitLoad(local.slot, loc),
                                                    fb.function().slot(local.slot)->type));
         }
         // Now that the captured locals are known, the closure function can
@@ -1385,7 +1736,7 @@ struct FunctionLowerer {
         fb.emitBranch(condition, bodyBlock, exitBlock, loc);
 
         gotoBlock(bodyBlock);
-        loops.push_back(LoopContext{conditionBlock, exitBlock, activeFinallyBlocks.size()});
+        loops.push_back(LoopContext{conditionBlock, exitBlock, activeFinallyBlocks.size(), scopes.size()});
         statement(node.body.get());
         loops.pop_back();
         if (!isDead()) fb.emitJump(conditionBlock, loc);
@@ -1400,7 +1751,7 @@ struct FunctionLowerer {
 
         fb.emitJump(bodyBlock, loc);
         gotoBlock(bodyBlock);
-        loops.push_back(LoopContext{conditionBlock, exitBlock, activeFinallyBlocks.size()});
+        loops.push_back(LoopContext{conditionBlock, exitBlock, activeFinallyBlocks.size(), scopes.size()});
         statement(node.body.get());
         loops.pop_back();
         if (!isDead()) fb.emitJump(conditionBlock, loc);
@@ -1449,7 +1800,7 @@ struct FunctionLowerer {
         fb.emitBranch(keepGoing, bodyBlock, exitBlock, loc);
 
         gotoBlock(bodyBlock);
-        loops.push_back(LoopContext{stepBlock, exitBlock, activeFinallyBlocks.size()});
+        loops.push_back(LoopContext{stepBlock, exitBlock, activeFinallyBlocks.size(), scopes.size()});
         statement(node.body.get());
         loops.pop_back();
         if (!isDead()) fb.emitJump(stepBlock, loc);
@@ -1477,6 +1828,7 @@ struct FunctionLowerer {
             emitFinallyCleanup(i - 1);
         }
         if (isDead()) return;
+        endBorrowsFromScope(loop.scopeDepth, location(&node));
         fb.emitJump(loop.breakTarget, location(&node));
     }
 
@@ -1490,6 +1842,7 @@ struct FunctionLowerer {
             emitFinallyCleanup(i - 1);
         }
         if (isDead()) return;
+        endBorrowsFromScope(loop.scopeDepth, location(&node));
         fb.emitJump(loop.continueTarget, location(&node));
     }
 
@@ -2112,7 +2465,7 @@ struct FunctionLowerer {
 
         for (std::size_t i = 0; i < node.arms.size(); ++i) {
             const auto& arm = node.arms[i];
-            SourceLocation armLoc;
+            SourceLocation armLoc = loc;
             armLoc.line = static_cast<std::uint32_t>(arm.line);
             const bool lastArm = i + 1 == node.arms.size();
             const BlockId bodyBlock = newBlock(const_cast<zl::MatchExpr*>(&node));
@@ -2357,7 +2710,7 @@ void declareLayouts(LoweringContext& ctx) {
             const auto& iface = static_cast<const zl::InterfaceDecl&>(*declaration);
             InterfaceInfo& info = ctx.builder.addInterface(iface.name);
             info.bases = iface.extendsNames;
-            info.location.line = static_cast<std::uint32_t>(iface.line);
+            info.location = SourceLocation{iface.sourceFile, static_cast<std::uint32_t>(iface.line), 0};
             // An interface declares signatures, not bodies. They are recorded so
             // a call through an interface-typed receiver can be dispatched from
             // the interface's own declaration.
@@ -2385,7 +2738,7 @@ void declareLayouts(LoweringContext& ctx) {
                 layout.parentTypeName = zl::describeTypeAnnotation(baseType);
             }
             layout.interfaces = cls.implementsNames;
-            layout.location.line = static_cast<std::uint32_t>(cls.line);
+            layout.location = SourceLocation{cls.sourceFile, static_cast<std::uint32_t>(cls.line), 0};
             TypeConverter converter{ctx.builder.types(), cls.typeParams};
             for (const auto& member : cls.members) {
                 if (member->kind != zl::NodeKind::VarDecl) continue;
@@ -2406,7 +2759,7 @@ void declareLayouts(LoweringContext& ctx) {
                 // module never declared.
                 if (field.isStatic) {
                     (void)ctx.builder.addStatic(cls.name, field.name, fieldLayout.type, kNoFunction,
-                                                SourceLocation{{}, static_cast<std::uint32_t>(field.line), 0});
+                                                SourceLocation{field.sourceFile, static_cast<std::uint32_t>(field.line), 0});
                 }
             }
         } else if (declaration->kind == zl::NodeKind::DataDecl) {
@@ -2414,7 +2767,7 @@ void declareLayouts(LoweringContext& ctx) {
             ClassLayout& layout = ctx.builder.addClassLayout(data.name);
             layout.parent = data.extendsName;
             layout.isData = true;
-            layout.location.line = static_cast<std::uint32_t>(data.line);
+            layout.location = SourceLocation{data.sourceFile, static_cast<std::uint32_t>(data.line), 0};
             TypeConverter converter{ctx.builder.types(), kNoTypeParams};
             for (const auto& field : data.fields) {
                 FieldLayout fieldLayout;
@@ -2428,7 +2781,7 @@ void declareLayouts(LoweringContext& ctx) {
             ClassLayout& layout = ctx.builder.addClassLayout(enumeration.name);
             layout.isEnum = true;
             layout.enumMembers = enumeration.members;
-            layout.location.line = static_cast<std::uint32_t>(enumeration.line);
+            layout.location = SourceLocation{enumeration.sourceFile, static_cast<std::uint32_t>(enumeration.line), 0};
         }
     }
 }
@@ -2449,7 +2802,7 @@ void declareFunction(LoweringContext& ctx, const zl::FunctionDecl& function, con
     fb.setAccess(function.access == zl::AccessModifier::PRIVATE    ? MemberAccess::Private
                  : function.access == zl::AccessModifier::PROTECTED ? MemberAccess::Protected
                                                                     : MemberAccess::Public);
-    fb.setLocation(SourceLocation{{}, static_cast<std::uint32_t>(function.line), 0});
+    fb.setLocation(SourceLocation{function.sourceFile, static_cast<std::uint32_t>(function.line), 0});
     if (!typeParams.empty()) fb.setGenericTemplate(typeParams);
     for (const auto& annotation : function.annotations) {
         if (annotation.name == "native") fb.setNative(true);
@@ -2480,12 +2833,12 @@ void declareFunction(LoweringContext& ctx, const zl::FunctionDecl& function, con
             selfName += ">";
         }
         (void)fb.addParameter("this", converter.fromRendered(selfName), zl::OwnershipKind::GC, {},
-                              SourceLocation{{}, static_cast<std::uint32_t>(function.line), 0});
+                              SourceLocation{function.sourceFile, static_cast<std::uint32_t>(function.line), 0});
         fb.function().hasThisParameter = true;
     }
     for (const auto& parameter : function.params) {
         (void)fb.addParameter(parameter.name, converter.fromAnnotation(parameter.type), parameter.ownership,
-                              {}, SourceLocation{{}, static_cast<std::uint32_t>(parameter.type.line), 0});
+                              {}, SourceLocation{function.sourceFile, static_cast<std::uint32_t>(parameter.type.line), 0});
     }
 
     ctx.functionIds[fb.function().name] = fb.function().id;
@@ -2504,7 +2857,7 @@ void lowerLambda(LoweringContext& ctx, const zl::LambdaExpr& lambda) {
     FunctionBuilder fb = ctx.builder.functionBuilder(id);
     fb.setLambda(true);
     fb.setAsync(lambda.isAsync);
-    fb.setLocation(SourceLocation{{}, static_cast<std::uint32_t>(lambda.line), 0});
+    fb.setLocation(SourceLocation{lambda.sourceFile, static_cast<std::uint32_t>(lambda.line), 0});
     // A lambda written inside a generic class is generic over that class's
     // parameters: it closes over `this` and over locals whose types mention
     // them. Declaring the closure as a template is what makes those types legal

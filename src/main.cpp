@@ -11,6 +11,7 @@
 
 
 #include "zl/common/executable_path.hpp"
+#include "zl/common/json.hpp"
 #include "zl/common/stdlib_version.hpp"
 #include "zl/compiler/module_loader.hpp"
 #include "zl/compiler/type_checker.hpp"
@@ -23,7 +24,9 @@
 #include "zl/compiler/ir_lowering.hpp"
 #include "zl/compiler/ir_optimizer.hpp"
 #include "zl/compiler/machine_code.hpp"
+#include "zl/mir/differential.hpp"
 #include "zl/mir/lowering.hpp"
+#include "zl/mir/passes.hpp"
 #include "zl/mir/printer.hpp"
 #include "zl/mir/ssa.hpp"
 #include "zl/mir/verifier.hpp"
@@ -124,9 +127,167 @@ std::filesystem::path resolveStdlibRoot(const char* argv0) {
 
 } // namespace
 
+
+// Observation-only pipeline: no runtime and no optimisations. Each result names
+// the actual boundary reached; unsupported lowering is never a verification pass.
+int safetyCheck(const char* file, const char* executable, const std::string& stopAfter = "mir") {
+    using zl::common::jsonString;
+    std::string stage = "setup";
+    std::string parsing = "not-reached", semantic = "not-reached", mir = "not-reached";
+    std::string notes = "[]", incomplete = "[]", verification = "null";
+    const auto array = [&](const std::vector<std::string>& strings) {
+        std::string out = "[";
+        for (std::size_t i = 0; i < strings.size(); ++i) {
+            if (i) out += ',';
+            out += jsonString(strings[i]);
+        }
+        return out + ']';
+    };
+    const auto finish = [&](int code, const std::string& outcome, const std::string& message) {
+        std::cout << "{\"schema_version\":1,\"file\":" << jsonString(file)
+                  << ",\"stage\":" << jsonString(stage) << ",\"outcome\":" << jsonString(outcome)
+                  << ",\"message\":" << jsonString(message)
+                  << ",\"layers\":{\"parsing\":" << jsonString(parsing)
+                  << ",\"semantic\":" << jsonString(semantic) << ",\"mir\":" << jsonString(mir)
+                  << ",\"runtime\":\"not-run\"},\"lowering_notes\":" << notes
+                  << ",\"incomplete_functions\":" << incomplete
+                  << ",\"verification\":" << verification << "}\n";
+        return code;
+    };
+    try {
+        std::vector<std::filesystem::path> roots;
+        if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
+            for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
+        const auto stdlib = resolveStdlibRoot(executable);
+        const auto version = zl::common::checkStdlibVersion(stdlib, ZL_VERSION_STRING);
+        if (!version.compatible) return finish(3, "environment-error", version.error);
+        roots.push_back(stdlib);
+        stage = "parsing";
+        zl::ModuleLoader loader(file, roots);
+        auto program = loader.load();
+        parsing = "accepted";
+        if (stopAfter == "parsing") return finish(0, "accepted", "parsing completed");
+        stage = "semantic";
+        zl::TypeChecker checker;
+        checker.check(*program, /*requireMain=*/false);
+        semantic = "accepted";
+        if (stopAfter == "semantic") return finish(0, "accepted", "semantic checking completed");
+        stage = "lowering";
+        auto lowered = zl::mir::lowerProgram(*program, checker);
+        notes = array(lowered.diagnostics);
+        incomplete = array(lowered.incompleteFunctions);
+        if (!lowered.success) return finish(6, "unsupported", "lowering did not complete");
+        stage = "mir";
+        zl::mir::VerifierOptions options;
+        options.auditBoundaries = true;
+        const auto report = zl::mir::verifyModule(lowered.module, options);
+        verification = report.toJson();
+        mir = report.ok() ? (lowered.complete() ? "verified" : "partial") : "rejected";
+        if (!report.ok()) return finish(4, "rejected", "MIR contract violation (may be a compiler defect)");
+        if (!lowered.complete()) return finish(6, "unsupported", "partial MIR is not a safety certificate");
+        return finish(0, "verified", "static verification does not discharge runtime obligations");
+    } catch (const zl::ParseError& e) {
+        parsing = "rejected";
+        return finish(1, "rejected", e.what());
+    } catch (const zl::TypeCheckError& e) {
+        semantic = "rejected";
+        return finish(1, "rejected", e.what());
+    } catch (const zl::ModuleError& e) {
+        return finish(7, "module-error", e.what());
+    } catch (const std::exception& e) {
+        // Lexer currently throws std::runtime_error, not a lexical error type.
+        // Keep this an unclassified failure; never turn arbitrary exceptions
+        // (including compiler bugs) into credited safety detections.
+        return finish(7, "unclassified-error", e.what());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MIR optimiser, as the command line drives it
+// ---------------------------------------------------------------------------
+// Every MIR command that optimises does it the same way, so the behaviour is
+// configured in one place:
+//
+//   ZL_MIR_OPT_PASSES         pipeline spec: "default" (the curated order),
+//                             "none", or a comma-separated list of pass names.
+//   ZL_MIR_OPT_SNAPSHOT_DIR   directory to write one before/after snapshot per
+//                             changed pass into.
+//   ZL_MIR_OPT_VERBOSE        print the per-pass trace to stderr.
+//
+// Returns false when the optimised module must not be used: a pass broke the
+// MIR, or the final verification failed. Both are reported; neither is
+// recoverable by carrying on.
+
+// `pipelineUsed` is handed back so the differential check can build its
+// reference with the same passes; see DifferentialOptions::referencePipeline.
+[[nodiscard]] bool optimizeMIRForCommandLine(zl::mir::Module& module, std::string* pipelineUsed = nullptr) {
+    const char* spec = std::getenv("ZL_MIR_OPT_PASSES");
+    const char* snapshots = std::getenv("ZL_MIR_OPT_SNAPSHOT_DIR");
+    const bool verbose = std::getenv("ZL_MIR_OPT_VERBOSE") != nullptr;
+
+    zl::mir::OptimizationOptions options;
+    if (snapshots != nullptr && *snapshots != '\0') options.snapshotDirectory = snapshots;
+
+    std::string error;
+    zl::mir::PassManager manager = zl::mir::PassManager::namedPipeline(
+        (spec != nullptr && *spec != '\0') ? spec : "default", error);
+    if (!error.empty()) {
+        std::cerr << "error: " << error << "\n";
+        for (const auto& name : zl::mir::PassRegistry::instance().passNames())
+            std::cerr << "  available pass: " << name << "\n";
+        return false;
+    }
+
+    if (pipelineUsed) *pipelineUsed = (spec != nullptr && *spec != '\0') ? spec : "default";
+
+    const zl::mir::OptimizationReport report = manager.run(module, options);
+    if (verbose) std::cerr << report.describeTrace();
+    std::cerr << report.describe() << "\n";
+
+    if (report.rollbacks != 0) {
+        std::cerr << "error: " << report.rollbacks
+                  << " MIR optimisation pass(es) produced invalid MIR and were rolled back; "
+                     "not using the optimised module\n";
+        return false;
+    }
+    if (report.verifiedAtEnd && !report.finalVerification.ok()) {
+        std::cerr << "after optimisation:\n" << report.finalVerification.describe();
+        return false;
+    }
+    return true;
+}
+
+// The differential check: the optimised module must observe what the
+// unoptimised one observes. Runs on every command that optimises, because the
+// one thing worse than a slow optimiser is a wrong one that nobody ran.
+[[nodiscard]] bool checkMIRDifferential(const zl::mir::Module& before, const zl::mir::Module& after,
+                                       const std::string& pipeline = {}) {
+    // Judged against a reference built by the same pipeline. Measuring a module
+    // built by one pass against a reference built by all eight would report
+    // every event the other seven would have deleted as a divergence.
+    const zl::mir::DifferentialResult result = zl::mir::compareModules(
+        before, after, zl::mir::DifferentialOptions{}.withReferencePipeline(pipeline));
+    std::cerr << result.describe() << "\n";
+    for (const auto& note : result.notes) std::cerr << "  note: " << note << "\n";
+    if (result.equivalent) return true;
+    for (const auto& mismatch : result.mismatches) std::cerr << "  " << mismatch.describe() << "\n";
+    std::cerr << "error: the optimised module is not observationally equivalent\n";
+    return false;
+}
+
 int main(int argc, char** argv) {
     if (argc >= 2) {
         const std::string command = argv[1];
+        if (command == "--safety-check") {
+            std::string stop = "mir";
+            if (argc == 4 && std::string(argv[3]) == "--stop-after=parsing") stop = "parsing";
+            else if (argc == 4 && std::string(argv[3]) == "--stop-after=semantic") stop = "semantic";
+            else if (argc != 3) {
+                std::cerr << "usage: zl --safety-check <file.zl> [--stop-after=parsing|semantic]\n";
+                return 2;
+            }
+            return safetyCheck(argv[2], argv[0], stop);
+        }
         if (command == "--emit-machine-code") {
             if (argc != 4) {
                 std::cerr << "usage: zl --emit-machine-code <output.zlm> <file.zl>\n";
@@ -276,6 +437,87 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
+        if (command == "--emit-mir-opt") {
+            // Like --emit-mir, with the optimiser run first. This is how a
+            // person answers "what did the optimiser actually do to my
+            // program": the textual MIR on either side of it, and the
+            // differential check that says the two agree.
+            if (argc != 4) {
+                std::cerr << "usage: zl --emit-mir-opt <output|-> <file.zl>\n";
+                return 2;
+            }
+            try {
+                std::vector<std::filesystem::path> roots;
+                if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
+                    if (*env != '\0') for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
+                const auto stdlibRoot = resolveStdlibRoot(argv[0]);
+                const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
+                if (!stdlibVersion.compatible) { std::cerr << "error: " << stdlibVersion.error << "\n"; return 3; }
+                roots.push_back(stdlibRoot);
+                zl::ModuleLoader loader(argv[3], roots);
+                auto program = loader.load();
+                zl::TypeChecker typeChecker;
+                typeChecker.check(*program, /*requireMain=*/false);
+                auto lowered = zl::mir::lowerProgram(*program, typeChecker);
+                for (const auto& diagnostic : lowered.diagnostics) std::cerr << "note: " << diagnostic << "\n";
+                const auto report = zl::mir::verifyModule(lowered.module);
+                if (!report.ok()) { std::cerr << report.describe(); return 4; }
+
+                const zl::mir::Module unoptimized = lowered.module;
+                std::string optPipeline;
+                if (!optimizeMIRForCommandLine(lowered.module, &optPipeline)) return 4;
+                if (!checkMIRDifferential(unoptimized, lowered.module, optPipeline)) return 4;
+
+                const std::string text = zl::mir::printModule(lowered.module);
+                if (std::string(argv[2]) == "-") {
+                    std::cout << text;
+                    return std::cout.good() ? 0 : 5;
+                }
+                std::ofstream out(argv[2], std::ios::binary);
+                if (!out) { std::cerr << "error: cannot open MIR output '" << argv[2] << "'\n"; return 5; }
+                out << text;
+                return out.good() ? 0 : 5;
+            } catch (const std::exception& e) {
+                std::cerr << "MIR compile error: " << e.what() << "\n";
+                return 1;
+            }
+        }
+        if (command == "--mir-opt-check") {
+            // The differential check on its own: optimise, compare against the
+            // unoptimised module, and say whether the two observe the same
+            // thing. Exits 4 when they do not, so a CI run can use it as a
+            // gate without having to parse the report.
+            if (argc != 3) {
+                std::cerr << "usage: zl --mir-opt-check <file.zl>\n";
+                return 2;
+            }
+            try {
+                std::vector<std::filesystem::path> roots;
+                if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
+                    if (*env != '\0') for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
+                const auto stdlibRoot = resolveStdlibRoot(argv[0]);
+                const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
+                if (!stdlibVersion.compatible) { std::cerr << "error: " << stdlibVersion.error << "\n"; return 3; }
+                roots.push_back(stdlibRoot);
+                zl::ModuleLoader loader(argv[2], roots);
+                auto program = loader.load();
+                zl::TypeChecker typeChecker;
+                typeChecker.check(*program, /*requireMain=*/false);
+                auto lowered = zl::mir::lowerProgram(*program, typeChecker);
+                const auto report = zl::mir::verifyModule(lowered.module);
+                if (!report.ok()) { std::cerr << report.describe(); return 4; }
+
+                const zl::mir::Module unoptimized = lowered.module;
+                std::string optPipeline;
+                if (!optimizeMIRForCommandLine(lowered.module, &optPipeline)) return 4;
+                if (!checkMIRDifferential(unoptimized, lowered.module, optPipeline)) return 4;
+                std::cout << "mir-opt-check: equivalent\n";
+                return 0;
+            } catch (const std::exception& e) {
+                std::cerr << "MIR compile error: " << e.what() << "\n";
+                return 1;
+            }
+        }
         if (command == "--mir-vm") {
             // Run a program through the MIR -> bytecode backend path:
             // source -> type analysis -> MIR -> verify -> bytecode -> VM.
@@ -313,6 +555,16 @@ int main(int argc, char** argv) {
                         std::cerr << "after ssa promotion:\n" << report.describe();
                         return 4;
                     }
+                }
+                // Optional: run the optimiser before translating. Everything
+                // the optimiser does is supposed to be invisible, so this is
+                // the runtime half of the differential check -
+                // tools/mir_opt_diff.sh runs the corpus both ways and compares.
+                if (std::getenv("ZL_MIR_OPT") != nullptr) {
+                    const zl::mir::Module unoptimized = lowered.module;
+                    std::string optPipeline;
+                    if (!optimizeMIRForCommandLine(lowered.module, &optPipeline)) return 4;
+                    if (!checkMIRDifferential(unoptimized, lowered.module, optPipeline)) return 4;
                 }
                 const auto backend = zl::mir::compileModuleToBytecode(lowered.module);
                 if (!backend.ok()) {
@@ -428,6 +680,9 @@ int main(int argc, char** argv) {
                          "  zl --mir-vm <file.zl> [program args...]\n"
                          "  zl --emit-mir <output|-> <file.zl>\n"
                          "  zl --emit-ssa <output|-> <file.zl>\n"
+                         "  zl --emit-mir-opt <output|-> <file.zl>\n"
+                         "  zl --mir-opt-check <file.zl>\n"
+                         "  zl --safety-check <file.zl>   JSON safety report; never executes\n"
                          "  zl --version\n"
                          "  zl --help\n";
             return 0;

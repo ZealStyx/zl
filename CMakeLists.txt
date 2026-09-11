@@ -151,6 +151,8 @@ endif()
 # the front end.
 # CFG queries, data-flow analyses, and slot -> block-parameter construction.
 zl_add_optional_test(zl-mir-ssa-tests tests/mir_ssa_tests.cpp
+    src/mir/folding.cpp
+    src/mir/effects.cpp
     src/mir/analysis.cpp
     src/mir/builder.cpp
     src/mir/dataflow.cpp
@@ -160,6 +162,7 @@ zl_add_optional_test(zl-mir-ssa-tests tests/mir_ssa_tests.cpp
     src/mir/ssa.cpp
     src/mir/type.cpp
     src/mir/verifier.cpp
+    src/mir/safety.cpp
     src/compiler/operator_rules.cpp
     src/compiler/semantic_types.cpp
     src/common/type_name.cpp)
@@ -171,9 +174,47 @@ zl_add_optional_test(zl-mir-tests tests/mir_tests.cpp
     src/mir/printer.cpp
     src/mir/type.cpp
     src/mir/verifier.cpp
+    src/mir/safety.cpp
     src/compiler/operator_rules.cpp
     src/compiler/semantic_types.cpp
     src/common/type_name.cpp)
+
+# The optimiser framework: pass manager, analysis manager, snapshots, the
+# passes themselves, and the differential validator. It needs no front end, so
+# it stays a fast target like zl-mir-ssa-tests.
+zl_add_optional_test(zl-mir-opt-tests tests/mir_pass_tests.cpp
+    src/mir/analysis.cpp
+    src/mir/builder.cpp
+    src/mir/dataflow.cpp
+    src/mir/differential.cpp
+    src/mir/effects.cpp
+    src/mir/folding.cpp
+    src/mir/function.cpp
+    src/mir/instruction.cpp
+    src/mir/opt_constant.cpp
+    src/mir/opt_dead.cpp
+    src/mir/opt_simplify.cpp
+    src/mir/pass_manager.cpp
+    src/mir/printer.cpp
+    src/mir/ssa.cpp
+    src/mir/type.cpp
+    src/mir/verifier.cpp
+    src/mir/safety.cpp
+    src/compiler/operator_rules.cpp
+    src/compiler/semantic_types.cpp
+    src/common/type_name.cpp)
+
+# zl-mir-opt-pipeline-tests runs the optimiser over real ZL programs and diffs
+# the two modules twice - statically (compareModules) and by executing both
+# through the bytecode backend with their output captured - so it links the
+# whole compiler minus main(), like the lowering target.
+zl_add_optional_test(zl-mir-opt-pipeline-tests tests/mir_opt_pipeline_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+if(TARGET zl-mir-opt-pipeline-tests AND WIN32)
+    target_link_libraries(zl-mir-opt-pipeline-tests PRIVATE ws2_32)
+endif()
+if(TARGET zl-mir-opt-pipeline-tests)
+    target_link_libraries(zl-mir-opt-pipeline-tests PRIVATE Threads::Threads)
+endif()
 
 # zl-mir-lowering-tests drives the real pipeline - ModuleLoader, TypeChecker,
 # lowerProgram, verifyModule - so it links the whole compiler minus main().
@@ -354,3 +395,22 @@ endif()
 
 zl_add_optional_test(zl-native-ffi-declaration-tests tests/native_ffi_declaration_tests.cpp
     src/compiler/native_ffi_declarations.cpp)
+
+# Safety analysis regression: malformed MIR is measured separately from source
+# corpus rejection layers, because it tests compiler/pass contracts.
+zl_add_optional_test(zl-mir-safety-tests tests/mir_safety_tests.cpp
+    src/mir/analysis.cpp src/mir/builder.cpp src/mir/function.cpp
+    src/mir/instruction.cpp src/mir/printer.cpp src/mir/type.cpp
+    src/mir/verifier.cpp src/mir/safety.cpp
+    src/compiler/operator_rules.cpp src/compiler/semantic_types.cpp src/common/type_name.cpp)
+
+include(CTest)
+if(BUILD_TESTING AND TARGET zl-mir-safety-tests)
+    add_test(NAME mir-safety COMMAND zl-mir-safety-tests)
+    find_program(ZL_SAFETY_PYTHON NAMES python3)
+    if(ZL_SAFETY_PYTHON)
+        add_test(NAME safety-pipeline COMMAND ${ZL_SAFETY_PYTHON}
+            ${CMAKE_SOURCE_DIR}/tests/safety_pipeline.py $<TARGET_FILE:zl_language>)
+        set_tests_properties(safety-pipeline PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endif()
+endif()

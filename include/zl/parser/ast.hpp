@@ -70,6 +70,8 @@ enum class AccessModifier {
 struct AstNode {
     NodeKind kind;
     std::size_t line{0};
+    // Populated by ModuleLoader before merging imported declarations.
+    std::string sourceFile;
 
     explicit AstNode(NodeKind k) : kind(k) {}
     virtual ~AstNode() = default;
