@@ -2,6 +2,86 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-11 — MIR optimiser framework
+
+The framework first, the transformations second, and the proof that they are
+safe running underneath both. Everything here is opt-in and additive: the
+bytecode compiler and the VM are untouched and remain the behavioural reference.
+Documented in [`docs/mir-optimizer.md`](mir-optimizer.md).
+
+**Framework.** `PassManager` owns an ordered list of passes created by name from
+a registry, so a pipeline can be written down (`ZL_MIR_OPT_PASSES=fold-constants,
+propagate-copies`) and the curated ordering lives in one place. It runs to a
+fixpoint because the passes feed each other — the last one makes something
+constant that the first one can then branch on. `FunctionAnalysisManager` owns
+one result per (analysis, function) and hands out references, with freshness
+stated as the caller's duty: a pass that mutates calls `invalidate()`. Any pass
+that reports a change is followed by `verifyFunction`, run with
+`unreachableBlocksAreErrors = false` so that branch simplification may strand
+blocks for the pruning pass to remove; if verification fails the function is
+**restored from its pre-pass copy** and the failure recorded, so a broken
+rewrite never reaches a backend. Three levels of before/after inspection: in-
+report snapshots, a `ZL_MIR_OPT_SNAPSHOT_DIR` file per changed pass with a
+bounded line diff, and `ZL_MIR_OPT_VERBOSE=1` for the per-pass trace.
+
+**Safety, stated once.** `effects.hpp` is the single answer to "what does this
+instruction do besides compute" — 17 kinds, with only `Pure` and `ReadsMemory`
+compatible with deletion, and `MayThrow` required to be *discharged* first.
+Discharge happens in three tiers (all-constant operands so the evaluator
+decides; a constant that makes the failure impossible whatever the rest are;
+operand types that exclude it), which is what makes `x + 0` removable while
+`x * y` is not: ZL raises on overflow, and deleting a possible runtime error is
+a behaviour change. The floating-point identities are narrowed the same way —
+`x * 1.0` yes, `x + 0.0` no, because `(-0.0) + 0.0` is `+0.0` and the sign of
+zero is observable.
+
+**Passes.** Constant folding, constant propagation, dead-block elimination,
+dead-value elimination, algebraic simplification, redundant-conversion removal,
+branch simplification and local copy propagation. None of them reorders, sinks,
+hoists, inlines or duplicates: every rewrite is either replacing a use with
+something provably equal or deleting work that provably cannot be observed.
+Deliberately absent, and documented as such: no function removal (reflection
+reaches functions by name), no inter-procedural transform, no dead-store
+elimination across paths.
+
+**Differential validation, twice.** `compareModules` compares the modules
+structurally and by observable event — events are never *invented*
+(unconditionally), and never *lost* (measured against the unoptimised module
+with the default pipeline run over it, so removing code that cannot run is not
+reported as a divergence while removing code that can is). It deliberately does
+not count runtime checks (the optimiser may delete one it has proved cannot
+fail) or local stores (deciding whether one is observable is the same work the
+optimiser does to remove it), and it cannot see values at all — so
+`tools/mir_opt_diff.sh` runs every program in `examples/` both ways and compares
+its output and exit status byte for byte. Currently **50 of 50 identical, none
+skipped**. `tools/mir_opt_check_all.sh` is the wide sibling: it needs no backend,
+so it also covers the 26 stdlib modules - the generics, `async`, task, lock and
+FFI code the backend stubs today - and is currently **76 of 76 equivalent**.
+
+**A miscompile the runtime half caught, and the static half could not.**
+`examples/intermediate/Closures.zl` printed `1 1 1` where it should print
+`1 2 3`. Dead-value elimination had removed a store to a slot nothing in the
+function read again — but that function is a closure body, and a closure body's
+slots are the closure's *captured environment*: ZL captures by value, and a
+captured `var` that a closure mutates persists between calls, which is the whole
+point of `makeCounter`. Nothing changed a single observable event, so no amount
+of comparing event lists would have noticed. `eliminate-dead-values` now declines
+every store in a function with captures (how the runtime spells capture
+persistence is a backend contract the pass does not restate), and both suites
+pin it.
+
+The "no event lost" rule is measured against a reference built by the *same*
+pipeline (`DifferentialOptions::referencePipeline`), so a pipeline named with
+`ZL_MIR_OPT_PASSES` is judged against itself rather than against the default
+one - measuring a module built by one pass against a reference built by eight
+reports every event the other seven would have deleted.
+
+Regressions: `tests/mir_pass_tests.cpp` (`zl-mir-opt-tests`), 146 checks of
+hand-built MIR with no front end; `tests/mir_opt_pipeline_tests.cpp`
+(`zl-mir-opt-pipeline-tests`), 79 checks that lower, optimise, verify, compare
+statically and then *run both versions* and compare their output. Command line:
+`--emit-mir-opt <out|->`, `--mir-opt-check`, and `ZL_MIR_OPT=1 --mir-vm`.
+
 ## 2026-09-11 — MIR lowering: structural match, copy-update, and try/finally
 
 The last lowering gaps close. `try/finally`, structural match patterns, `data`

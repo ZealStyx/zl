@@ -63,7 +63,8 @@ program, and `zlpkg run` verifies that the adjacent runtime reports a matching v
 - `src/mir/` and `include/zl/mir/` hold MIR, the mid-level IR. It is a side
   pipeline off the type checker, reached with `zl --emit-mir`; the bytecode
   compiler and the VM do not depend on it. See [`mir.md`](mir.md) for its
-  invariants and design decisions.
+  invariants and design decisions. The optimiser that sits on top of it
+  (`--emit-mir-opt`) is described in [`mir-optimizer.md`](mir-optimizer.md).
 - `src/compiler/ir.cpp` is the older, untyped `zl::ir` that feeds the native
   subset backends. It is separate from `zl::mir` and is not being grown further.
 
@@ -74,13 +75,16 @@ scheduler, native compiler, and FFI layers; they are declared as separate
 executables in `CMakeLists.txt`. If you extend the language, add tests for the
 affected layer.
 
-MIR has three targets, split by what they link:
+MIR has five targets, split by what they link:
 
 ```bash
 cmake --build build --target zl-mir-tests            # verifier regressions
 cmake --build build --target zl-mir-ssa-tests        # CFG, data flow, promotion
 cmake --build build --target zl-mir-lowering-tests   # end-to-end lowering
+cmake --build build --target zl-mir-opt-tests        # optimiser, hand-built MIR
+cmake --build build --target zl-mir-opt-pipeline-tests   # optimiser, real programs
 ./build/zl-mir-tests && ./build/zl-mir-ssa-tests && ./build/zl-mir-lowering-tests
+./build/zl-mir-opt-tests && ./build/zl-mir-opt-pipeline-tests
 ```
 
 `zl-mir-tests` builds MIR by hand and checks the verifier rejects each class of
@@ -90,6 +94,16 @@ including the malformed-SSA cases the verifier must reject and the slots the
 promotion must decline. `zl-mir-lowering-tests` drives `ModuleLoader` →
 `TypeChecker` → `lowerProgram` → `verifyModule` on small programs, so it links the
 whole compiler minus `main()`.
+
+`zl-mir-opt-tests` is the optimiser's specification: pass manager, analysis
+caching, verification between passes, the effect table, each pass and its
+declination rules — hand-built MIR, no front end, so it runs in seconds.
+`zl-mir-opt-pipeline-tests` is the other half, and links the whole compiler minus
+`main()` like the lowering target: it lowers real ZL programs, optimises them,
+checks the two modules statically with `compareModules`, then runs both through
+the bytecode backend and compares their output and exit code. Both halves matter:
+the static check sees structure and observable events, the run sees values and the
+runtime checks the static check deliberately ignores.
 
 The ZL-level corpus is split in two:
 
@@ -123,18 +137,25 @@ Use `scripts/run_regressions.sh` / `scripts/run_regressions.bat` for the full pe
 regression corpus, including package-manager cases, and `scripts/native_gate.sh` /
 `scripts/native_gate.ps1` for the native compiler gate.
 
-Two differential harnesses cover the MIR bytecode backend on `examples/`:
+Four differential harnesses cover the MIR pipeline on `examples/`:
 
 ```bash
 tools/mir_backend_diff.sh ./build/zl_language     # backend vs reference path
 tools/mir_promotion_diff.sh ./build/zl_language   # block params vs store/load
+tools/mir_opt_diff.sh ./build/zl_language         # optimised vs unoptimised
+tools/mir_opt_check_all.sh ./build/zl_language    # the same, statically, wider
 ```
 
 The first must stay at 22 matching with the 9 documented fail-closed gaps. The
 second compares `--mir-vm` with and without `ZL_MIR_PROMOTE=1`; it must report 0
-differing (27 compared, 32 not yet runnable by the backend). Both are the check
-that a change to the IR, the promotion pass, or the backend did not alter
-behaviour.
+differing (27 compared, 32 not yet runnable by the backend). The third compares
+`--mir-vm` with and without `ZL_MIR_OPT=1` - run both, compare the output - and
+must report 0 differing; it is currently 50 of 50, none skipped. The fourth does
+not need the backend at all: it runs `zl --mir-opt-check` over every `.zl` in
+`examples/` *and* `stdlib/`, which is how the optimiser gets checked against the
+generics, async, task, lock and FFI code the backend cannot execute yet; it is
+currently 76 of 76 equivalent. All four are the check that a change to the IR,
+the promotion pass, the optimiser, or the backend did not alter behaviour.
 
 Both discover the `_lib` module roots themselves and set `ZL_EXTRA_ROOTS`, so a
 program that imports a sibling module is genuinely compared instead of failing to
