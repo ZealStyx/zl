@@ -8,6 +8,33 @@
 #include "zl/compiler/builtin_library.hpp"
 
 namespace zl {
+namespace {
+void stampSourceFile(AstNode* root, const std::string& sourceFile) {
+    std::function<void(const AstNode*)> stampSource = [&](const AstNode* node) {
+        if (!node) return;
+        // The tree is owned and mutable here; forEachChild exposes a read-only walk.
+        const_cast<AstNode*>(node)->sourceFile = sourceFile;
+        switch (node->kind) {
+            case NodeKind::Program:
+                for (const auto& n : static_cast<const Program*>(node)->declarations) stampSource(n.get());
+                for (const auto& n : static_cast<const Program*>(node)->imports) stampSource(n.get());
+                break;
+            case NodeKind::ClassDecl:
+                for (const auto& n : static_cast<const ClassDecl*>(node)->members) stampSource(n.get());
+                break;
+            case NodeKind::DataDecl:
+                for (const auto& n : static_cast<const DataDecl*>(node)->members) stampSource(n.get());
+                break;
+            case NodeKind::FunctionDecl:
+                stampSource(static_cast<const FunctionDecl*>(node)->body.get());
+                break;
+            default: forEachChild(node, stampSource); break;
+        }
+    };
+    stampSource(root);
+}
+} // namespace
+
 
 ModuleLoader::ModuleLoader(std::filesystem::path entryFile, std::vector<std::filesystem::path> extraRoots)
     : entryFile_(std::move(entryFile)), extraRoots_(std::move(extraRoots)) {
@@ -82,6 +109,9 @@ std::unique_ptr<Program> ModuleLoader::parseFile(const std::filesystem::path& fi
     Lexer lexer(buffer.str());
     Parser parser(lexer.tokenize());
     auto program = parser.parse(); // may throw ParseError - let it propagate as-is
+    const auto sourceFile = std::filesystem::absolute(filePath).lexically_normal().string();
+    stampSourceFile(program.get(), sourceFile);
+
 
     // A loaded module may be backed by any named top-level type: class, data,
     // interface, or enum. The primary-name contract applies to that declared
@@ -186,10 +216,12 @@ std::unique_ptr<Program> ModuleLoader::load() {
 
     // Built-in classes are regular ZL source: parse them through the same
     // parser as user files, then merge them ahead of the entry program.
+    std::size_t builtinIndex = 0;
     for (const auto source : builtinLibrarySources()) {
         Lexer lexer{std::string(source)};
         Parser parser(lexer.tokenize());
         std::unique_ptr<Program> builtins = parser.parse();
+        stampSourceFile(builtins.get(), "<builtin:" + std::to_string(builtinIndex++) + ">");
         graph_.registerDeclarations(*builtins, "<builtin>",
             [](const std::string& className, const std::string& firstOwner, const std::string& secondOwner) {
                 return ModuleError("class '" + className + "' is defined in both " + firstOwner + " and " + secondOwner);

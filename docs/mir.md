@@ -1003,3 +1003,11 @@ lambda's parameter as `unknown`, and MIR records `unknown` rather than inventing
 a type. That is the honest answer — the language genuinely does not know — and
 inventing `int` to make the count look better would be exactly the erasure this
 IR exists to avoid.
+
+## Safety analysis and research evaluation
+
+The verifier also exposes stable property categories and JSON diagnostics through
+`--safety-check`. Definite initialization, may/must ownership and borrow facts,
+explicit native resource identities, and boundary audits are described in
+[MIR safety analysis](mir-safety.md), together with a corpus protocol that keeps
+source rejection layers separate from malformed-MIR compiler-contract tests.

@@ -151,6 +151,8 @@ endif()
 # the front end.
 # CFG queries, data-flow analyses, and slot -> block-parameter construction.
 zl_add_optional_test(zl-mir-ssa-tests tests/mir_ssa_tests.cpp
+    src/mir/folding.cpp
+    src/mir/effects.cpp
     src/mir/analysis.cpp
     src/mir/builder.cpp
     src/mir/dataflow.cpp
@@ -160,6 +162,7 @@ zl_add_optional_test(zl-mir-ssa-tests tests/mir_ssa_tests.cpp
     src/mir/ssa.cpp
     src/mir/type.cpp
     src/mir/verifier.cpp
+    src/mir/safety.cpp
     src/compiler/operator_rules.cpp
     src/compiler/semantic_types.cpp
     src/common/type_name.cpp)
@@ -171,6 +174,7 @@ zl_add_optional_test(zl-mir-tests tests/mir_tests.cpp
     src/mir/printer.cpp
     src/mir/type.cpp
     src/mir/verifier.cpp
+    src/mir/safety.cpp
     src/compiler/operator_rules.cpp
     src/compiler/semantic_types.cpp
     src/common/type_name.cpp)
@@ -195,6 +199,7 @@ zl_add_optional_test(zl-mir-opt-tests tests/mir_pass_tests.cpp
     src/mir/ssa.cpp
     src/mir/type.cpp
     src/mir/verifier.cpp
+    src/mir/safety.cpp
     src/compiler/operator_rules.cpp
     src/compiler/semantic_types.cpp
     src/common/type_name.cpp)
@@ -390,3 +395,22 @@ endif()
 
 zl_add_optional_test(zl-native-ffi-declaration-tests tests/native_ffi_declaration_tests.cpp
     src/compiler/native_ffi_declarations.cpp)
+
+# Safety analysis regression: malformed MIR is measured separately from source
+# corpus rejection layers, because it tests compiler/pass contracts.
+zl_add_optional_test(zl-mir-safety-tests tests/mir_safety_tests.cpp
+    src/mir/analysis.cpp src/mir/builder.cpp src/mir/function.cpp
+    src/mir/instruction.cpp src/mir/printer.cpp src/mir/type.cpp
+    src/mir/verifier.cpp src/mir/safety.cpp
+    src/compiler/operator_rules.cpp src/compiler/semantic_types.cpp src/common/type_name.cpp)
+
+include(CTest)
+if(BUILD_TESTING AND TARGET zl-mir-safety-tests)
+    add_test(NAME mir-safety COMMAND zl-mir-safety-tests)
+    find_program(ZL_SAFETY_PYTHON NAMES python3)
+    if(ZL_SAFETY_PYTHON)
+        add_test(NAME safety-pipeline COMMAND ${ZL_SAFETY_PYTHON}
+            ${CMAKE_SOURCE_DIR}/tests/safety_pipeline.py $<TARGET_FILE:zl_language>)
+        set_tests_properties(safety-pipeline PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endif()
+endif()
