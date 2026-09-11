@@ -31,6 +31,7 @@
 #include "zl/mir/ssa.hpp"
 #include "zl/mir/verifier.hpp"
 #include "zl/mir/vm_backend.hpp"
+#include "zl/native/pipeline.hpp"
 
 
 
@@ -640,6 +641,69 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
+        if (command == "--emit-native-ir" || command == "--emit-native-code") {
+            // The native backend, driven from verified MIR:
+            //   source -> type analysis -> MIR -> verify -> native IR -> machine code
+            // Never from the AST: the whole point of the tier is that it
+            // consumes the same verified MIR the bytecode backend does.
+            const bool emitCode = command == "--emit-native-code";
+            if (argc != 4) {
+                std::cerr << "usage: zl " << command << " <output|-> <file.zl>\n";
+                return 2;
+            }
+            try {
+                std::vector<std::filesystem::path> roots;
+                if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
+                    if (*env != '\0') for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
+                const auto stdlibRoot = resolveStdlibRoot(argv[0]);
+                const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
+                if (!stdlibVersion.compatible) { std::cerr << "error: " << stdlibVersion.error << "\n"; return 3; }
+                roots.push_back(stdlibRoot);
+                zl::ModuleLoader loader(argv[3], roots);
+                auto program = loader.load();
+                zl::TypeChecker typeChecker;
+                typeChecker.check(*program, /*requireMain=*/false);
+                auto lowered = zl::mir::lowerProgram(*program, typeChecker);
+                const auto report = zl::mir::verifyModule(lowered.module);
+                if (!report.ok()) { std::cerr << report.describe(); return 4; }
+
+                zl::native::PipelineOptions options;
+                options.selectOnly = !emitCode;
+                const auto& target = zl::native::hostTarget();
+                auto native = zl::native::compileMirToNative(lowered.module, target, options);
+                if (!native.ok()) { std::cerr << native.describe(); return 4; }
+
+                std::ostringstream text;
+                text << "; target " << target.triple << " (" << target.cc.name << ")\n";
+                text << zl::native::printLirModule(native.lir);
+                if (emitCode) {
+                    text << "\n; machine code\n";
+                    for (const auto& fn : native.code) {
+                        text << "; " << fn.name << " frame=" << fn.frameSize
+                             << " bytes=" << fn.code.size() << "\n";
+                        for (std::size_t i = 0; i < fn.code.size(); ++i) {
+                            static const char* kHex = "0123456789abcdef";
+                            text << kHex[fn.code[i] >> 4] << kHex[fn.code[i] & 0xf]
+                                 << ((i + 1) % 16 == 0 ? '\n' : ' ');
+                        }
+                        if (!fn.code.empty() && fn.code.size() % 16 != 0) text << "\n";
+                    }
+                }
+                std::cerr << native.describe();
+                const std::string out = text.str();
+                if (std::string(argv[2]) == "-") { std::cout << out; return 0; }
+                std::ofstream file(argv[2]);
+                if (!file) { std::cerr << "error: cannot open '" << argv[2] << "'\n"; return 5; }
+                file << out;
+                return file.good() ? 0 : 5;
+            } catch (const zl::TypeCheckError& e) {
+                std::cerr << "compile error: " << e.what() << "\n";
+                return 1;
+            } catch (const std::exception& e) {
+                std::cerr << "native backend error: " << e.what() << "\n";
+                return 1;
+            }
+        }
         if (command == "--parse-only") {
             if (argc != 3) {
                 std::cerr << "usage: zl --parse-only <file.zl>\n";
@@ -677,6 +741,8 @@ int main(int argc, char** argv) {
                          "  zl --parse-only <file.zl>\n"
                          "  zl --emit-native <output.cpp> <file.zl>\n"
                          "  zl --emit-machine-code <output.zlm> <file.zl>\n"
+                         "  zl --emit-native-ir <output|-> <file.zl>\n"
+                         "  zl --emit-native-code <output|-> <file.zl>\n"
                          "  zl --mir-vm <file.zl> [program args...]\n"
                          "  zl --emit-mir <output|-> <file.zl>\n"
                          "  zl --emit-ssa <output|-> <file.zl>\n"

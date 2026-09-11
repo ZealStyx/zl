@@ -142,6 +142,18 @@ if(TARGET zl-runtime-hardening-vm-tests AND WIN32)
     target_link_libraries(zl-runtime-hardening-vm-tests PRIVATE ws2_32)
 endif()
 
+# --- Native backend (MIR -> native IR -> machine code) ----------------------
+# Drives the whole native pipeline and *executes* the emitted machine code, so
+# it links the front end (its end-to-end cases lower real ZL source) plus the
+# native sources themselves.
+zl_add_optional_test(zl-native-backend-tests tests/native_backend_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+if(TARGET zl-native-backend-tests AND WIN32)
+    target_link_libraries(zl-native-backend-tests PRIVATE ws2_32)
+endif()
+if(TARGET zl-native-backend-tests)
+    target_link_libraries(zl-native-backend-tests PRIVATE Threads::Threads)
+endif()
+
 # --- MIR (mid-level IR) -----------------------------------------------------
 # Two targets, split by what they need to link.
 #
