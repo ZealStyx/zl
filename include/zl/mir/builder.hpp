@@ -212,12 +212,108 @@ public:
                                           std::uint32_t resultType, SourceLocation location = {});
     [[nodiscard]] TempId emitCallNative(const std::string& qualifiedName, std::int32_t nativeId,
                                         std::vector<Operand> arguments, std::uint32_t resultType,
-                                        bool isAsync = false, SourceLocation location = {});
+                                        bool isAsync = false, SourceLocation location = {},
+                                        std::vector<NativeOwnership> paramOwnership = {},
+                                        NativeOwnership returnOwnership = NativeOwnership::None);
     [[nodiscard]] TempId emitMakeClosure(FunctionId body, std::vector<Operand> captures,
                                          std::uint32_t resultType, SourceLocation location = {});
 
     [[nodiscard]] TempId emitAwait(Operand task, std::uint32_t resultType, SourceLocation location = {});
     [[nodiscard]] TempId emitTaskCreate(Operand value, std::uint32_t resultType, SourceLocation location = {});
+
+    // --- task lifecycle ---------------------------------------------------
+    // `resultType` is the Task type for spawn (Task<T> of the closure's
+    // return) and the payload type for block (0 when the payload is void).
+    [[nodiscard]] TempId emitTaskSpawn(Operand closure, std::uint32_t resultType,
+                                       SourceLocation location = {});
+    [[nodiscard]] TempId emitTaskBlock(Operand task, std::uint32_t resultType, SourceLocation location = {});
+    void emitTaskIgnore(Operand task, SourceLocation location = {});
+    void emitTaskCancel(Operand task, SourceLocation location = {});
+
+    // --- threads ----------------------------------------------------------
+    [[nodiscard]] TempId emitThreadStart(Operand closure, std::uint32_t resultType,
+                                         SourceLocation location = {});
+    void emitThreadJoin(Operand thread, SourceLocation location = {});
+    [[nodiscard]] TempId emitThreadIsAlive(Operand thread, SourceLocation location = {});
+
+    // --- channels ---------------------------------------------------------
+    [[nodiscard]] TempId emitChannelCreate(Operand capacity, std::uint32_t resultType,
+                                           SourceLocation location = {});
+    void emitChannelSend(Operand channel, Operand value, SourceLocation location = {});
+    [[nodiscard]] TempId emitChannelReceive(Operand channel, std::uint32_t resultType,
+                                             SourceLocation location = {});
+    [[nodiscard]] TempId emitChannelSize(Operand channel, SourceLocation location = {});
+    [[nodiscard]] TempId emitChannelSendAsync(Operand channel, Operand value, std::uint32_t resultType,
+                                              SourceLocation location = {});
+    [[nodiscard]] TempId emitChannelReceiveAsync(Operand channel, std::uint32_t resultType,
+                                                 SourceLocation location = {});
+
+    // --- mutex / rwlock ---------------------------------------------------
+    // `resultType` is the closure body's return type (0 when void).
+    [[nodiscard]] TempId emitMutexWithLock(Operand mutex, Operand closure, std::uint32_t resultType,
+                                           SourceLocation location = {});
+    [[nodiscard]] TempId emitRwLockWithRead(Operand lock, Operand closure, std::uint32_t resultType,
+                                            SourceLocation location = {});
+    [[nodiscard]] TempId emitRwLockWithWrite(Operand lock, Operand closure, std::uint32_t resultType,
+                                             SourceLocation location = {});
+
+    // --- atomics ----------------------------------------------------------
+    // Fixed result types are interned by the builder; the ref family takes the
+    // object type from the caller.
+    [[nodiscard]] TempId emitAtomicLoad(Operand atomic, SourceLocation location = {});
+    void emitAtomicStore(Operand atomic, Operand value, SourceLocation location = {});
+    [[nodiscard]] TempId emitAtomicAdd(Operand atomic, Operand delta, SourceLocation location = {});
+    [[nodiscard]] TempId emitAtomicLoadBool(Operand atomic, SourceLocation location = {});
+    void emitAtomicStoreBool(Operand atomic, Operand value, SourceLocation location = {});
+    [[nodiscard]] TempId emitAtomicLoadDouble(Operand atomic, SourceLocation location = {});
+    void emitAtomicStoreDouble(Operand atomic, Operand value, SourceLocation location = {});
+    [[nodiscard]] TempId emitAtomicLoadRef(Operand atomic, std::uint32_t resultType,
+                                           SourceLocation location = {});
+    void emitAtomicStoreRef(Operand atomic, Operand value, SourceLocation location = {});
+
+    // --- semaphores -------------------------------------------------------
+    void emitSemaphoreAcquire(Operand semaphore, SourceLocation location = {});
+    void emitSemaphoreRelease(Operand semaphore, SourceLocation location = {});
+    [[nodiscard]] TempId emitSemaphoreAvailable(Operand semaphore, SourceLocation location = {});
+    void emitSemaphoreSetPermits(Operand semaphore, Operand permits, SourceLocation location = {});
+    [[nodiscard]] TempId emitSemaphoreTryAcquire(Operand semaphore, SourceLocation location = {});
+    void emitSemaphoreReleaseMany(Operand semaphore, Operand count, SourceLocation location = {});
+
+    // --- conditions -------------------------------------------------------
+    void emitConditionWait(Operand condition, SourceLocation location = {});
+    [[nodiscard]] TempId emitConditionWaitFor(Operand condition, Operand timeoutSeconds,
+                                              SourceLocation location = {});
+    void emitConditionNotifyOne(Operand condition, SourceLocation location = {});
+    void emitConditionNotifyAll(Operand condition, SourceLocation location = {});
+
+    // --- shared state -----------------------------------------------------
+    [[nodiscard]] TempId emitSharedCreate(Operand value, std::uint32_t resultType,
+                                          SourceLocation location = {});
+    [[nodiscard]] TempId emitSharedGet(Operand shared, std::uint32_t resultType,
+                                       SourceLocation location = {});
+    void emitSharedSet(Operand shared, Operand value, SourceLocation location = {});
+    [[nodiscard]] TempId emitSharedWithLock(Operand shared, Operand closure, std::uint32_t resultType,
+                                            SourceLocation location = {});
+
+    // --- FFI / native resources -------------------------------------------
+    // `paramTags` must name one ABI tag per argument; `resultType` is the
+    // ZL-level result (0 when the export is void-typed).
+    [[nodiscard]] TempId emitFfiCall(const std::string& library, const std::string& symbol,
+                                     std::vector<Operand> arguments, std::vector<NativeAbiTag> paramTags,
+                                     NativeAbiTag returnTag, std::uint32_t resultType,
+                                     std::vector<NativeOwnership> paramOwnership = {},
+                                     NativeOwnership returnOwnership = NativeOwnership::None,
+                                     SourceLocation location = {});
+    [[nodiscard]] TempId emitHandleBorrow(Operand handle, std::uint32_t resultType,
+                                          SourceLocation location = {});
+    [[nodiscard]] TempId emitHandleConsume(Operand handle, std::uint32_t resultType,
+                                           SourceLocation location = {});
+    void emitHandleClose(Operand handle, SourceLocation location = {});
+    [[nodiscard]] TempId emitCallbackRegister(Operand closure, std::uint32_t resultType,
+                                              SourceLocation location = {});
+    [[nodiscard]] TempId emitCallbackInvoke(Operand callback, std::vector<Operand> arguments,
+                                            std::uint32_t resultType, SourceLocation location = {});
+    void emitCallbackClose(Operand callback, SourceLocation location = {});
 
     [[nodiscard]] TempId emitMove(SlotId slot, SourceLocation location = {});
     void emitBorrow(SlotId borrowSlot, Operand owner, SourceLocation location = {});

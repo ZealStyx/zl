@@ -34,6 +34,17 @@ const char* typeName(TypeKind kind) noexcept {
         case TypeKind::Union: return "union";
         case TypeKind::TypeParam: return "typeparam";
         case TypeKind::Unknown: return "unknown";
+        case TypeKind::Thread: return "Thread";
+        case TypeKind::Channel: return "Channel";
+        case TypeKind::Mutex: return "Mutex";
+        case TypeKind::RwLock: return "RwLock";
+        case TypeKind::Atomic: return "Atomic";
+        case TypeKind::Semaphore: return "Semaphore";
+        case TypeKind::Condition: return "Condition";
+        case TypeKind::NativeHandle: return "NativeHandle";
+        case TypeKind::NativeBuffer: return "NativeBuffer";
+        case TypeKind::NativeStruct: return "NativeStruct";
+        case TypeKind::NativeCallback: return "NativeCallback";
     }
     return "unknown";
 }
@@ -62,6 +73,17 @@ bool isReferenceKind(TypeKind kind) noexcept {
         case TypeKind::Option:
         case TypeKind::Result:
         case TypeKind::Function:
+        case TypeKind::Thread:
+        case TypeKind::Channel:
+        case TypeKind::Mutex:
+        case TypeKind::RwLock:
+        case TypeKind::Atomic:
+        case TypeKind::Semaphore:
+        case TypeKind::Condition:
+        case TypeKind::NativeHandle:
+        case TypeKind::NativeBuffer:
+        case TypeKind::NativeStruct:
+        case TypeKind::NativeCallback:
             return true;
         default:
             return false;
@@ -73,7 +95,17 @@ bool isNumericKind(TypeKind kind) noexcept {
 }
 
 bool isCollectableKind(TypeKind kind) noexcept {
-    return isReferenceKind(kind);
+    // Native resources are reference-like for nullability but deterministically
+    // owned, never traced. Everything else reference-like is collector-managed.
+    switch (kind) {
+        case TypeKind::NativeHandle:
+        case TypeKind::NativeBuffer:
+        case TypeKind::NativeStruct:
+        case TypeKind::NativeCallback:
+            return false;
+        default:
+            return isReferenceKind(kind);
+    }
 }
 
 bool isNullableKind(TypeKind kind) noexcept {
@@ -124,6 +156,118 @@ bool isResultType(const Type& type) noexcept {
 
 bool isSumType(const Type& type) noexcept {
     return isOptionType(type) || isResultType(type);
+}
+
+namespace {
+
+bool isObjectNamed(const Type& type, const char* name) noexcept {
+    if (type.kind != TypeKind::Object) return false;
+    if (type.name == name) return true;
+    // A generic instantiation keeps its full name (`Shared<int>`); the base
+    // name is what identifies the class.
+    const std::string prefix = std::string(name) + "<";
+    return type.name.rfind(prefix, 0) == 0;
+}
+
+} // namespace
+
+bool isThreadType(const Type& type) noexcept {
+    if (type.kind == TypeKind::Thread) return true;
+    return isObjectNamed(type, "Thread");
+}
+
+bool isChannelType(const Type& type) noexcept {
+    if (type.kind == TypeKind::Channel) return true;
+    return isObjectNamed(type, "Channel");
+}
+
+bool isMutexType(const Type& type) noexcept {
+    if (type.kind == TypeKind::Mutex) return true;
+    return isObjectNamed(type, "Mutex");
+}
+
+bool isRwLockType(const Type& type) noexcept {
+    if (type.kind == TypeKind::RwLock) return true;
+    return isObjectNamed(type, "RwLock");
+}
+
+bool isAtomicType(const Type& type) noexcept {
+    if (type.kind == TypeKind::Atomic) return true;
+    return isObjectNamed(type, "Atomic");
+}
+
+bool isSemaphoreType(const Type& type) noexcept {
+    if (type.kind == TypeKind::Semaphore) return true;
+    return isObjectNamed(type, "Semaphore");
+}
+
+bool isConditionType(const Type& type) noexcept {
+    if (type.kind == TypeKind::Condition) return true;
+    return isObjectNamed(type, "Condition");
+}
+
+bool isSharedType(const Type& type) noexcept {
+    if (type.kind == TypeKind::Shared) return true;
+    return isObjectNamed(type, "Shared");
+}
+
+bool isTaskType(const Type& type) noexcept {
+    if (type.kind == TypeKind::Task) return true;
+    return isObjectNamed(type, "Task");
+}
+
+bool isSyncPrimitiveType(const Type& type) noexcept {
+    return isSharedType(type) || isAtomicType(type) || isMutexType(type) || isRwLockType(type) ||
+           isSemaphoreType(type) || isChannelType(type) || isConditionType(type);
+}
+
+bool isThreadSafeCaptureType(const Type& type) noexcept {
+    // Keep this list in step with isThreadSafeClassName in src/vm/native.cpp
+    // and capturedValueCrossesThreadBoundary in thread_capture.cpp. `Thread`
+    // is deliberately absent: a thread handle may not cross.
+    return isSyncPrimitiveType(type);
+}
+
+bool isNativeHandleType(const Type& type) noexcept {
+    if (type.kind == TypeKind::NativeHandle) return true;
+    return type.kind == TypeKind::Object && type.name == "NativeHandle";
+}
+
+bool isNativeBufferType(const Type& type) noexcept {
+    return type.kind == TypeKind::NativeBuffer;
+}
+
+bool isNativeStructType(const Type& type) noexcept {
+    return type.kind == TypeKind::NativeStruct;
+}
+
+bool isNativeCallbackType(const Type& type) noexcept {
+    return type.kind == TypeKind::NativeCallback;
+}
+
+bool isNativeResourceType(const Type& type) noexcept {
+    return isNativeHandleType(type) || isNativeBufferType(type) || isNativeStructType(type) ||
+           isNativeCallbackType(type);
+}
+
+std::uint32_t channelElementFor(const Type& type) noexcept {
+    if (type.kind == TypeKind::Channel) {
+        return type.arguments.size() == 1 ? type.arguments.front() : 0;
+    }
+    if (type.kind == TypeKind::Object && (type.name == "Channel" || type.name.rfind("Channel<", 0) == 0)) {
+        return type.arguments.size() == 1 ? type.arguments.front() : 0;
+    }
+    return 0;
+}
+
+std::uint32_t taskPayloadFor(const Type& type) noexcept {
+    if (!isTaskType(type)) return 0;
+    return type.arguments.size() == 1 ? type.arguments.front() : 0;
+}
+
+std::uint32_t sharedPayloadFor(const Type& type) noexcept {
+    if (!isSharedType(type)) return 0;
+    return type.arguments.size() == 1 ? type.arguments.front() : 0;
 }
 
 std::uint32_t optionPayloadFor(const Type& type) noexcept {
@@ -281,6 +425,92 @@ std::uint32_t TypeArena::resultType(std::uint32_t ok, std::uint32_t error) const
 }
 
 
+std::uint32_t TypeArena::threadType() const {
+    Type t;
+    t.kind = TypeKind::Thread;
+    t.name = "Thread";
+    return intern(std::move(t));
+}
+
+std::uint32_t TypeArena::channelType(std::uint32_t element) const {
+    Type t;
+    t.kind = TypeKind::Channel;
+    t.name = "Channel";
+    t.arguments = {element};
+    return intern(std::move(t));
+}
+
+std::uint32_t TypeArena::mutexType() const {
+    Type t;
+    t.kind = TypeKind::Mutex;
+    t.name = "Mutex";
+    return intern(std::move(t));
+}
+
+std::uint32_t TypeArena::rwLockType() const {
+    Type t;
+    t.kind = TypeKind::RwLock;
+    t.name = "RwLock";
+    return intern(std::move(t));
+}
+
+std::uint32_t TypeArena::atomicType() const {
+    Type t;
+    t.kind = TypeKind::Atomic;
+    t.name = "Atomic";
+    return intern(std::move(t));
+}
+
+std::uint32_t TypeArena::semaphoreType() const {
+    Type t;
+    t.kind = TypeKind::Semaphore;
+    t.name = "Semaphore";
+    return intern(std::move(t));
+}
+
+std::uint32_t TypeArena::conditionType() const {
+    Type t;
+    t.kind = TypeKind::Condition;
+    t.name = "Condition";
+    return intern(std::move(t));
+}
+
+std::uint32_t TypeArena::nativeHandleType() const {
+    Type t;
+    t.kind = TypeKind::NativeHandle;
+    t.name = "NativeHandle";
+    return intern(std::move(t));
+}
+
+std::uint32_t TypeArena::nativeBufferType() const {
+    Type t;
+    t.kind = TypeKind::NativeBuffer;
+    t.name = "NativeBuffer";
+    return intern(std::move(t));
+}
+
+std::uint32_t TypeArena::nativeStructType() const {
+    Type t;
+    t.kind = TypeKind::NativeStruct;
+    t.name = "NativeStruct";
+    return intern(std::move(t));
+}
+
+std::uint32_t TypeArena::nativeCallbackType(FunctionSignature signature) const {
+    Type t;
+    t.kind = TypeKind::NativeCallback;
+    t.name = "NativeCallback";
+    t.signature = std::move(signature);
+    return intern(std::move(t));
+}
+
+std::uint32_t TypeArena::nativeCallbackType() const {
+    FunctionSignature signature;
+    signature.hasSignature = false;
+    signature.returnType = unknownType();
+    return nativeCallbackType(std::move(signature));
+}
+
 std::uint32_t TypeArena::functionType(FunctionSignature signature) const {
     Type t;
     t.kind = TypeKind::Function;
@@ -350,6 +580,45 @@ std::string TypeArena::render(std::uint32_t id) const {
         case TypeKind::Shared:
             out = "Shared" + renderArguments('<', '>');
             break;
+        case TypeKind::Channel:
+            // Untyped channels (the current `Channel.create`) render bare;
+            // typed ones carry the element type. `Channel<unknown>` would be
+            // noise: the source never spells it.
+            if (type->arguments.size() == 1) {
+                const Type* element = find(type->arguments.front());
+                if (element && element->kind == TypeKind::Unknown) {
+                    out = "Channel";
+                    break;
+                }
+            }
+            out = "Channel";
+            if (!type->arguments.empty()) out += renderArguments('<', '>');
+            break;
+        case TypeKind::Thread:
+        case TypeKind::Mutex:
+        case TypeKind::RwLock:
+        case TypeKind::Atomic:
+        case TypeKind::Semaphore:
+        case TypeKind::Condition:
+        case TypeKind::NativeHandle:
+        case TypeKind::NativeBuffer:
+        case TypeKind::NativeStruct:
+            out = typeName(type->kind);
+            break;
+        case TypeKind::NativeCallback: {
+            if (!type->signature.hasSignature) {
+                out = "NativeCallback";
+                break;
+            }
+            out = "NativeCallback(";
+            for (std::size_t i = 0; i < type->signature.parameterTypes.size(); ++i) {
+                if (i) out += ",";
+                out += render(type->signature.parameterTypes[i]);
+            }
+            out += "):";
+            out += render(type->signature.returnType);
+            break;
+        }
         case TypeKind::Option:
             out = "Option" + renderArguments('<', '>');
             break;

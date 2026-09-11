@@ -521,7 +521,9 @@ void testBareGlobalNativeCallLowers() {
     // `share(x)` is a native with no namespace, and the catalog keys it by its
     // bare name. Consulting only qualified names missed it, so the call read as
     // an implicit self-call to a method that does not exist and the note named
-    // an empty dispatch: "call to 'C.()' which was not lowered".
+    // an empty dispatch: "call to 'C.()' which was not lowered". It lowers to
+    // the dedicated shared_create (still resolved through the bare-name catalog
+    // lookup), and the Shared cell accesses lower to their own operations.
     const auto lowered = lower("BareNative", R"ZL(
 class Box {
     int v
@@ -542,8 +544,14 @@ class BareNative {
 }
 )ZL");
     requireClean(lowered, "a call to the global native `share`");
-    require(contains(lowered, "BareNative.main", "call_native native 'share'"),
-            "`share` was not lowered to a native call:\n" +
+    require(contains(lowered, "BareNative.main", "shared_create"),
+            "`share` was not lowered to shared_create:\n" +
+                functionText(lowered, "BareNative.main"));
+    require(contains(lowered, "BareNative.main", "shared_set"),
+            "`setValue` was not lowered to shared_set:\n" +
+                functionText(lowered, "BareNative.main"));
+    require(contains(lowered, "BareNative.main", "shared_with_lock"),
+            "`withLock` was not lowered to shared_with_lock:\n" +
                 functionText(lowered, "BareNative.main"));
     std::cout << "mir lowering bare global native: PASS\n";
 }
@@ -1115,6 +1123,270 @@ class Corpus {
 
 } // namespace
 
+
+// ---------------------------------------------------------------------------
+// Concurrency: tasks, threads, channels, locks, atomics, shared state
+// ---------------------------------------------------------------------------
+// The synchronisation natives lower to dedicated operations carrying the
+// runtime contract (blocking, thread boundaries, scoped locks) instead of
+// opaque native calls. The stdlib facades are not loaded here, so the
+// primitives are exercised through the qualified natives directly, with
+// minimal stub classes standing in for the instances only the stdlib can
+// construct. The checker intercepts Mutex/RwLock by qualified name ahead of
+// any method lookup, so the stubs do not shadow the natives.
+
+void testTaskSpawnLowers() {
+    // The task's payload is the closure's own return: int here, void there.
+    const auto lowered = lower("TaskSpawn", R"ZL(
+class TaskSpawn {
+    func main(): void {
+        var t = Task.spawn(func() => 40 + 2)
+        var done = Task.spawn(func() { log("fired") })
+        log("spawned")
+    }
+}
+)ZL");
+    requireClean(lowered, "Task.spawn of value and void closures");
+    require(contains(lowered, "TaskSpawn.main", "task_spawn"),
+            "Task.spawn was not lowered to task_spawn:\n" +
+                functionText(lowered, "TaskSpawn.main"));
+    require(contains(lowered, "TaskSpawn.main", "Task<int>"),
+            "the spawned Task<int> lost its payload:\n" + functionText(lowered, "TaskSpawn.main"));
+    require(contains(lowered, "TaskSpawn.main", "Task<void>"),
+            "the spawned Task<void> lost its payload:\n" + functionText(lowered, "TaskSpawn.main"));
+    std::cout << "mir lowering task spawn: PASS\n";
+}
+
+void testTaskBlockIgnoreCancelLower() {
+    // block() waits and yields the payload; ignore()/cancel() are effects.
+    const auto lowered = lower("TaskWait", R"ZL(
+class TaskWait {
+    func main(): void {
+        var t = Task.spawn(func() => 7)
+        var v = t.block()
+        log(v)
+        var u = Task.spawn(func() => 8)
+        u.ignore()
+        var w = Task.spawn(func() => 9)
+        w.cancel()
+    }
+}
+)ZL");
+    requireClean(lowered, "Task.block/ignore/cancel");
+    require(contains(lowered, "TaskWait.main", "task_block"),
+            "Task.block was not lowered to task_block:\n" + functionText(lowered, "TaskWait.main"));
+    require(contains(lowered, "TaskWait.main", "task_ignore"),
+            "Task.ignore was not lowered to task_ignore:\n" + functionText(lowered, "TaskWait.main"));
+    require(contains(lowered, "TaskWait.main", "task_cancel"),
+            "Task.cancel was not lowered to task_cancel:\n" + functionText(lowered, "TaskWait.main"));
+    std::cout << "mir lowering task wait: PASS\n";
+}
+
+void testThreadPrimitivesLower() {
+    const auto lowered = lower("ThreadPrim", R"ZL(
+class ThreadPrim {
+    func main(): void {
+        var t = Thread.start(func() => 1)
+        Thread.join(t)
+        var alive = Thread.isAlive(t)
+        log(alive)
+    }
+}
+)ZL");
+    requireClean(lowered, "Thread.start/join/isAlive");
+    require(contains(lowered, "ThreadPrim.main", "thread_start"),
+            "Thread.start was not lowered to thread_start:\n" +
+                functionText(lowered, "ThreadPrim.main"));
+    require(contains(lowered, "ThreadPrim.main", "thread_join"),
+            "Thread.join was not lowered to thread_join:\n" + functionText(lowered, "ThreadPrim.main"));
+    require(contains(lowered, "ThreadPrim.main", "thread_is_alive"),
+            "Thread.isAlive was not lowered to thread_is_alive:\n" +
+                functionText(lowered, "ThreadPrim.main"));
+    std::cout << "mir lowering thread primitives: PASS\n";
+}
+
+void testChannelPrimitivesLower() {
+    const auto lowered = lower("ChannelPrim", R"ZL(
+class ChannelPrim {
+    async func main(): void {
+        var ch = Channel.create(4)
+        Channel.send(ch, 1)
+        var first = Channel.receive(ch)
+        log(first)
+        log(Channel.size(ch))
+        var sent = Channel.sendAsync(ch, 2)
+        await sent
+        var v = await Channel.receiveAsync(ch)
+        log(v)
+    }
+}
+)ZL");
+    requireClean(lowered, "the channel primitives");
+    require(contains(lowered, "ChannelPrim.main", "channel_create"),
+            "Channel.create was not lowered to channel_create:\n" +
+                functionText(lowered, "ChannelPrim.main"));
+    require(contains(lowered, "ChannelPrim.main", "channel_send "),
+            "Channel.send was not lowered to channel_send:\n" +
+                functionText(lowered, "ChannelPrim.main"));
+    require(contains(lowered, "ChannelPrim.main", "channel_receive "),
+            "Channel.receive was not lowered to channel_receive:\n" +
+                functionText(lowered, "ChannelPrim.main"));
+    require(contains(lowered, "ChannelPrim.main", "channel_size"),
+            "Channel.size was not lowered to channel_size:\n" +
+                functionText(lowered, "ChannelPrim.main"));
+    require(contains(lowered, "ChannelPrim.main", "channel_send_async"),
+            "Channel.sendAsync was not lowered to channel_send_async:\n" +
+                functionText(lowered, "ChannelPrim.main"));
+    require(contains(lowered, "ChannelPrim.main", "channel_receive_async"),
+            "Channel.receiveAsync was not lowered to channel_receive_async:\n" +
+                functionText(lowered, "ChannelPrim.main"));
+    std::cout << "mir lowering channel primitives: PASS\n";
+}
+
+void testMutexWithLockLowers() {
+    // The operation produces the closure body's value, including the
+    // runtime-nil of a void body.
+    const auto lowered = lower("MutexPrim", R"ZL(
+class Mutex {
+    func Mutex(): void {}
+}
+
+class MutexPrim {
+    func main(): void {
+        var m = new Mutex()
+        var v = Mutex.withLock(m, func() => 41)
+        log(v)
+        Mutex.withLock(m, func() { log("held") })
+    }
+}
+)ZL");
+    requireClean(lowered, "Mutex.withLock of value and void closures");
+    require(contains(lowered, "MutexPrim.main", "mutex_with_lock"),
+            "Mutex.withLock was not lowered to mutex_with_lock:\n" +
+                functionText(lowered, "MutexPrim.main"));
+    std::cout << "mir lowering mutex with lock: PASS\n";
+}
+
+void testRwLockPrimitivesLower() {
+    const auto lowered = lower("RwLockPrim", R"ZL(
+class RwLock {
+    func RwLock(): void {}
+}
+
+class RwLockPrim {
+    func main(): void {
+        var l = new RwLock()
+        var v = RwLock.withRead(l, func() => 3)
+        log(v)
+        RwLock.withWrite(l, func() { log("wrote") })
+    }
+}
+)ZL");
+    requireClean(lowered, "RwLock.withRead/withWrite");
+    require(contains(lowered, "RwLockPrim.main", "rwlock_with_read"),
+            "RwLock.withRead was not lowered to rwlock_with_read:\n" +
+                functionText(lowered, "RwLockPrim.main"));
+    require(contains(lowered, "RwLockPrim.main", "rwlock_with_write"),
+            "RwLock.withWrite was not lowered to rwlock_with_write:\n" +
+                functionText(lowered, "RwLockPrim.main"));
+    std::cout << "mir lowering rwlock primitives: PASS\n";
+}
+
+void testAtomicPrimitivesLower() {
+    // One lane per representation: int, bool, double, and reference.
+    const auto lowered = lower("AtomicPrim", R"ZL(
+class Atomic {
+    func Atomic(): void {}
+}
+
+class AtomicPrim {
+    func main(): void {
+        var a = new Atomic()
+        var b = new Atomic()
+        Atomic.store(a, 1)
+        log(Atomic.load(a))
+        log(Atomic.add(a, 2))
+        Atomic.storeBool(a, true)
+        log(Atomic.loadBool(a))
+        Atomic.storeDouble(a, 2.5)
+        log(Atomic.loadDouble(a))
+        Atomic.storeRef(a, b)
+        log(Atomic.loadRef(a))
+    }
+}
+)ZL");
+    requireClean(lowered, "the atomic lanes");
+    const std::string text = functionText(lowered, "AtomicPrim.main");
+    for (const char* needle :
+         {"atomic_load ", "atomic_store ", "atomic_add", "atomic_load_bool", "atomic_store_bool",
+          "atomic_load_double", "atomic_store_double", "atomic_load_ref", "atomic_store_ref"}) {
+        require(text.find(needle) != std::string::npos,
+                std::string("the atomics did not lower to ") + needle + ":\n" + text);
+    }
+    std::cout << "mir lowering atomic primitives: PASS\n";
+}
+
+void testSemaphoreConditionLower() {
+    const auto lowered = lower("SemCond", R"ZL(
+class Semaphore {
+    func Semaphore(): void {}
+}
+
+class Condition {
+    func Condition(): void {}
+}
+
+class SemCond {
+    func main(): void {
+        var s = new Semaphore()
+        Semaphore.acquire(s)
+        Semaphore.release(s)
+        log(Semaphore.available(s))
+        Semaphore.setPermits(s, 3)
+        log(Semaphore.tryAcquire(s))
+        Semaphore.releaseMany(s, 2)
+        var c = new Condition()
+        Condition.notifyOne(c)
+        Condition.notifyAll(c)
+        log(Condition.waitFor(c, 2.5))
+    }
+}
+)ZL");
+    requireClean(lowered, "the semaphore and condition primitives");
+    const std::string text = functionText(lowered, "SemCond.main");
+    for (const char* needle : {"semaphore_acquire", "semaphore_release ", "semaphore_available",
+                               "semaphore_set_permits", "semaphore_try_acquire",
+                               "semaphore_release_many", "condition_notify_one", "condition_notify_all",
+                               "condition_wait_for"}) {
+        require(text.find(needle) != std::string::npos,
+                std::string("the primitives did not lower to ") + needle + ":\n" + text);
+    }
+    std::cout << "mir lowering semaphore condition: PASS\n";
+}
+
+void testSharedCellAccessLowers() {
+    // share() builds the cell; get/setValue are single synchronised accesses.
+    const auto lowered = lower("SharedCell", R"ZL(
+class SharedCell {
+    func main(): void {
+        var s = share(10)
+        log(s.get())
+        s.setValue(11)
+        log(s.get())
+    }
+}
+)ZL");
+    requireClean(lowered, "Shared.get/setValue");
+    require(contains(lowered, "SharedCell.main", "shared_create"),
+            "share was not lowered to shared_create:\n" + functionText(lowered, "SharedCell.main"));
+    require(contains(lowered, "SharedCell.main", "shared_get"),
+            "Shared.get was not lowered to shared_get:\n" + functionText(lowered, "SharedCell.main"));
+    require(contains(lowered, "SharedCell.main", "shared_set"),
+            "Shared.setValue was not lowered to shared_set:\n" +
+                functionText(lowered, "SharedCell.main"));
+    std::cout << "mir lowering shared cell: PASS\n";
+}
+
 int main() {
     testImmutableLocalStaysSsa();
     testWrittenParameterBecomesSlot();
@@ -1139,6 +1411,15 @@ int main() {
     testSetLiteralLowers();
     testGenericClassCollectionLiteralLowers();
     testBareGlobalNativeCallLowers();
+    testTaskSpawnLowers();
+    testTaskBlockIgnoreCancelLower();
+    testThreadPrimitivesLower();
+    testChannelPrimitivesLower();
+    testMutexWithLockLowers();
+    testRwLockPrimitivesLower();
+    testAtomicPrimitivesLower();
+    testSemaphoreConditionLower();
+    testSharedCellAccessLowers();
     testRecordLiteralIsAllocPlusFieldStores();
 
     testMatchArmsAreBranches();

@@ -300,6 +300,59 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Suspension liveness
+// ---------------------------------------------------------------------------
+//
+// `await` is the only suspension point: it parks the async frame on the
+// scheduler and resumes later with the payload. Everything live across that
+// park - every SSA value still to be read plus every slot still to be loaded,
+// together with each one's type and lifetime contract - must survive the round
+// trip, which is what this analysis reports, one point per Await.
+//
+// The sets are derived from block liveness refined to the instruction: the
+// live-out fact of the block, walked back over the terminator and the
+// instructions after the await. The await's own result is excluded (it is
+// produced by the resumption, not preserved across the suspension), as are
+// constants and statics (not frame state). Borrow slots appear with their
+// BORROW ownership and borrow source intact, so a backend can see that the
+// borrow binding itself - not just the value - is part of the preserved frame;
+// the verifier separately proves every such borrow roots in owned-frame
+// storage. Both lists are deterministically ordered (values by ValueId, slots
+// by SlotId).
+
+struct SuspendedValue {
+    ValueId value;
+    std::uint32_t type{0};
+};
+
+struct SuspendedSlot {
+    SlotId slot{0};
+    std::uint32_t type{0};
+    zl::OwnershipKind ownership{zl::OwnershipKind::GC};
+    std::string borrowSource;
+};
+
+struct SuspensionPoint {
+    BlockId block{kNoBlock};
+    long instructionIndex{-1};
+    std::vector<SuspendedValue> values;
+    std::vector<SuspendedSlot> slots;
+};
+
+class SuspensionLiveness {
+public:
+    explicit SuspensionLiveness(const Function& function);
+
+    // One entry per Await in the function, in program order.
+    [[nodiscard]] const std::vector<SuspensionPoint>& points() const { return points_; }
+    // The point at this Await, or nullptr when the instruction is not one.
+    [[nodiscard]] const SuspensionPoint* pointAt(BlockId block, long instructionIndex) const;
+
+private:
+    std::vector<SuspensionPoint> points_;
+};
+
+// ---------------------------------------------------------------------------
 // Constant values
 // ---------------------------------------------------------------------------
 //

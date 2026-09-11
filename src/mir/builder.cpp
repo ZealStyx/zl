@@ -485,12 +485,15 @@ TempId FunctionBuilder::emitCallIndirect(Operand callee, std::vector<Operand> ar
 
 TempId FunctionBuilder::emitCallNative(const std::string& qualifiedName, std::int32_t nativeId,
                                        std::vector<Operand> arguments, std::uint32_t resultType, bool isAsync,
-                                       SourceLocation location) {
+                                       SourceLocation location, std::vector<NativeOwnership> paramOwnership,
+                                       NativeOwnership returnOwnership) {
     Instruction& instruction = append(Opcode::CallNative, std::move(location));
     instruction.operands = std::move(arguments);
     instruction.target.nativeName = qualifiedName;
     instruction.target.nativeId = nativeId;
     instruction.target.isAsync = isAsync;
+    instruction.target.nativeParamOwnership = std::move(paramOwnership);
+    instruction.target.nativeReturnOwnership = returnOwnership;
     describeCall(instruction, instruction.operands, resultType, 0);
     if (resultType == 0) return kNoTemp;
     setResult(instruction, resultType);
@@ -526,6 +529,319 @@ TempId FunctionBuilder::emitTaskCreate(Operand value, std::uint32_t resultType, 
     instruction.operands = {value};
     setResult(instruction, resultType);
     return instruction.result;
+}
+
+TempId FunctionBuilder::emitTaskSpawn(Operand closure, std::uint32_t resultType, SourceLocation location) {
+    Instruction& instruction = append(Opcode::TaskSpawn, std::move(location));
+    instruction.operands = {closure};
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+TempId FunctionBuilder::emitTaskBlock(Operand task, std::uint32_t resultType, SourceLocation location) {
+    Instruction& instruction = append(Opcode::TaskBlock, std::move(location));
+    instruction.operands = {task};
+    if (resultType == 0) return kNoTemp;
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+void FunctionBuilder::emitTaskIgnore(Operand task, SourceLocation location) {
+    Instruction& instruction = append(Opcode::TaskIgnore, std::move(location));
+    instruction.operands = {task};
+}
+
+void FunctionBuilder::emitTaskCancel(Operand task, SourceLocation location) {
+    Instruction& instruction = append(Opcode::TaskCancel, std::move(location));
+    instruction.operands = {task};
+}
+
+TempId FunctionBuilder::emitThreadStart(Operand closure, std::uint32_t resultType, SourceLocation location) {
+    Instruction& instruction = append(Opcode::ThreadStart, std::move(location));
+    instruction.operands = {closure};
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+void FunctionBuilder::emitThreadJoin(Operand thread, SourceLocation location) {
+    Instruction& instruction = append(Opcode::ThreadJoin, std::move(location));
+    instruction.operands = {thread};
+}
+
+TempId FunctionBuilder::emitThreadIsAlive(Operand thread, SourceLocation location) {
+    Instruction& instruction = append(Opcode::ThreadIsAlive, std::move(location));
+    instruction.operands = {thread};
+    setResult(instruction, types().boolType());
+    return instruction.result;
+}
+
+TempId FunctionBuilder::emitChannelCreate(Operand capacity, std::uint32_t resultType, SourceLocation location) {
+    Instruction& instruction = append(Opcode::ChannelCreate, std::move(location));
+    instruction.operands = {capacity};
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+void FunctionBuilder::emitChannelSend(Operand channel, Operand value, SourceLocation location) {
+    Instruction& instruction = append(Opcode::ChannelSend, std::move(location));
+    instruction.operands = {channel, value};
+}
+
+TempId FunctionBuilder::emitChannelReceive(Operand channel, std::uint32_t resultType, SourceLocation location) {
+    Instruction& instruction = append(Opcode::ChannelReceive, std::move(location));
+    instruction.operands = {channel};
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+TempId FunctionBuilder::emitChannelSize(Operand channel, SourceLocation location) {
+    Instruction& instruction = append(Opcode::ChannelSize, std::move(location));
+    instruction.operands = {channel};
+    setResult(instruction, types().intType());
+    return instruction.result;
+}
+
+TempId FunctionBuilder::emitChannelSendAsync(Operand channel, Operand value, std::uint32_t resultType,
+                                             SourceLocation location) {
+    Instruction& instruction = append(Opcode::ChannelSendAsync, std::move(location));
+    instruction.operands = {channel, value};
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+TempId FunctionBuilder::emitChannelReceiveAsync(Operand channel, std::uint32_t resultType,
+                                                SourceLocation location) {
+    Instruction& instruction = append(Opcode::ChannelReceiveAsync, std::move(location));
+    instruction.operands = {channel};
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+TempId FunctionBuilder::emitMutexWithLock(Operand mutex, Operand closure, std::uint32_t resultType,
+                                          SourceLocation location) {
+    Instruction& instruction = append(Opcode::MutexWithLock, std::move(location));
+    instruction.operands = {mutex, closure};
+    if (resultType == 0) return kNoTemp;
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+TempId FunctionBuilder::emitRwLockWithRead(Operand lock, Operand closure, std::uint32_t resultType,
+                                           SourceLocation location) {
+    Instruction& instruction = append(Opcode::RwLockWithRead, std::move(location));
+    instruction.operands = {lock, closure};
+    if (resultType == 0) return kNoTemp;
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+TempId FunctionBuilder::emitRwLockWithWrite(Operand lock, Operand closure, std::uint32_t resultType,
+                                            SourceLocation location) {
+    Instruction& instruction = append(Opcode::RwLockWithWrite, std::move(location));
+    instruction.operands = {lock, closure};
+    if (resultType == 0) return kNoTemp;
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+TempId FunctionBuilder::emitAtomicLoad(Operand atomic, SourceLocation location) {
+    Instruction& instruction = append(Opcode::AtomicLoad, std::move(location));
+    instruction.operands = {atomic};
+    setResult(instruction, types().intType());
+    return instruction.result;
+}
+
+void FunctionBuilder::emitAtomicStore(Operand atomic, Operand value, SourceLocation location) {
+    Instruction& instruction = append(Opcode::AtomicStore, std::move(location));
+    instruction.operands = {atomic, value};
+}
+
+TempId FunctionBuilder::emitAtomicAdd(Operand atomic, Operand delta, SourceLocation location) {
+    Instruction& instruction = append(Opcode::AtomicAdd, std::move(location));
+    instruction.operands = {atomic, delta};
+    setResult(instruction, types().intType());
+    return instruction.result;
+}
+
+TempId FunctionBuilder::emitAtomicLoadBool(Operand atomic, SourceLocation location) {
+    Instruction& instruction = append(Opcode::AtomicLoadBool, std::move(location));
+    instruction.operands = {atomic};
+    setResult(instruction, types().boolType());
+    return instruction.result;
+}
+
+void FunctionBuilder::emitAtomicStoreBool(Operand atomic, Operand value, SourceLocation location) {
+    Instruction& instruction = append(Opcode::AtomicStoreBool, std::move(location));
+    instruction.operands = {atomic, value};
+}
+
+TempId FunctionBuilder::emitAtomicLoadDouble(Operand atomic, SourceLocation location) {
+    Instruction& instruction = append(Opcode::AtomicLoadDouble, std::move(location));
+    instruction.operands = {atomic};
+    setResult(instruction, types().doubleType());
+    return instruction.result;
+}
+
+void FunctionBuilder::emitAtomicStoreDouble(Operand atomic, Operand value, SourceLocation location) {
+    Instruction& instruction = append(Opcode::AtomicStoreDouble, std::move(location));
+    instruction.operands = {atomic, value};
+}
+
+TempId FunctionBuilder::emitAtomicLoadRef(Operand atomic, std::uint32_t resultType, SourceLocation location) {
+    Instruction& instruction = append(Opcode::AtomicLoadRef, std::move(location));
+    instruction.operands = {atomic};
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+void FunctionBuilder::emitAtomicStoreRef(Operand atomic, Operand value, SourceLocation location) {
+    Instruction& instruction = append(Opcode::AtomicStoreRef, std::move(location));
+    instruction.operands = {atomic, value};
+}
+
+void FunctionBuilder::emitSemaphoreAcquire(Operand semaphore, SourceLocation location) {
+    Instruction& instruction = append(Opcode::SemaphoreAcquire, std::move(location));
+    instruction.operands = {semaphore};
+}
+
+void FunctionBuilder::emitSemaphoreRelease(Operand semaphore, SourceLocation location) {
+    Instruction& instruction = append(Opcode::SemaphoreRelease, std::move(location));
+    instruction.operands = {semaphore};
+}
+
+TempId FunctionBuilder::emitSemaphoreAvailable(Operand semaphore, SourceLocation location) {
+    Instruction& instruction = append(Opcode::SemaphoreAvailable, std::move(location));
+    instruction.operands = {semaphore};
+    setResult(instruction, types().intType());
+    return instruction.result;
+}
+
+void FunctionBuilder::emitSemaphoreSetPermits(Operand semaphore, Operand permits, SourceLocation location) {
+    Instruction& instruction = append(Opcode::SemaphoreSetPermits, std::move(location));
+    instruction.operands = {semaphore, permits};
+}
+
+TempId FunctionBuilder::emitSemaphoreTryAcquire(Operand semaphore, SourceLocation location) {
+    Instruction& instruction = append(Opcode::SemaphoreTryAcquire, std::move(location));
+    instruction.operands = {semaphore};
+    setResult(instruction, types().boolType());
+    return instruction.result;
+}
+
+void FunctionBuilder::emitSemaphoreReleaseMany(Operand semaphore, Operand count, SourceLocation location) {
+    Instruction& instruction = append(Opcode::SemaphoreReleaseMany, std::move(location));
+    instruction.operands = {semaphore, count};
+}
+
+void FunctionBuilder::emitConditionWait(Operand condition, SourceLocation location) {
+    Instruction& instruction = append(Opcode::ConditionWait, std::move(location));
+    instruction.operands = {condition};
+}
+
+TempId FunctionBuilder::emitConditionWaitFor(Operand condition, Operand timeoutSeconds, SourceLocation location) {
+    Instruction& instruction = append(Opcode::ConditionWaitFor, std::move(location));
+    instruction.operands = {condition, timeoutSeconds};
+    setResult(instruction, types().boolType());
+    return instruction.result;
+}
+
+void FunctionBuilder::emitConditionNotifyOne(Operand condition, SourceLocation location) {
+    Instruction& instruction = append(Opcode::ConditionNotifyOne, std::move(location));
+    instruction.operands = {condition};
+}
+
+void FunctionBuilder::emitConditionNotifyAll(Operand condition, SourceLocation location) {
+    Instruction& instruction = append(Opcode::ConditionNotifyAll, std::move(location));
+    instruction.operands = {condition};
+}
+
+TempId FunctionBuilder::emitSharedCreate(Operand value, std::uint32_t resultType, SourceLocation location) {
+    Instruction& instruction = append(Opcode::SharedCreate, std::move(location));
+    instruction.operands = {value};
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+TempId FunctionBuilder::emitSharedGet(Operand shared, std::uint32_t resultType, SourceLocation location) {
+    Instruction& instruction = append(Opcode::SharedGet, std::move(location));
+    instruction.operands = {shared};
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+void FunctionBuilder::emitSharedSet(Operand shared, Operand value, SourceLocation location) {
+    Instruction& instruction = append(Opcode::SharedSet, std::move(location));
+    instruction.operands = {shared, value};
+}
+
+TempId FunctionBuilder::emitSharedWithLock(Operand shared, Operand closure, std::uint32_t resultType,
+                                           SourceLocation location) {
+    Instruction& instruction = append(Opcode::SharedWithLock, std::move(location));
+    instruction.operands = {shared, closure};
+    if (resultType == 0) return kNoTemp;
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+TempId FunctionBuilder::emitFfiCall(const std::string& library, const std::string& symbol,
+                                    std::vector<Operand> arguments, std::vector<NativeAbiTag> paramTags,
+                                    NativeAbiTag returnTag, std::uint32_t resultType,
+                                    std::vector<NativeOwnership> paramOwnership,
+                                    NativeOwnership returnOwnership, SourceLocation location) {
+    Instruction& instruction = append(Opcode::FfiCall, std::move(location));
+    instruction.operands = std::move(arguments);
+    instruction.target.ffiLibrary = library;
+    instruction.target.ffiSymbol = symbol;
+    instruction.target.ffiParamTags = std::move(paramTags);
+    instruction.target.ffiReturnTag = returnTag;
+    instruction.target.ffiParamOwnership = std::move(paramOwnership);
+    instruction.target.ffiReturnOwnership = returnOwnership;
+    describeCall(instruction, instruction.operands, resultType, 0);
+    if (resultType == 0) return kNoTemp;
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+TempId FunctionBuilder::emitHandleBorrow(Operand handle, std::uint32_t resultType, SourceLocation location) {
+    Instruction& instruction = append(Opcode::HandleBorrow, std::move(location));
+    instruction.operands = {handle};
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+TempId FunctionBuilder::emitHandleConsume(Operand handle, std::uint32_t resultType, SourceLocation location) {
+    Instruction& instruction = append(Opcode::HandleConsume, std::move(location));
+    instruction.operands = {handle};
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+void FunctionBuilder::emitHandleClose(Operand handle, SourceLocation location) {
+    Instruction& instruction = append(Opcode::HandleClose, std::move(location));
+    instruction.operands = {handle};
+}
+
+TempId FunctionBuilder::emitCallbackRegister(Operand closure, std::uint32_t resultType, SourceLocation location) {
+    Instruction& instruction = append(Opcode::CallbackRegister, std::move(location));
+    instruction.operands = {closure};
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+TempId FunctionBuilder::emitCallbackInvoke(Operand callback, std::vector<Operand> arguments,
+                                           std::uint32_t resultType, SourceLocation location) {
+    Instruction& instruction = append(Opcode::CallbackInvoke, std::move(location));
+    instruction.operands.push_back(callback);
+    for (auto& argument : arguments) instruction.operands.push_back(std::move(argument));
+    describeCall(instruction, instruction.operands, resultType, 1);
+    if (resultType == 0) return kNoTemp;
+    setResult(instruction, resultType);
+    return instruction.result;
+}
+
+void FunctionBuilder::emitCallbackClose(Operand callback, SourceLocation location) {
+    Instruction& instruction = append(Opcode::CallbackClose, std::move(location));
+    instruction.operands = {callback};
 }
 
 TempId FunctionBuilder::emitMove(SlotId slot, SourceLocation location) {
