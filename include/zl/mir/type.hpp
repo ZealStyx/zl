@@ -82,6 +82,53 @@ enum class TypeKind : std::uint8_t {
     // analysis did not resolve a type, not that the value has some type we
     // have not named yet.
     Unknown,
+    // --- concurrency: threads and synchronisation ---------------------------
+    // Each of these is a dedicated kind (not a plain Object) so a backend can
+    // see "this value is a thread handle / channel / lock" without
+    // string-matching class names. They still have a ZL class spelling
+    // (`Thread`, `Channel`, `Mutex`, ...) as an Object kind carrying that
+    // name; the predicates below accept both spellings the same way
+    // isCollectionType accepts `list<T>` and `List<T>`. All are GC-managed
+    // objects with internally-guarded native state (see ObjectBox in
+    // value.hpp); sharing the handle is the intended use.
+    //
+    // `Thread` is an explicit OS-thread handle (`Thread.start` / `join`).
+    // It is NOT itself a thread-safe capture: capturing a Thread across a
+    // thread boundary is rejected, matching isThreadSafeClassName.
+    Thread,
+    // `Channel`: a bounded, thread-safe queue. `arguments[0]` is the element
+    // type when known, `unknown` for the untyped channels the current
+    // `Channel.create` produces (`Channel.send` takes `unknown`,
+    // `Channel.receive` returns `unknown`).
+    Channel,
+    // `Mutex`, `RwLock`, `Atomic`, `Semaphore`, `Condition`: the runtime's
+    // own synchronisation primitives. No type arguments.
+    Mutex,
+    RwLock,
+    Atomic,
+    Semaphore,
+    Condition,
+    // --- FFI: native resources ----------------------------------------------
+    // Values that only exist at the native boundary. They have no ZL class
+    // spelling and no GC identity: a handle is an opaque registry token
+    // (NativeHandleRef), views are borrowed byte ranges tied to an owner's
+    // lifetime, and a callback is a registry token with a lease. They are
+    // reference-like for nullability (an invalid handle is a runtime error,
+    // like null) but NOT collectable: ownership is deterministic
+    // (NativeResourceOwner / Borrow / lease), never traced.
+    //
+    // `NativeHandle`: an opaque `NativeHandleRef` token. No arguments.
+    NativeHandle,
+    // `NativeBuffer`: a borrowed `NativeBufferView` (data + size). Valid only
+    // while the owning resource is alive and the synchronous call is active.
+    NativeBuffer,
+    // `NativeStruct`: a borrowed `NativeStructView` (data + size +
+    // alignment). Same lifetime as NativeBuffer. There are deliberately no
+    // typed field-by-field struct schemas yet; a view is untyped bytes.
+    NativeStruct,
+    // `NativeCallback`: a `NativeCallbackRef` token. `signature` carries the
+    // callable shape when known, exactly like Function.
+    NativeCallback,
 };
 
 [[nodiscard]] const char* typeName(TypeKind kind) noexcept;
@@ -89,14 +136,19 @@ enum class TypeKind : std::uint8_t {
 // True for the value-carrying primitive types: bool, int, double, string.
 [[nodiscard]] bool isPrimitiveKind(TypeKind kind) noexcept;
 // True for types that hold a heap reference and are therefore nullable in ZL:
-// collections, objects, tasks, shared cells, options, results, functions.
-// Primitives and Nil are not.
+// collections, objects, tasks, shared cells, options, results, functions,
+// threads, channels, synchronisation primitives, and native resources.
+// Primitives and Nil are not. Note this is NOT the same question as
+// isCollectableKind: native handles/views/callbacks are reference-like for
+// nullability but deterministically owned, never traced.
 [[nodiscard]] bool isReferenceKind(TypeKind kind) noexcept;
 // True for the numeric types ZL's arithmetic and comparison rules accept.
 [[nodiscard]] bool isNumericKind(TypeKind kind) noexcept;
 // True when a value of this type is managed by the collector rather than by
 // explicit ownership. Mirrors which ZL types `owned`/`borrow` may be applied
-// to.
+// to. Threads, channels and synchronisation primitives are collectable (GC
+// objects with native state); native handles/views/callbacks are NOT - they
+// are deterministically owned (NativeResourceOwner / Borrow / lease).
 [[nodiscard]] bool isCollectableKind(TypeKind kind) noexcept;
 // True when `null` is a legal value of this kind. In ZL every reference type is
 // nullable, `string` is nullable, and no numeric or bool is, so nullability is a
@@ -130,7 +182,9 @@ struct FunctionSignature {
 // what makes `id` a stable identity and keeps the rendering cache consistent.
 struct Type {
     TypeKind kind{TypeKind::Unknown};
-    // Declaring/base name for Object/Task/Shared/TypeParam; empty otherwise.
+    // Declaring/base name for Object/Task/Shared/Thread/Channel/Mutex/RwLock/
+    // Atomic/Semaphore/Condition/NativeHandle/NativeBuffer/NativeStruct/
+    // NativeCallback/TypeParam; empty otherwise.
     std::string name;
     // Generic arguments (Object/Task/Shared), element or key/value types
     // (List/Map/Set/Array), or union members (Union). TypeIds.
@@ -160,6 +214,74 @@ struct Type {
 // spellings, or the two forms quietly diverge - indexing may accept `List<T>`
 // while construction rejects it, which is what this predicate exists to stop.
 [[nodiscard]] bool isCollectionType(const Type& type) noexcept;
+
+// ---------------------------------------------------------------------------
+// Concurrency and native-resource types: dual spellings
+// ---------------------------------------------------------------------------
+//
+// The runtime synchronisation primitives (`Thread`, `Channel`, `Mutex`,
+// `RwLock`, `Atomic`, `Semaphore`, `Condition`) each have a dedicated kind
+// AND a ZL class spelling (Object carrying that name), because lowering may
+// meet either: a `Thread.start` result typed by the checker as OBJECT
+// "Thread", or a `thread_start` result typed directly as the Thread kind.
+// Every rule about "is this a mutex" must accept both, or the two spellings
+// quietly diverge the way collections once did.
+//
+// Native resources (`NativeHandle`, `NativeBuffer`, `NativeStruct`,
+// `NativeCallback`) have no ZL class spelling: they only appear as their own
+// kinds, produced and consumed at the FFI boundary.
+
+// True for `Thread` (the kind) and for an Object named "Thread".
+[[nodiscard]] bool isThreadType(const Type& type) noexcept;
+// True for `Channel` (the kind, with element type in arguments[0]) and for an
+// Object named "Channel".
+[[nodiscard]] bool isChannelType(const Type& type) noexcept;
+// True for `Mutex` and for an Object named "Mutex".
+[[nodiscard]] bool isMutexType(const Type& type) noexcept;
+// True for `RwLock` and for an Object named "RwLock".
+[[nodiscard]] bool isRwLockType(const Type& type) noexcept;
+// True for `Atomic` and for an Object named "Atomic".
+[[nodiscard]] bool isAtomicType(const Type& type) noexcept;
+// True for `Semaphore` and for an Object named "Semaphore".
+[[nodiscard]] bool isSemaphoreType(const Type& type) noexcept;
+// True for `Condition` and for an Object named "Condition".
+[[nodiscard]] bool isConditionType(const Type& type) noexcept;
+// True for `Shared<T>` (the kind) and for `Shared`/`Shared<T>` objects.
+[[nodiscard]] bool isSharedType(const Type& type) noexcept;
+// True for `Task<T>` (the kind) and for `Task`/`Task<T>` objects.
+[[nodiscard]] bool isTaskType(const Type& type) noexcept;
+
+// True for the values that may cross a thread boundary: `Shared<T>` plus the
+// runtime's own synchronisation primitives (`Atomic`, `Mutex`, `RwLock`,
+// `Semaphore`, `Channel`, `Condition`), each in either spelling. This is the
+// MIR spelling of isThreadSafeClassName / capturedValueCrossesThreadBoundary:
+// `Thread` itself is NOT included, and neither are primitives, plain objects,
+// or func values. A closure that carries anything else across `Thread.start`
+// or `Task.spawn` is a compile error at the source level and a verifier error
+// here; the runtime gate (capturesAreExplicitlyShared) is the backstop.
+[[nodiscard]] bool isThreadSafeCaptureType(const Type& type) noexcept;
+
+// True for any synchronisation primitive: Shared, Atomic, Mutex, RwLock,
+// Semaphore, Channel, Condition (either spelling). Thread is NOT included:
+// it is a handle to a thread, not a guard for shared state.
+[[nodiscard]] bool isSyncPrimitiveType(const Type& type) noexcept;
+
+// True for the FFI resource kinds. These have no Object spelling.
+[[nodiscard]] bool isNativeHandleType(const Type& type) noexcept;
+[[nodiscard]] bool isNativeBufferType(const Type& type) noexcept;
+[[nodiscard]] bool isNativeStructType(const Type& type) noexcept;
+[[nodiscard]] bool isNativeCallbackType(const Type& type) noexcept;
+// True for any of the four FFI resource kinds.
+[[nodiscard]] bool isNativeResourceType(const Type& type) noexcept;
+
+// The element type of a Channel-shaped type, or 0 for anything else / a
+// malformed shape. Untyped channels (the current `Channel.create`) carry
+// `unknown` здесь.
+[[nodiscard]] std::uint32_t channelElementFor(const Type& type) noexcept;
+// The payload type of a Task-shaped type, or 0 for anything else.
+[[nodiscard]] std::uint32_t taskPayloadFor(const Type& type) noexcept;
+// The payload type of a Shared-shaped type, or 0 for anything else.
+[[nodiscard]] std::uint32_t sharedPayloadFor(const Type& type) noexcept;
 
 // ---------------------------------------------------------------------------
 // Sum types: Option / Result and their class spellings
@@ -284,6 +406,20 @@ public:
     [[nodiscard]] std::uint32_t functionType(FunctionSignature signature) const;
     [[nodiscard]] std::uint32_t unionType(std::vector<std::uint32_t> members) const;
     [[nodiscard]] std::uint32_t typeParam(const std::string& name) const;
+    // Concurrency and FFI types. Each sets the kind's declaring `name` (see
+    // taskType) so consumers asking "which class is this?" get an answer.
+    [[nodiscard]] std::uint32_t threadType() const;
+    [[nodiscard]] std::uint32_t channelType(std::uint32_t element) const;
+    [[nodiscard]] std::uint32_t mutexType() const;
+    [[nodiscard]] std::uint32_t rwLockType() const;
+    [[nodiscard]] std::uint32_t atomicType() const;
+    [[nodiscard]] std::uint32_t semaphoreType() const;
+    [[nodiscard]] std::uint32_t conditionType() const;
+    [[nodiscard]] std::uint32_t nativeHandleType() const;
+    [[nodiscard]] std::uint32_t nativeBufferType() const;
+    [[nodiscard]] std::uint32_t nativeStructType() const;
+    [[nodiscard]] std::uint32_t nativeCallbackType(FunctionSignature signature) const;
+    [[nodiscard]] std::uint32_t nativeCallbackType() const;
 
     // Canonical rendering, e.g. "int", "List<int>", "map<string,int>",
     // "func(int,string):bool", "int|string", "T". Cached on first use. The

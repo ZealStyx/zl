@@ -35,6 +35,23 @@ bool opcodeReadsSlot(Opcode opcode) {
     }
 }
 
+// One instruction's backward liveness step, shared by the block transfer and
+// the suspension-point refinement so the two cannot disagree about what an
+// instruction reads or writes.
+void applyLiveStep(const Instruction& instruction, LivenessFact& live) {
+    if (instruction.result != kNoTemp) live.values.erase(tempValue(instruction.result));
+    forEachInstructionUse(instruction, [&](const Operand& operand) {
+        const ValueId value = valueOf(operand);
+        if (value.valid()) live.values.insert(value);
+    });
+    if (instruction.slot != 0) {
+        // Kill before gen, so an opcode that both reads and writes the cell
+        // (Move/Drop/EndBorrow) leaves it live on entry rather than dead.
+        if (opcodeWritesSlot(instruction.opcode)) live.slots.erase(instruction.slot);
+        if (opcodeReadsSlot(instruction.opcode)) live.slots.insert(instruction.slot);
+    }
+}
+
 std::optional<Constant> makeInt(std::int64_t value) {
     Constant c;
     c.kind = ConstKind::Int;
@@ -171,19 +188,7 @@ struct LivenessTransfer {
         });
 
         for (auto it = block.instructions.rbegin(); it != block.instructions.rend(); ++it) {
-            const Instruction& instruction = *it;
-            if (instruction.result != kNoTemp) live.values.erase(tempValue(instruction.result));
-            forEachInstructionUse(instruction, [&](const Operand& operand) {
-                const ValueId value = valueOf(operand);
-                if (value.valid()) live.values.insert(value);
-            });
-            if (instruction.slot != 0) {
-                // Kill before gen, so an opcode that both reads and writes the
-                // cell (Move/Drop/EndBorrow) leaves it live on entry rather
-                // than dead.
-                if (opcodeWritesSlot(instruction.opcode)) live.slots.erase(instruction.slot);
-                if (opcodeReadsSlot(instruction.opcode)) live.slots.insert(instruction.slot);
-            }
+            applyLiveStep(*it, live);
         }
 
         // Block parameters are established on entry, so they are not live
@@ -268,6 +273,70 @@ bool LivenessAnalysis::isSlotLiveIn(BlockId block, SlotId slot) const {
 }
 bool LivenessAnalysis::isValueLiveIn(BlockId block, ValueId value) const {
     return liveValuesIn(block).count(value) != 0;
+}
+
+// ---------------------------------------------------------------------------
+// SuspensionLiveness
+// ---------------------------------------------------------------------------
+
+SuspensionLiveness::SuspensionLiveness(const Function& function) {
+    LivenessAnalysis liveness(function);
+    DefUseInfo defUse(function);
+    for (const auto& block : function.blocks) {
+        for (std::size_t i = 0; i < block.instructions.size(); ++i) {
+            const Instruction& await = block.instructions[i];
+            if (await.opcode != Opcode::Await) continue;
+            // Live immediately after the await: the block's live-out fact plus
+            // the terminator's reads, walked back over the instructions that
+            // follow the await.
+            LivenessFact live;
+            live.slots = liveness.liveSlotsOut(block.id);
+            live.values = liveness.liveValuesOut(block.id);
+            forEachTerminatorUse(block.terminator, [&](const Operand& operand) {
+                const ValueId value = valueOf(operand);
+                if (value.valid()) live.values.insert(value);
+            });
+            for (std::size_t j = block.instructions.size(); j-- > i + 1;) {
+                applyLiveStep(block.instructions[j], live);
+            }
+            // The await's own result is produced by the resumption, not
+            // preserved across the suspension.
+            if (await.result != kNoTemp) live.values.erase(tempValue(await.result));
+
+            SuspensionPoint point;
+            point.block = block.id;
+            point.instructionIndex = static_cast<long>(i);
+            for (const ValueId value : live.values) {
+                std::uint32_t type = 0;
+                if (const ValueDefinition* definition = defUse.definition(value)) {
+                    type = definition->type;
+                }
+                point.values.push_back(SuspendedValue{value, type});
+            }
+            std::sort(point.values.begin(), point.values.end(),
+                      [](const SuspendedValue& a, const SuspendedValue& b) { return a.value < b.value; });
+            for (SlotId slot : live.slots) {
+                SuspendedSlot suspended;
+                suspended.slot = slot;
+                if (const Slot* info = function.slot(slot)) {
+                    suspended.type = info->type;
+                    suspended.ownership = info->ownership;
+                    suspended.borrowSource = info->borrowSource;
+                }
+                point.slots.push_back(std::move(suspended));
+            }
+            std::sort(point.slots.begin(), point.slots.end(),
+                      [](const SuspendedSlot& a, const SuspendedSlot& b) { return a.slot < b.slot; });
+            points_.push_back(std::move(point));
+        }
+    }
+}
+
+const SuspensionPoint* SuspensionLiveness::pointAt(BlockId block, long instructionIndex) const {
+    for (const auto& point : points_) {
+        if (point.block == block && point.instructionIndex == instructionIndex) return &point;
+    }
+    return nullptr;
 }
 
 // ---------------------------------------------------------------------------
