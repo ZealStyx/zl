@@ -1,5 +1,6 @@
 #include "zl/mir/printer.hpp"
 
+#include <algorithm>
 #include <sstream>
 
 namespace zl::mir {
@@ -94,6 +95,48 @@ std::string printInstruction(const Module& module, const Function& function, con
     }
     if (!instruction.target.nativeName.empty()) {
         out << separator() << "native '" << instruction.target.nativeName << "'";
+    }
+    if (!instruction.target.ffiSymbol.empty()) {
+        out << separator() << "ffi '";
+        if (!instruction.target.ffiLibrary.empty()) {
+            out << instruction.target.ffiLibrary << "'!'";
+        }
+        out << instruction.target.ffiSymbol << "'";
+        out << separator() << "abi (";
+        for (std::size_t i = 0; i < instruction.target.ffiParamTags.size(); ++i) {
+            if (i) out << ",";
+            out << nativeAbiTagName(instruction.target.ffiParamTags[i]);
+        }
+        out << ")->" << nativeAbiTagName(instruction.target.ffiReturnTag);
+        const auto& ownership = instruction.target.ffiParamOwnership;
+        const bool anyOwned = instruction.target.ffiReturnOwnership != NativeOwnership::None ||
+                              std::any_of(ownership.begin(), ownership.end(), [](NativeOwnership o) {
+                                  return o != NativeOwnership::None;
+                              });
+        if (anyOwned) {
+            out << separator() << "own (";
+            for (std::size_t i = 0; i < ownership.size(); ++i) {
+                if (i) out << ",";
+                out << nativeOwnershipName(ownership[i]);
+            }
+            out << ")->" << nativeOwnershipName(instruction.target.ffiReturnOwnership);
+        }
+    }
+    if (!instruction.target.nativeParamOwnership.empty() ||
+        instruction.target.nativeReturnOwnership != NativeOwnership::None) {
+        const auto& ownership = instruction.target.nativeParamOwnership;
+        const bool anyOwned = instruction.target.nativeReturnOwnership != NativeOwnership::None ||
+                              std::any_of(ownership.begin(), ownership.end(), [](NativeOwnership o) {
+                                  return o != NativeOwnership::None;
+                              });
+        if (anyOwned) {
+            out << separator() << "native-own (";
+            for (std::size_t i = 0; i < ownership.size(); ++i) {
+                if (i) out << ",";
+                out << nativeOwnershipName(ownership[i]);
+            }
+            out << ")->" << nativeOwnershipName(instruction.target.nativeReturnOwnership);
+        }
     }
     if (!instruction.name.empty()) {
         out << separator() << "'" << instruction.name << "'";

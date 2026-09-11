@@ -37,6 +37,15 @@ std::string reportText(const zl::mir::VerificationReport& report) {
     return report.describe();
 }
 
+// True when the report contains a warning whose message includes `needle`.
+bool hasWarning(const zl::mir::VerificationReport& report, const std::string& needle) {
+    for (const auto& diagnostic : report.diagnostics) {
+        if (diagnostic.severity != zl::mir::DiagnosticSeverity::Warning) continue;
+        if (diagnostic.message.find(needle) != std::string::npos) return true;
+    }
+    return false;
+}
+
 using namespace zl::mir;
 
 // Constants are built field-by-field rather than by aggregate initialisation,
@@ -1288,6 +1297,782 @@ void testArraySizeIsOptional() {
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Concurrency and native-boundary operations
+// ---------------------------------------------------------------------------
+
+// Declares a zero-argument closure body returning `returnType`. A capture is
+// recorded as both a capture and the leading parameter, the way lowering
+// represents captures, so make_closure's arity and capture checks see the
+// same shape a real closure has.
+FunctionId declareClosureBody(ModuleBuilder& builder, const std::string& name, TypeId returnType,
+                              bool isAsync = false, TypeId captureType = 0,
+                              const std::string& captureName = "cap", bool captureUsesThis = false) {
+    TypeArena& types = builder.types();
+    FunctionBuilder fb = builder.addFunction(name);
+    fb.setLambda(true);
+    fb.setAsync(isAsync);
+    fb.setReturnType(returnType);
+    if (captureType != 0) {
+        (void)fb.addParameter(captureName, captureType);
+        fb.addCapture(captureName, captureType, captureUsesThis);
+    }
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    if (returnType == types.intType()) {
+        fb.emitReturn(Operand::constant(builder.constantInt(0), types.intType()));
+    } else if (returnType == types.boolType()) {
+        fb.emitReturn(Operand::constant(builder.constantBool(true), types.boolType()));
+    } else {
+        fb.emitReturn();
+    }
+    const FunctionId id = fb.function().id;
+    fb.finish();
+    return id;
+}
+
+[[nodiscard]] TypeId syncFuncType(TypeArena& types, TypeId returnType) {
+    FunctionSignature signature;
+    signature.returnType = returnType;
+    return types.functionType(signature);
+}
+
+void testConcurrencyOpcodeShapes() {
+    // Suspension, blocking, and thread-boundary predicates drive scheduling
+    // and code-motion decisions, so their exact membership is pinned here.
+    require(opcodeIsSuspension(Opcode::Await), "await is not a suspension point");
+    require(!opcodeIsSuspension(Opcode::TaskBlock), "task_block suspends; it blocks");
+    require(!opcodeIsSuspension(Opcode::ChannelReceiveAsync), "channel_receive_async suspends; it only creates");
+
+    require(opcodeIsBlocking(Opcode::TaskBlock), "task_block is not blocking");
+    require(opcodeIsBlocking(Opcode::ThreadJoin), "thread_join is not blocking");
+    require(opcodeIsBlocking(Opcode::ChannelSend), "channel_send is not blocking");
+    require(opcodeIsBlocking(Opcode::ChannelReceive), "channel_receive is not blocking");
+    require(opcodeIsBlocking(Opcode::MutexWithLock), "mutex_with_lock is not blocking");
+    require(opcodeIsBlocking(Opcode::SemaphoreAcquire), "semaphore_acquire is not blocking");
+    require(opcodeIsBlocking(Opcode::ConditionWait), "condition_wait is not blocking");
+    require(opcodeIsBlocking(Opcode::ConditionWaitFor), "condition_wait_for is not blocking");
+    require(!opcodeIsBlocking(Opcode::Await), "await blocks; it suspends");
+    require(!opcodeIsBlocking(Opcode::ChannelSendAsync), "channel_send_async blocks; it only creates");
+    require(!opcodeIsBlocking(Opcode::AtomicLoad), "atomic_load blocks; it is lock-free");
+
+    require(opcodeIsThreadBoundary(Opcode::TaskSpawn), "task_spawn is not a thread boundary");
+    require(opcodeIsThreadBoundary(Opcode::ThreadStart), "thread_start is not a thread boundary");
+    require(!opcodeIsThreadBoundary(Opcode::Await), "await crosses threads; it stays on the scheduler");
+
+    require(opcodeIsScopedLock(Opcode::MutexWithLock), "mutex_with_lock is not a scoped lock");
+    require(opcodeIsScopedLock(Opcode::RwLockWithRead), "rwlock_with_read is not a scoped lock");
+    require(opcodeIsScopedLock(Opcode::RwLockWithWrite), "rwlock_with_write is not a scoped lock");
+    require(opcodeIsScopedLock(Opcode::SharedWithLock), "shared_with_lock is not a scoped lock");
+    require(!opcodeIsScopedLock(Opcode::SharedGet), "shared_get is a scoped lock; it is one access");
+
+    require(opcodeIsFfi(Opcode::FfiCall), "ffi_call is not FFI");
+    require(opcodeIsFfi(Opcode::HandleBorrow), "handle_borrow is not FFI");
+    require(opcodeIsFfi(Opcode::HandleConsume), "handle_consume is not FFI");
+    require(opcodeIsFfi(Opcode::HandleClose), "handle_close is not FFI");
+    require(opcodeIsFfi(Opcode::CallbackRegister), "callback_register is not FFI");
+    require(opcodeIsFfi(Opcode::CallbackInvoke), "callback_invoke is not FFI");
+    require(!opcodeIsFfi(Opcode::CallNative), "call_native is FFI; it is a VM builtin");
+
+    // Fixed-result primitives record their own type, so the builder needs no
+    // result argument and the verifier pins the spelling.
+    require(opcodeShape(Opcode::AtomicLoad).operandCount == 1, "atomic_load takes no atomic operand");
+    require(opcodeShape(Opcode::TaskSpawn).operandCount == 1, "task_spawn takes no closure operand");
+    require(opcodeShape(Opcode::MutexWithLock).operandCount == 2, "mutex_with_lock is not binary");
+    require(opcodeShape(Opcode::ChannelReceiveAsync).optionalResult == false,
+            "channel_receive_async has an optional result; it always produces its task");
+    require(opcodeShape(Opcode::Await).optionalResult, "await lost its optional result");
+
+    TypeArena types;
+    require(types.render(types.taskType(types.intType())) == "Task<int>", "Task rendering was wrong");
+    require(types.render(types.threadType()) == "Thread", "Thread rendering was wrong");
+    require(types.render(types.channelType(types.unknownType())) == "Channel", "Channel rendering was wrong");
+    require(types.render(types.mutexType()) == "Mutex", "Mutex rendering was wrong");
+    require(types.render(types.rwLockType()) == "RwLock", "RwLock rendering was wrong");
+    require(types.render(types.atomicType()) == "Atomic", "Atomic rendering was wrong");
+    require(types.render(types.semaphoreType()) == "Semaphore", "Semaphore rendering was wrong");
+    require(types.render(types.conditionType()) == "Condition", "Condition rendering was wrong");
+    require(types.render(types.sharedType(types.stringType())) == "Shared<string>",
+            "Shared rendering was wrong");
+    std::cout << "mir concurrency opcode shapes: PASS\n";
+}
+
+void testTaskSpawnAcceptsShareableClosure() {
+    ModuleBuilder builder("spawnok");
+    TypeArena& types = builder.types();
+    const TypeId sharedInt = types.sharedType(types.intType());
+    const FunctionId body = declareClosureBody(builder, "Spawn.body()", types.intType(), false, sharedInt);
+    const FunctionId voidBody = declareClosureBody(builder, "Spawn.voidBody()", types.voidType());
+
+    FunctionBuilder fb = builder.addFunction("Spawn.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const ParamId cell = fb.addParameter("cell", sharedInt);
+    const TypeId funcType = syncFuncType(types, types.intType());
+    const TempId closure =
+        fb.emitMakeClosure(body, {fb.parameterOperand(cell)}, funcType);
+    (void)fb.emitTaskSpawn(Operand::temp(closure, funcType), types.taskType(types.intType()));
+    const TypeId voidFuncType = syncFuncType(types, types.voidType());
+    const TempId voidClosure = fb.emitMakeClosure(voidBody, {}, voidFuncType);
+    (void)fb.emitTaskSpawn(Operand::temp(voidClosure, voidFuncType), types.taskType(types.voidType()));
+    fb.emitReturn();
+    fb.finish();
+
+    const auto report = verifyModule(builder.take());
+    require(report.ok(), "task_spawn of a shareable closure was rejected:\n" + reportText(report));
+    std::cout << "mir verifier task spawn accepts: PASS\n";
+}
+
+void testTaskSpawnRejectsAsyncClosure() {
+    ModuleBuilder builder("spawnasync");
+    TypeArena& types = builder.types();
+    const FunctionId body = declareClosureBody(builder, "Spawn.body()", types.intType(), /*isAsync=*/true);
+
+    FunctionBuilder fb = builder.addFunction("Spawn.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    FunctionSignature signature;
+    signature.returnType = types.intType();
+    signature.isAsync = true;
+    const TypeId funcType = types.functionType(signature);
+    const TempId closure = fb.emitMakeClosure(body, {}, funcType);
+    (void)fb.emitTaskSpawn(Operand::temp(closure, funcType), types.taskType(types.intType()));
+    fb.emitReturn();
+    fb.finish();
+
+    const auto report = verifyModule(builder.take());
+    require(!report.ok(), "task_spawn of an async closure was accepted");
+    require(hasError(report, "must be synchronous"), "the async-closure error was not reported:\n" +
+                                                        reportText(report));
+    std::cout << "mir verifier task spawn rejects async: PASS\n";
+}
+
+void testTaskSpawnRejectsUnshareableCapture() {
+    ModuleBuilder builder("spawncapture");
+    TypeArena& types = builder.types();
+    const FunctionId body =
+        declareClosureBody(builder, "Spawn.body()", types.voidType(), false, types.intType());
+
+    FunctionBuilder fb = builder.addFunction("Spawn.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const ParamId count = fb.addParameter("count", types.intType());
+    const TypeId funcType = syncFuncType(types, types.voidType());
+    const TempId closure =
+        fb.emitMakeClosure(body, {fb.parameterOperand(count)}, funcType);
+    (void)fb.emitTaskSpawn(Operand::temp(closure, funcType), types.taskType(types.voidType()));
+    fb.emitReturn();
+    fb.finish();
+
+    const auto report = verifyModule(builder.take());
+    require(!report.ok(), "task_spawn capturing an int was accepted");
+    require(hasError(report, "may cross a thread boundary"),
+            "the confinement error was not reported:\n" + reportText(report));
+    std::cout << "mir verifier task spawn rejects capture: PASS\n";
+}
+
+void testTaskSpawnRejectsNonTaskResult() {
+    ModuleBuilder builder("spawnresult");
+    TypeArena& types = builder.types();
+    const FunctionId body = declareClosureBody(builder, "Spawn.body()", types.intType());
+
+    FunctionBuilder fb = builder.addFunction("Spawn.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const TypeId funcType = syncFuncType(types, types.intType());
+    const TempId closure = fb.emitMakeClosure(body, {}, funcType);
+    (void)fb.emitTaskSpawn(Operand::temp(closure, funcType), types.intType());
+    fb.emitReturn();
+    fb.finish();
+
+    Module module = builder.take();
+    const auto report = verifyModule(module);
+    require(!report.ok(), "task_spawn producing int was accepted");
+    require(hasError(report, "must produce Task<T>"), "the non-task error was not reported:\n" +
+                                                          reportText(report));
+
+    // A payload mismatch is the same class of error through a different rule.
+    module.functions[1].blocks[0].instructions[1].resultType = module.types.taskType(types.stringType());
+    const auto mismatchReport = verifyModule(module);
+    require(!mismatchReport.ok(), "task_spawn with a mismatched payload was accepted");
+    require(hasError(mismatchReport, "produces Task<string>"),
+            "the payload-mismatch error was not reported:\n" + reportText(mismatchReport));
+    std::cout << "mir verifier task spawn result: PASS\n";
+}
+
+void testTaskBlockRules() {
+    ModuleBuilder builder("blockok");
+    TypeArena& types = builder.types();
+    FunctionBuilder fb = builder.addFunction("Block.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const TypeId intTask = types.taskType(types.intType());
+    const TypeId voidTask = types.taskType(types.voidType());
+    const ParamId work = fb.addParameter("work", intTask);
+    const ParamId done = fb.addParameter("done", voidTask);
+    (void)fb.emitTaskBlock(fb.parameterOperand(work), types.intType());
+    (void)fb.emitTaskBlock(fb.parameterOperand(done), 0);
+    (void)fb.emitTaskBlock(fb.parameterOperand(done), types.nilType());
+    fb.emitReturn();
+    fb.finish();
+    const auto report = verifyModule(builder.take());
+    require(report.ok(), "well-formed task_block was rejected:\n" + reportText(report));
+
+    // Blocking in async code is await's job.
+    ModuleBuilder asyncBuilder("blockasync");
+    TypeArena& atypes = asyncBuilder.types();
+    FunctionBuilder afb = asyncBuilder.addFunction("Block.main()");
+    afb.setAsync(true);
+    afb.setReturnType(atypes.voidType());
+    const BlockId aentry = afb.addBlock();
+    afb.setCurrentBlock(aentry);
+    const ParamId awork = afb.addParameter("work", atypes.taskType(atypes.intType()));
+    (void)afb.emitTaskBlock(afb.parameterOperand(awork), atypes.intType());
+    afb.emitReturn();
+    afb.finish();
+    const auto asyncReport = verifyModule(asyncBuilder.take());
+    require(!asyncReport.ok(), "task_block in an async function was accepted");
+    require(hasError(asyncReport, "await the task instead"),
+            "the async-block error was not reported:\n" + reportText(asyncReport));
+
+    // Blocking on something that is not a task.
+    ModuleBuilder badBuilder("blockbad");
+    TypeArena& btypes = badBuilder.types();
+    FunctionBuilder bfb = badBuilder.addFunction("Block.main()");
+    bfb.setReturnType(btypes.voidType());
+    const BlockId bentry = bfb.addBlock();
+    bfb.setCurrentBlock(bentry);
+    const ParamId count = bfb.addParameter("count", btypes.intType());
+    (void)bfb.emitTaskBlock(bfb.parameterOperand(count), btypes.intType());
+    bfb.emitReturn();
+    bfb.finish();
+    const auto badReport = verifyModule(badBuilder.take());
+    require(!badReport.ok(), "task_block of an int was accepted");
+    require(hasError(badReport, "expects a Task"), "the non-task error was not reported:\n" +
+                                                      reportText(badReport));
+    std::cout << "mir verifier task block: PASS\n";
+}
+
+void testTaskCancelIgnoreRules() {
+    ModuleBuilder builder("cancelok");
+    TypeArena& types = builder.types();
+    FunctionBuilder fb = builder.addFunction("Cancel.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const ParamId work = fb.addParameter("work", types.taskType(types.intType()));
+    fb.emitTaskCancel(fb.parameterOperand(work));
+    fb.emitTaskIgnore(fb.parameterOperand(work));
+    fb.emitReturn();
+    fb.finish();
+    const auto report = verifyModule(builder.take());
+    require(report.ok(), "well-formed task_cancel/task_ignore was rejected:\n" + reportText(report));
+
+    ModuleBuilder badBuilder("cancelbad");
+    TypeArena& btypes = badBuilder.types();
+    FunctionBuilder bfb = badBuilder.addFunction("Cancel.main()");
+    bfb.setReturnType(btypes.voidType());
+    const BlockId bentry = bfb.addBlock();
+    bfb.setCurrentBlock(bentry);
+    const ParamId count = bfb.addParameter("count", btypes.intType());
+    bfb.emitTaskCancel(bfb.parameterOperand(count));
+    bfb.emitReturn();
+    bfb.finish();
+    const auto badReport = verifyModule(badBuilder.take());
+    require(!badReport.ok(), "task_cancel of an int was accepted");
+    require(hasError(badReport, "expects a Task"), "the non-task error was not reported:\n" +
+                                                      reportText(badReport));
+    std::cout << "mir verifier task cancel ignore: PASS\n";
+}
+
+void testThreadRules() {
+    ModuleBuilder builder("threadok");
+    TypeArena& types = builder.types();
+    const FunctionId body = declareClosureBody(builder, "Worker.body()", types.intType());
+
+    FunctionBuilder fb = builder.addFunction("Worker.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const TypeId funcType = syncFuncType(types, types.intType());
+    const TempId closure = fb.emitMakeClosure(body, {}, funcType);
+    const TempId thread =
+        fb.emitThreadStart(Operand::temp(closure, funcType), types.threadType());
+    fb.emitThreadJoin(Operand::temp(thread, types.threadType()));
+    (void)fb.emitThreadIsAlive(Operand::temp(thread, types.threadType()));
+    fb.emitReturn();
+    fb.finish();
+    Module module = builder.take();
+    const auto report = verifyModule(module);
+    require(report.ok(), "well-formed thread start/join/is_alive was rejected:\n" + reportText(report));
+
+    // thread_is_alive always answers bool.
+    Module mismatch = module;
+    for (auto& instruction : mismatch.functions[1].blocks[0].instructions) {
+        if (instruction.opcode == Opcode::ThreadIsAlive) instruction.resultType = mismatch.types.intType();
+    }
+    const auto mismatchReport = verifyModule(mismatch);
+    require(!mismatchReport.ok(), "thread_is_alive producing int was accepted");
+    require(hasError(mismatchReport, "must produce bool"),
+            "the result-type error was not reported:\n" + reportText(mismatchReport));
+
+    // Joining something that is not a thread.
+    ModuleBuilder badBuilder("threadbad");
+    TypeArena& btypes = badBuilder.types();
+    FunctionBuilder bfb = badBuilder.addFunction("Worker.main()");
+    bfb.setReturnType(btypes.voidType());
+    const BlockId bentry = bfb.addBlock();
+    bfb.setCurrentBlock(bentry);
+    const ParamId count = bfb.addParameter("count", btypes.intType());
+    bfb.emitThreadJoin(bfb.parameterOperand(count));
+    bfb.emitReturn();
+    bfb.finish();
+    const auto badReport = verifyModule(badBuilder.take());
+    require(!badReport.ok(), "thread_join of an int was accepted");
+    require(hasError(badReport, "expects a Thread"), "the non-thread error was not reported:\n" +
+                                                        reportText(badReport));
+    std::cout << "mir verifier threads: PASS\n";
+}
+
+void testChannelRules() {
+    ModuleBuilder builder("chanok");
+    TypeArena& types = builder.types();
+    FunctionBuilder fb = builder.addFunction("Chan.main()");
+    fb.setReturnType(types.voidType());
+    fb.setAsync(true);
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const TypeId channel = types.channelType(types.unknownType());
+    const TempId handle = fb.emitChannelCreate(
+        Operand::constant(builder.constantInt(4), types.intType()), channel);
+    (void)fb.emitChannelSize(Operand::temp(handle, channel));
+    fb.emitChannelSend(Operand::temp(handle, channel),
+                       Operand::constant(builder.constantInt(1), types.intType()));
+    (void)fb.emitChannelReceive(Operand::temp(handle, channel), types.unknownType());
+    (void)fb.emitChannelSendAsync(Operand::temp(handle, channel),
+                                  Operand::constant(builder.constantInt(2), types.intType()),
+                                  types.taskType(types.voidType()));
+    const TempId pending =
+        fb.emitChannelReceiveAsync(Operand::temp(handle, channel), types.taskType(types.unknownType()));
+    (void)fb.emitAwait(Operand::temp(pending, types.taskType(types.unknownType())), types.unknownType());
+    fb.emitReturn();
+    fb.finish();
+    Module module = builder.take();
+    const auto report = verifyModule(module);
+    require(report.ok(), "well-formed channel operations were rejected:\n" + reportText(report));
+
+    // A string capacity is not a capacity.
+    Module badCapacity = module;
+    badCapacity.functions[0].blocks[0].instructions[0].operands[0] =
+        Operand::constant(0, badCapacity.types.stringType());
+    const auto capacityReport = verifyModule(badCapacity);
+    require(!capacityReport.ok(), "channel_create with a string capacity was accepted");
+    require(hasError(capacityReport, "must be int"), "the capacity error was not reported:\n" +
+                                                        reportText(capacityReport));
+
+    // Receiving into a non-task future.
+    Module badFuture = module;
+    for (auto& instruction : badFuture.functions[0].blocks[0].instructions) {
+        if (instruction.opcode == Opcode::ChannelReceiveAsync) instruction.resultType = badFuture.types.intType();
+    }
+    const auto futureReport = verifyModule(badFuture);
+    require(!futureReport.ok(), "channel_receive_async producing int was accepted");
+    require(hasError(futureReport, "must produce a Task"), "the future error was not reported:\n" +
+                                                               reportText(futureReport));
+    std::cout << "mir verifier channels: PASS\n";
+}
+
+void testScopedLockRules() {
+    ModuleBuilder builder("lockok");
+    TypeArena& types = builder.types();
+    const FunctionId valueBody = declareClosureBody(builder, "Locks.value()", types.intType());
+    const FunctionId voidBody = declareClosureBody(builder, "Locks.done()", types.voidType());
+
+    FunctionBuilder fb = builder.addFunction("Locks.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const ParamId mutex = fb.addParameter("mutex", types.mutexType());
+    const ParamId lock = fb.addParameter("lock", types.rwLockType());
+    const ParamId cell = fb.addParameter("cell", types.sharedType(types.intType()));
+    const TypeId valueFunc = syncFuncType(types, types.intType());
+    const TypeId voidFunc = syncFuncType(types, types.voidType());
+    const TempId valueClosure = fb.emitMakeClosure(valueBody, {}, valueFunc);
+    const TempId voidClosure = fb.emitMakeClosure(voidBody, {}, voidFunc);
+    (void)fb.emitMutexWithLock(fb.parameterOperand(mutex), Operand::temp(valueClosure, valueFunc),
+                               types.intType());
+    (void)fb.emitMutexWithLock(fb.parameterOperand(mutex), Operand::temp(voidClosure, voidFunc), 0);
+    (void)fb.emitMutexWithLock(fb.parameterOperand(mutex), Operand::temp(voidClosure, voidFunc),
+                               types.nilType());
+    (void)fb.emitRwLockWithRead(fb.parameterOperand(lock), Operand::temp(valueClosure, valueFunc),
+                                types.intType());
+    (void)fb.emitRwLockWithWrite(fb.parameterOperand(lock), Operand::temp(voidClosure, voidFunc), 0);
+    (void)fb.emitSharedWithLock(fb.parameterOperand(cell), Operand::temp(valueClosure, valueFunc),
+                                types.intType());
+    fb.emitReturn();
+    fb.finish();
+    const auto report = verifyModule(builder.take());
+    require(report.ok(), "well-formed scoped locks were rejected:\n" + reportText(report));
+
+    // A concretely-typed temp contradicts a void body.
+    ModuleBuilder badBuilder("lockbad");
+    TypeArena& btypes = badBuilder.types();
+    const FunctionId badVoid = declareClosureBody(badBuilder, "Locks.done()", btypes.voidType());
+    FunctionBuilder bfb = badBuilder.addFunction("Locks.main()");
+    bfb.setReturnType(btypes.voidType());
+    const BlockId bentry = bfb.addBlock();
+    bfb.setCurrentBlock(bentry);
+    const ParamId bmutex = bfb.addParameter("mutex", btypes.mutexType());
+    const TypeId bvoidFunc = syncFuncType(btypes, btypes.voidType());
+    const TempId bvoidClosure = bfb.emitMakeClosure(badVoid, {}, bvoidFunc);
+    (void)bfb.emitMutexWithLock(bfb.parameterOperand(bmutex), Operand::temp(bvoidClosure, bvoidFunc),
+                                btypes.intType());
+    bfb.emitReturn();
+    bfb.finish();
+    const auto badReport = verifyModule(badBuilder.take());
+    require(!badReport.ok(), "mutex_with_lock of a void closure with an int temp was accepted");
+    require(hasError(badReport, "must not define a temp"),
+            "the void-closure error was not reported:\n" + reportText(badReport));
+
+    // A body that awaits suspends with the lock held.
+    ModuleBuilder waitBuilder("lockwait");
+    TypeArena& wtypes = waitBuilder.types();
+    FunctionBuilder wfb = waitBuilder.addFunction("Locks.body()");
+    wfb.setLambda(true);
+    wfb.setAsync(true);
+    wfb.setReturnType(wtypes.voidType());
+    const BlockId wentry = wfb.addBlock();
+    wfb.setCurrentBlock(wentry);
+    const TypeId wtask = wtypes.taskType(wtypes.voidType());
+    const TempId wpending =
+        wfb.emitTaskCreate(Operand::constant(waitBuilder.constantNil(), wtypes.nilType()), wtask);
+    (void)wfb.emitAwait(Operand::temp(wpending, wtask), 0);
+    wfb.emitReturn();
+    const FunctionId waiter = wfb.function().id;
+    wfb.finish();
+    FunctionBuilder wmain = waitBuilder.addFunction("Locks.main()");
+    wmain.setReturnType(wtypes.voidType());
+    const BlockId wmentry = wmain.addBlock();
+    wmain.setCurrentBlock(wmentry);
+    const ParamId wmutex = wmain.addParameter("mutex", wtypes.mutexType());
+    FunctionSignature wsignature;
+    wsignature.returnType = wtypes.voidType();
+    wsignature.isAsync = true;
+    const TypeId wfunc = wtypes.functionType(wsignature);
+    const TempId wclosure = wmain.emitMakeClosure(waiter, {}, wfunc);
+    (void)wmain.emitMutexWithLock(wmain.parameterOperand(wmutex), Operand::temp(wclosure, wfunc), 0);
+    wmain.emitReturn();
+    wmain.finish();
+    const auto waitReport = verifyModule(waitBuilder.take());
+    require(!waitReport.ok(), "mutex_with_lock of an awaiting closure was accepted");
+    require(hasError(waitReport, "must be synchronous"),
+            "the suspension-under-lock error was not reported:\n" + reportText(waitReport));
+    std::cout << "mir verifier scoped locks: PASS\n";
+}
+
+void testAtomicRules() {
+    ModuleBuilder builder("atomicok");
+    TypeArena& types = builder.types();
+    FunctionBuilder fb = builder.addFunction("Atomic.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const ParamId cell = fb.addParameter("cell", types.atomicType());
+    const Operand atomic = fb.parameterOperand(cell);
+    (void)fb.emitAtomicLoad(atomic);
+    fb.emitAtomicStore(atomic, Operand::constant(builder.constantInt(1), types.intType()));
+    (void)fb.emitAtomicAdd(atomic, Operand::constant(builder.constantInt(2), types.intType()));
+    (void)fb.emitAtomicLoadBool(atomic);
+    fb.emitAtomicStoreBool(atomic, Operand::constant(builder.constantBool(true), types.boolType()));
+    (void)fb.emitAtomicLoadDouble(atomic);
+    fb.emitReturn();
+    fb.finish();
+    Module module = builder.take();
+    const auto report = verifyModule(module);
+    require(report.ok(), "well-formed atomic operations were rejected:\n" + reportText(report));
+
+    // A bool stored into the int lane.
+    Module badStore = module;
+    badStore.functions[0].blocks[0].instructions[1].operands[1] =
+        Operand::constant(0, badStore.types.boolType());
+    const auto storeReport = verifyModule(badStore);
+    require(!storeReport.ok(), "atomic_store of a bool was accepted");
+    require(hasError(storeReport, "must be int"), "the lane error was not reported:\n" +
+                                                     reportText(storeReport));
+
+    // A reference loaded as an int.
+    ModuleBuilder refBuilder("atomicref");
+    TypeArena& rtypes = refBuilder.types();
+    FunctionBuilder rfb = refBuilder.addFunction("Atomic.main()");
+    rfb.setReturnType(rtypes.voidType());
+    const BlockId rentry = rfb.addBlock();
+    rfb.setCurrentBlock(rentry);
+    const ParamId rcell = rfb.addParameter("cell", rtypes.atomicType());
+    (void)rfb.emitAtomicLoadRef(rfb.parameterOperand(rcell), rtypes.intType());
+    rfb.emitReturn();
+    rfb.finish();
+    const auto refReport = verifyModule(refBuilder.take());
+    require(!refReport.ok(), "atomic_load_ref producing int was accepted");
+    require(hasError(refReport, "must produce a reference type"),
+            "the reference error was not reported:\n" + reportText(refReport));
+    std::cout << "mir verifier atomics: PASS\n";
+}
+
+void testSemaphoreRules() {
+    ModuleBuilder builder("semok");
+    TypeArena& types = builder.types();
+    FunctionBuilder fb = builder.addFunction("Sem.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const ParamId gate = fb.addParameter("gate", types.semaphoreType());
+    const Operand sem = fb.parameterOperand(gate);
+    fb.emitSemaphoreAcquire(sem);
+    fb.emitSemaphoreRelease(sem);
+    (void)fb.emitSemaphoreAvailable(sem);
+    fb.emitSemaphoreSetPermits(sem, Operand::constant(builder.constantInt(3), types.intType()));
+    (void)fb.emitSemaphoreTryAcquire(sem);
+    fb.emitSemaphoreReleaseMany(sem, Operand::constant(builder.constantInt(2), types.intType()));
+    fb.emitReturn();
+    fb.finish();
+    Module module = builder.take();
+    const auto report = verifyModule(module);
+    require(report.ok(), "well-formed semaphore operations were rejected:\n" + reportText(report));
+
+    // Permits are counted in ints.
+    Module badCount = module;
+    badCount.functions[0].blocks[0].instructions[3].operands[1] =
+        Operand::constant(0, badCount.types.boolType());
+    const auto countReport = verifyModule(badCount);
+    require(!countReport.ok(), "semaphore_set_permits with a bool count was accepted");
+    require(hasError(countReport, "must be int"), "the count error was not reported:\n" +
+                                                     reportText(countReport));
+    std::cout << "mir verifier semaphores: PASS\n";
+}
+
+void testConditionRules() {
+    ModuleBuilder builder("condok");
+    TypeArena& types = builder.types();
+    FunctionBuilder fb = builder.addFunction("Cond.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const ParamId gate = fb.addParameter("gate", types.conditionType());
+    const Operand cond = fb.parameterOperand(gate);
+    fb.emitConditionWait(cond);
+    (void)fb.emitConditionWaitFor(cond, Operand::constant(builder.constantInt(5), types.intType()));
+    fb.emitConditionNotifyOne(cond);
+    fb.emitConditionNotifyAll(cond);
+    fb.emitReturn();
+    fb.finish();
+    Module module = builder.take();
+    const auto report = verifyModule(module);
+    require(report.ok(), "well-formed condition operations were rejected:\n" + reportText(report));
+    require(hasWarning(report, "no predicate and no timeout"),
+            "the bare-wait hazard produced no warning:\n" + reportText(report));
+
+    // A timeout measured in strings.
+    Module badTimeout = module;
+    badTimeout.functions[0].blocks[0].instructions[1].operands[1] =
+        Operand::constant(0, badTimeout.types.stringType());
+    const auto timeoutReport = verifyModule(badTimeout);
+    require(!timeoutReport.ok(), "condition_wait_for with a string timeout was accepted");
+    require(hasError(timeoutReport, "must be numeric"), "the timeout error was not reported:\n" +
+                                                           reportText(timeoutReport));
+    std::cout << "mir verifier conditions: PASS\n";
+}
+
+void testSharedAccessRules() {
+    ModuleBuilder builder("sharedok");
+    TypeArena& types = builder.types();
+    FunctionBuilder fb = builder.addFunction("Shared.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const TypeId sharedInt = types.sharedType(types.intType());
+    const TempId cell = fb.emitSharedCreate(
+        Operand::constant(builder.constantInt(0), types.intType()), sharedInt);
+    (void)fb.emitSharedGet(Operand::temp(cell, sharedInt), types.intType());
+    fb.emitSharedSet(Operand::temp(cell, sharedInt),
+                     Operand::constant(builder.constantInt(1), types.intType()));
+    fb.emitReturn();
+    fb.finish();
+    Module module = builder.take();
+    const auto report = verifyModule(module);
+    require(report.ok(), "well-formed shared access was rejected:\n" + reportText(report));
+    require(hasWarning(report, "not atomic"),
+            "unlocked get/set produced no atomicity warning:\n" + reportText(report));
+
+    // A string stored into a Shared<int>.
+    Module badStore = module;
+    badStore.functions[0].blocks[0].instructions[2].operands[1] =
+        Operand::constant(0, badStore.types.stringType());
+    const auto storeReport = verifyModule(badStore);
+    require(!storeReport.ok(), "shared_set of a string into Shared<int> was accepted");
+    require(hasError(storeReport, "shared_set stores"), "the payload error was not reported:\n" +
+                                                           reportText(storeReport));
+
+    // A cell read out as the wrong type.
+    Module badGet = module;
+    badGet.functions[0].blocks[0].instructions[1].resultType = badGet.types.stringType();
+    const auto getReport = verifyModule(badGet);
+    require(!getReport.ok(), "shared_get of Shared<int> as string was accepted");
+    require(hasError(getReport, "but the temp is typed"),
+            "the result error was not reported:\n" + reportText(getReport));
+    std::cout << "mir verifier shared access: PASS\n";
+}
+
+void testFfiCallRules() {
+    ModuleBuilder builder("ffiok");
+    TypeArena& types = builder.types();
+    FunctionBuilder fb = builder.addFunction("Ffi.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const ParamId handle = fb.addParameter("handle", types.nativeHandleType());
+    (void)fb.emitFfiCall("lib", "add", {Operand::constant(builder.constantInt(1), types.intType())},
+                         {NativeAbiTag::I64}, NativeAbiTag::I64, types.intType());
+    (void)fb.emitFfiCall("lib", "open", {}, {}, NativeAbiTag::Handle, types.nativeHandleType(),
+                         {}, NativeOwnership::Owned);
+    (void)fb.emitHandleBorrow(fb.parameterOperand(handle), types.nativeHandleType());
+    (void)fb.emitHandleConsume(fb.parameterOperand(handle), types.nativeHandleType());
+    fb.emitHandleClose(fb.parameterOperand(handle));
+    fb.emitReturn();
+    fb.finish();
+    Module module = builder.take();
+    const auto report = verifyModule(module);
+    require(report.ok(), "well-formed FFI calls were rejected:\n" + reportText(report));
+
+    // A handle smuggled back as a borrow.
+    Module badOwnership = module;
+    badOwnership.functions[0].blocks[0].instructions[1].target.ffiReturnOwnership =
+        NativeOwnership::Borrowed;
+    const auto ownershipReport = verifyModule(badOwnership);
+    require(!ownershipReport.ok(), "an ffi_call returning a borrowed handle was accepted");
+    require(hasError(ownershipReport, "only an Owned handle may be returned"),
+            "the ownership error was not reported:\n" + reportText(ownershipReport));
+
+    // A view returned across the boundary.
+    Module badView = module;
+    badView.functions[0].blocks[0].instructions[0].target.ffiReturnTag = NativeAbiTag::BufferView;
+    const auto viewReport = verifyModule(badView);
+    require(!viewReport.ok(), "an ffi_call returning a view was accepted");
+    require(hasError(viewReport, "cannot be returned"), "the view error was not reported:\n" +
+                                                           reportText(viewReport));
+
+    // A bool marshalled as an integer.
+    Module badParam = module;
+    badParam.functions[0].blocks[0].instructions[0].operands[0] =
+        Operand::constant(0, badParam.types.boolType());
+    const auto paramReport = verifyModule(badParam);
+    require(!paramReport.ok(), "an ffi_call with a mistagged argument was accepted");
+    require(hasError(paramReport, "but the ABI tag is"), "the tag error was not reported:\n" +
+                                                             reportText(paramReport));
+    std::cout << "mir verifier ffi calls: PASS\n";
+}
+
+void testCallbackRules() {
+    ModuleBuilder builder("cbok");
+    TypeArena& types = builder.types();
+    const FunctionId body = declareClosureBody(builder, "Cb.handler()", types.voidType());
+
+    FunctionSignature signature;
+    signature.parameterTypes = {types.intType()};
+    signature.returnType = types.voidType();
+    const TypeId token = types.nativeCallbackType(signature);
+
+    FunctionBuilder fb = builder.addFunction("Cb.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const TypeId funcType = syncFuncType(types, types.voidType());
+    const TempId closure = fb.emitMakeClosure(body, {}, funcType);
+    const TempId callback = fb.emitCallbackRegister(Operand::temp(closure, funcType), token);
+    (void)fb.emitCallbackInvoke(Operand::temp(callback, token),
+                                {Operand::constant(builder.constantInt(7), types.intType())}, 0);
+    fb.emitCallbackClose(Operand::temp(callback, token));
+    fb.emitReturn();
+    fb.finish();
+    const auto report = verifyModule(builder.take());
+    require(report.ok(), "well-formed callback registration was rejected:\n" + reportText(report));
+
+    // An async handler has no scheduler to park on.
+    ModuleBuilder asyncBuilder("cbbad");
+    TypeArena& atypes = asyncBuilder.types();
+    const FunctionId asyncBody =
+        declareClosureBody(asyncBuilder, "Cb.handler()", atypes.voidType(), /*isAsync=*/true);
+    FunctionBuilder afb = asyncBuilder.addFunction("Cb.main()");
+    afb.setReturnType(atypes.voidType());
+    const BlockId aentry = afb.addBlock();
+    afb.setCurrentBlock(aentry);
+    FunctionSignature asignature;
+    asignature.returnType = atypes.voidType();
+    asignature.isAsync = true;
+    const TypeId afunc = atypes.functionType(asignature);
+    const TempId aclosure = afb.emitMakeClosure(asyncBody, {}, afunc);
+    (void)afb.emitCallbackRegister(Operand::temp(aclosure, afunc), atypes.nativeCallbackType());
+    afb.emitReturn();
+    afb.finish();
+    const auto asyncReport = verifyModule(asyncBuilder.take());
+    require(!asyncReport.ok(), "callback_register of an async closure was accepted");
+    require(hasError(asyncReport, "must be synchronous"),
+            "the async-callback error was not reported:\n" + reportText(asyncReport));
+    std::cout << "mir verifier callbacks: PASS\n";
+}
+
+void testBorrowOfTaskRejects() {
+    ModuleBuilder builder("borrowtask");
+    TypeArena& types = builder.types();
+    FunctionBuilder fb = builder.addFunction("Tasks.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    (void)fb.addSlot("work", types.taskType(types.intType()), true, zl::OwnershipKind::BORROW);
+    fb.emitReturn();
+    fb.finish();
+    const auto report = verifyModule(builder.take());
+    require(!report.ok(), "a borrow slot of Task type was accepted");
+    require(hasError(report, "borrow is not supported for task handles"),
+            "the task-borrow error was not reported:\n" + reportText(report));
+    std::cout << "mir verifier task borrow: PASS\n";
+}
+
+
+void testAwaitOfVoidTaskAcceptsUnknownTemp() {
+    // The checker leaves some void-awaits unnamed (an await of a
+    // Channel.sendAsync task observes unknown), while the runtime still
+    // resumes with nil. An unknown-typed temp names that nil honestly; only
+    // a concretely-typed temp contradicts the void payload.
+    ModuleBuilder builder("awaitunknown");
+    TypeArena& types = builder.types();
+    FunctionBuilder fb = builder.addFunction("Tasks.run()");
+    fb.setAsync(true);
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const TypeId voidTask = types.taskType(types.voidType());
+    const ParamId pending = fb.addParameter("pending", voidTask);
+    (void)fb.emitAwait(fb.parameterOperand(pending), types.unknownType());
+    fb.emitReturn();
+    fb.finish();
+    Module module = builder.take();
+    const auto report = verifyModule(module);
+    require(report.ok(), "awaiting a Task<void> into an unknown temp was rejected:\n" +
+                             reportText(report));
+
+    module.functions[0].blocks[0].instructions[0].resultType = module.types.intType();
+    const auto concrete = verifyModule(module);
+    require(!concrete.ok(), "awaiting a Task<void> into an int temp was accepted");
+    require(hasError(concrete, "must not define a temp"),
+            "the concrete-temp error was not reported:\n" + reportText(concrete));
+    std::cout << "mir verifier await void temp: PASS\n";
+}
+
 int main() {
     testTypeArena();
     testValidModuleVerifies();
@@ -1342,6 +2127,25 @@ int main() {
     testUnionNullabilityFollowsItsMembers();
     testNominalTypesCarryTheirName();
     testArraySizeIsOptional();
+
+    testConcurrencyOpcodeShapes();
+    testTaskSpawnAcceptsShareableClosure();
+    testTaskSpawnRejectsAsyncClosure();
+    testTaskSpawnRejectsUnshareableCapture();
+    testTaskSpawnRejectsNonTaskResult();
+    testTaskBlockRules();
+    testTaskCancelIgnoreRules();
+    testThreadRules();
+    testChannelRules();
+    testScopedLockRules();
+    testAtomicRules();
+    testSemaphoreRules();
+    testConditionRules();
+    testSharedAccessRules();
+    testFfiCallRules();
+    testCallbackRules();
+    testBorrowOfTaskRejects();
+    testAwaitOfVoidTaskAcceptsUnknownTemp();
 
     if (failures != 0) {
         std::cerr << failures << " MIR regression(s) failed\n";

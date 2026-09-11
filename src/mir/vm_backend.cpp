@@ -316,8 +316,27 @@ private:
             case Opcode::MakeClosure:
             case Opcode::StaticLoad: case Opcode::StaticStore:
             case Opcode::Await:
+            case Opcode::TaskSpawn: case Opcode::TaskBlock: case Opcode::TaskIgnore: case Opcode::TaskCancel:
+            case Opcode::ThreadStart: case Opcode::ThreadJoin: case Opcode::ThreadIsAlive:
+            case Opcode::ChannelCreate: case Opcode::ChannelSend: case Opcode::ChannelReceive:
+            case Opcode::ChannelSize: case Opcode::ChannelSendAsync: case Opcode::ChannelReceiveAsync:
+            case Opcode::MutexWithLock: case Opcode::RwLockWithRead: case Opcode::RwLockWithWrite:
+            case Opcode::AtomicLoad: case Opcode::AtomicStore: case Opcode::AtomicAdd:
+            case Opcode::AtomicLoadBool: case Opcode::AtomicStoreBool:
+            case Opcode::AtomicLoadDouble: case Opcode::AtomicStoreDouble:
+            case Opcode::AtomicLoadRef: case Opcode::AtomicStoreRef:
+            case Opcode::SemaphoreAcquire: case Opcode::SemaphoreRelease: case Opcode::SemaphoreAvailable:
+            case Opcode::SemaphoreSetPermits: case Opcode::SemaphoreTryAcquire:
+            case Opcode::SemaphoreReleaseMany:
+            case Opcode::ConditionWait: case Opcode::ConditionWaitFor:
+            case Opcode::ConditionNotifyOne: case Opcode::ConditionNotifyAll:
+            case Opcode::SharedCreate: case Opcode::SharedGet: case Opcode::SharedSet:
+            case Opcode::SharedWithLock:
             case Opcode::RangeInBounds: case Opcode::Log:
                 return true;
+            // The FFI boundary (FfiCall plus handle/callback lifecycle) is the
+            // native-codegen boundary: this backend fails closed on it, exactly
+            // as it does for TaskCreate and the other unlowered spellings.
             default:
                 return false;
         }
@@ -881,6 +900,147 @@ private:
                 defineTemp(ins.result, body, line);
                 return;
             }
+            // --- task lifecycle -------------------------------------------------
+            // Task.block/ignore/cancel are runtime task operations, not methods;
+            // this is the same spelling the InvokeMethod Task path below uses.
+            case Opcode::TaskBlock: {
+                pushOperand(fn, ins.operands[0], body, line);
+                body.emit(OpCode::TaskBlock, 0, line);
+                defineTemp(ins.result, body, line);
+                return;
+            }
+            case Opcode::TaskIgnore: {
+                pushOperand(fn, ins.operands[0], body, line);
+                body.emit(OpCode::TaskIgnore, 0, line);
+                defineTemp(ins.result, body, line);
+                return;
+            }
+            case Opcode::TaskCancel: {
+                pushOperand(fn, ins.operands[0], body, line);
+                body.emit(OpCode::TaskCancel, 0, line);
+                defineTemp(ins.result, body, line);
+                return;
+            }
+            // --- catalog-backed primitives --------------------------------------
+            // Every operation below is the dedicated MIR spelling of exactly one
+            // native catalog entry: the backend translates it back to that same
+            // entry, so the bytecode is identical to what the generic CallNative
+            // lowering produced. Only the MIR is more precise.
+            case Opcode::TaskSpawn:
+                emitCallNativeById(fn, ins, body, NativeId::TASK_SPAWN);
+                return;
+            case Opcode::ThreadStart:
+                emitCallNativeById(fn, ins, body, NativeId::THREAD_START);
+                return;
+            case Opcode::ThreadJoin:
+                emitCallNativeById(fn, ins, body, NativeId::THREAD_JOIN);
+                return;
+            case Opcode::ThreadIsAlive:
+                emitCallNativeById(fn, ins, body, NativeId::THREAD_ISALIVE);
+                return;
+            case Opcode::ChannelCreate:
+                emitCallNativeById(fn, ins, body, NativeId::CHANNEL_CREATE);
+                return;
+            case Opcode::ChannelSend:
+                emitCallNativeById(fn, ins, body, NativeId::CHANNEL_SEND);
+                return;
+            case Opcode::ChannelReceive:
+                emitCallNativeById(fn, ins, body, NativeId::CHANNEL_RECEIVE);
+                return;
+            case Opcode::ChannelSize:
+                emitCallNativeById(fn, ins, body, NativeId::CHANNEL_SIZE);
+                return;
+            case Opcode::ChannelSendAsync:
+                emitCallNativeById(fn, ins, body, NativeId::CHANNEL_SEND_ASYNC);
+                return;
+            case Opcode::ChannelReceiveAsync:
+                emitCallNativeById(fn, ins, body, NativeId::CHANNEL_RECEIVE_ASYNC);
+                return;
+            case Opcode::MutexWithLock:
+                emitCallNativeById(fn, ins, body, NativeId::MUTEX_WITHLOCK);
+                return;
+            case Opcode::RwLockWithRead:
+                emitCallNativeById(fn, ins, body, NativeId::RWLOCK_WITHREAD);
+                return;
+            case Opcode::RwLockWithWrite:
+                emitCallNativeById(fn, ins, body, NativeId::RWLOCK_WITHWRITE);
+                return;
+            case Opcode::AtomicLoad:
+                emitCallNativeById(fn, ins, body, NativeId::ATOMIC_LOAD);
+                return;
+            case Opcode::AtomicStore:
+                emitCallNativeById(fn, ins, body, NativeId::ATOMIC_STORE);
+                return;
+            case Opcode::AtomicAdd:
+                emitCallNativeById(fn, ins, body, NativeId::ATOMIC_ADD);
+                return;
+            case Opcode::AtomicLoadBool:
+                emitCallNativeById(fn, ins, body, NativeId::ATOMIC_LOAD_BOOL);
+                return;
+            case Opcode::AtomicStoreBool:
+                emitCallNativeById(fn, ins, body, NativeId::ATOMIC_STORE_BOOL);
+                return;
+            case Opcode::AtomicLoadDouble:
+                emitCallNativeById(fn, ins, body, NativeId::ATOMIC_LOAD_DOUBLE);
+                return;
+            case Opcode::AtomicStoreDouble:
+                emitCallNativeById(fn, ins, body, NativeId::ATOMIC_STORE_DOUBLE);
+                return;
+            case Opcode::AtomicLoadRef:
+                emitCallNativeById(fn, ins, body, NativeId::ATOMIC_LOAD_REF);
+                return;
+            case Opcode::AtomicStoreRef:
+                emitCallNativeById(fn, ins, body, NativeId::ATOMIC_STORE_REF);
+                return;
+            case Opcode::SemaphoreAcquire:
+                emitCallNativeById(fn, ins, body, NativeId::SEMAPHORE_ACQUIRE);
+                return;
+            case Opcode::SemaphoreRelease:
+                emitCallNativeById(fn, ins, body, NativeId::SEMAPHORE_RELEASE);
+                return;
+            case Opcode::SemaphoreAvailable:
+                emitCallNativeById(fn, ins, body, NativeId::SEMAPHORE_AVAILABLE);
+                return;
+            case Opcode::SemaphoreSetPermits:
+                emitCallNativeById(fn, ins, body, NativeId::SEMAPHORE_SETPERMITS);
+                return;
+            case Opcode::SemaphoreTryAcquire:
+                emitCallNativeById(fn, ins, body, NativeId::SEMAPHORE_TRYACQUIRE);
+                return;
+            case Opcode::SemaphoreReleaseMany:
+                emitCallNativeById(fn, ins, body, NativeId::SEMAPHORE_RELEASEMANY);
+                return;
+            case Opcode::ConditionWait:
+                emitCallNativeById(fn, ins, body, NativeId::CONDITION_WAIT);
+                return;
+            case Opcode::ConditionWaitFor:
+                emitCallNativeById(fn, ins, body, NativeId::CONDITION_WAITFOR);
+                return;
+            case Opcode::ConditionNotifyOne:
+                emitCallNativeById(fn, ins, body, NativeId::CONDITION_NOTIFYONE);
+                return;
+            case Opcode::ConditionNotifyAll:
+                emitCallNativeById(fn, ins, body, NativeId::CONDITION_NOTIFYALL);
+                return;
+            // --- shared state ---------------------------------------------------
+            case Opcode::SharedCreate:
+                // `share` tags its Shared box through the CallNative factory
+                // type; shared_create carries the same result type, so the tag
+                // is identical to the generic path's.
+                emitCallNativeById(fn, ins, body, NativeId::SHARED_SHARE,
+                                   ins.result != kNoTemp
+                                       ? addName(module_.types.render(ins.resultType)) + 1
+                                       : 0);
+                return;
+            case Opcode::SharedGet:
+                emitSharedMethod(fn, ins, body, "get");
+                return;
+            case Opcode::SharedSet:
+                emitSharedMethod(fn, ins, body, "setValue");
+                return;
+            case Opcode::SharedWithLock:
+                emitSharedMethod(fn, ins, body, "withLock");
+                return;
             case Opcode::InvokeSuper: emitInvokeSuper(fn, ins, body); return;
             case Opcode::InvokeStatic: emitInvokeStatic(fn, ins, body); return;
             case Opcode::CallIndirect: emitCallIndirect(fn, ins, body); return;
@@ -1290,6 +1450,33 @@ private:
             factoryType = addName(module_.types.render(ins.resultType)) + 1;
         }
         body.emit(OpCode::CallNative, nativeIndex, line, factoryType);
+        if (ins.result != kNoTemp) defineTemp(ins.result, body, line);
+        else body.emit(OpCode::Pop, 0, line);
+    }
+
+    // A dedicated MIR spelling resolved back to its catalog entry: pushes the
+    // operands and emits the same CallNative the generic lowering produced.
+    void emitCallNativeById(const Function& fn, const Instruction& ins, Body& body, NativeId id,
+                            std::size_t factoryType = 0) {
+        const std::size_t line = ins.location.line;
+        for (const Operand& op : ins.operands) pushOperand(fn, op, body, line);
+        auto byId = findNativeFunction(id);
+        if (!byId) throw std::runtime_error("MIR backend: native catalog has no entry for " +
+                                            std::string(opcodeName(ins.opcode)));
+        body.emit(OpCode::CallNative, *byId, line, factoryType);
+        if (ins.result != kNoTemp) defineTemp(ins.result, body, line);
+        else body.emit(OpCode::Pop, 0, line);
+    }
+
+    // A Shared cell access dispatched to the builtin Shared method, exactly as
+    // the generic InvokeMethod lowering did: same receiver, same arguments,
+    // same dispatch slot, same result handling.
+    void emitSharedMethod(const Function& fn, const Instruction& ins, Body& body,
+                          const std::string& methodName) {
+        const std::size_t line = ins.location.line;
+        for (const Operand& op : ins.operands) pushOperand(fn, op, body, line);
+        const std::size_t slot = resolveMethodSlot("Shared", methodName, ins.operands, ins.location);
+        body.emit(OpCode::InvokeMethod, slot, line, ins.operands.size() - 1);
         if (ins.result != kNoTemp) defineTemp(ins.result, body, line);
         else body.emit(OpCode::Pop, 0, line);
     }

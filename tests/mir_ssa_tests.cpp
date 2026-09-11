@@ -924,6 +924,160 @@ void testEdgeArgumentsAreCountedAgainstSuccessors() {
     std::cout << "mir edge argument uses: PASS\n";
 }
 
+
+void testSuspensionLivenessPreservesLiveState() {
+    // A temp and a slot both live across an await: the suspension point must
+    // name both with their types, and must NOT name the await's own result
+    // (produced by the resumption) or the task operand (consumed by it).
+    ModuleBuilder builder("suspend");
+    TypeArena& types = builder.types();
+    FunctionBuilder fb = builder.addFunction("Worker.run()");
+    fb.setAsync(true);
+    fb.setReturnType(types.intType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const SlotId kept = fb.addSlot("kept", types.intType());
+    const TempId live = fb.emitBinary(Opcode::Add,
+                                      Operand::constant(builder.constantInt(1), types.intType()),
+                                      Operand::constant(builder.constantInt(2), types.intType()),
+                                      types.intType());
+    fb.emitStore(kept, Operand::temp(live, types.intType()));
+    const TypeId intTask = types.taskType(types.intType());
+    const TempId pending = fb.emitTaskCreate(Operand::temp(live, types.intType()), intTask);
+    const TempId got = fb.emitAwait(Operand::temp(pending, intTask), types.intType());
+    const TempId back = fb.emitLoad(kept);
+    const TempId sum = fb.emitBinary(Opcode::Add, Operand::temp(got, types.intType()),
+                                     Operand::temp(back, types.intType()), types.intType());
+    const TempId total = fb.emitBinary(Opcode::Add, Operand::temp(sum, types.intType()),
+                                       Operand::temp(live, types.intType()), types.intType());
+    fb.emitReturn(Operand::temp(total, types.intType()));
+    fb.finish();
+    Module module = builder.take();
+    require(verifyModule(module).ok(), "the suspension fixture should start out valid");
+
+    const Function& function = module.functions[0];
+    SuspensionLiveness liveness(function);
+    require(liveness.points().size() == 1, "one await should give one suspension point");
+    require(liveness.pointAt(entry, 0) == nullptr, "a non-await instruction has no suspension point");
+    const SuspensionPoint* point = liveness.pointAt(entry, 3);
+    require(point != nullptr, "pointAt missed the await");
+    require(point != nullptr && point->values.size() == 1,
+            "exactly the one live temp should cross the await");
+    if (point != nullptr && !point->values.empty()) {
+        require(point->values[0].value == tempValue(live), "the wrong temp crosses the await");
+        require(point->values[0].type == module.types.intType(),
+                "the crossing temp lost its type");
+    }
+    require(point != nullptr && point->slots.size() == 1,
+            "exactly the one live slot should cross the await");
+    if (point != nullptr && !point->slots.empty()) {
+        require(point->slots[0].slot == kept, "the wrong slot crosses the await");
+        require(point->slots[0].type == module.types.intType(), "the crossing slot lost its type");
+        require(point->slots[0].ownership == zl::OwnershipKind::GC,
+                "the crossing slot lost its ownership");
+    }
+    std::cout << "mir suspension liveness: PASS\n";
+}
+
+void testSuspensionLivenessKeepsBorrowsRooted() {
+    // A borrow rooted in owned-frame storage may cross an await, and the
+    // suspension point must carry the borrow binding itself - BORROW ownership
+    // plus source - not just the value, so a backend preserves the region.
+    ModuleBuilder builder("suspendborrow");
+    TypeArena& types = builder.types();
+    const TypeId res = types.objectType("Res");
+    FunctionBuilder fb = builder.addFunction("Worker.run()");
+    fb.setAsync(true);
+    fb.setReturnType(types.intType());
+    const BlockId entry = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const SlotId owner = fb.addSlot("res", res, true, zl::OwnershipKind::OWNED);
+    const SlotId view = fb.addSlot("view", res, true, zl::OwnershipKind::BORROW, "res");
+    const TempId fresh = fb.emitAlloc("Res", {}, res);
+    fb.emitStore(owner, Operand::temp(fresh, res));
+    const TempId owned = fb.emitLoad(owner);
+    fb.emitBorrow(view, Operand::temp(owned, res));
+    const TypeId intTask = types.taskType(types.intType());
+    const TempId pending = fb.emitTaskCreate(
+        Operand::constant(builder.constantInt(0), types.intType()), intTask);
+    const TempId got = fb.emitAwait(Operand::temp(pending, intTask), types.intType());
+    const TempId seen = fb.emitLoad(view);
+    fb.emitLog(Operand::temp(seen, res));
+    fb.emitEndBorrow(view);
+    fb.emitDrop(owner);
+    fb.emitReturn(Operand::temp(got, types.intType()));
+    fb.finish();
+    Module module = builder.take();
+    const auto verification = verifyModule(module);
+    require(verification.ok(),
+            "the rooted-borrow fixture should start out valid:\n" + verification.describe());
+
+    const Function& function = module.functions[0];
+    SuspensionLiveness liveness(function);
+    require(liveness.points().size() == 1, "one await should give one suspension point");
+    const SuspensionPoint* point = liveness.pointAt(entry, 5);
+    require(point != nullptr, "pointAt missed the await");
+    bool foundView = false;
+    bool foundOwner = false;
+    if (point != nullptr) {
+        for (const auto& slot : point->slots) {
+            if (slot.slot == view) {
+                foundView = true;
+                require(slot.ownership == zl::OwnershipKind::BORROW,
+                        "the crossing borrow lost its ownership");
+                require(slot.borrowSource == "res", "the crossing borrow lost its source");
+            }
+            if (slot.slot == owner) foundOwner = true;
+        }
+    }
+    require(foundView, "the borrow binding does not cross the await");
+    require(foundOwner, "the owned root the borrow anchors to does not cross the await");
+    std::cout << "mir suspension borrow roots: PASS\n";
+}
+
+void testPromotionAcrossAwaitStillSuspends() {
+    // A slot merged at a join, then awaited: promotion rewrites the merge to
+    // a block parameter, the suspension point survives the rewrite, and the
+    // result still verifies.
+    ModuleBuilder builder("promoteawait");
+    TypeArena& types = builder.types();
+    FunctionBuilder fb = builder.addFunction("Worker.run(bool): int");
+    fb.setAsync(true);
+    fb.setReturnType(types.intType());
+    const ParamId choose = fb.addParameter("choose", types.boolType());
+    const SlotId merged = fb.addSlot("merged", types.intType());
+    const BlockId b1 = fb.addBlock();
+    const BlockId b2 = fb.addBlock();
+    const BlockId b3 = fb.addBlock();
+    const BlockId b4 = fb.addBlock();
+    fb.setCurrentBlock(b1);
+    fb.emitBranch(fb.parameterOperand(choose), b2, b3);
+    fb.setCurrentBlock(b2);
+    fb.emitStore(merged, Operand::constant(builder.constantInt(10), types.intType()));
+    fb.emitJump(b4);
+    fb.setCurrentBlock(b3);
+    fb.emitStore(merged, Operand::constant(builder.constantInt(20), types.intType()));
+    fb.emitJump(b4);
+    fb.setCurrentBlock(b4);
+    const TempId value = fb.emitLoad(merged);
+    const TypeId intTask = types.taskType(types.intType());
+    const TempId pending = fb.emitTaskCreate(Operand::temp(value, types.intType()), intTask);
+    const TempId got = fb.emitAwait(Operand::temp(pending, intTask), types.intType());
+    fb.emitReturn(Operand::temp(got, types.intType()));
+    fb.finish();
+    Module module = builder.take();
+    require(verifyModule(module).ok(), "the await-after-merge fixture should start out valid");
+
+    const auto report = promoteSlotsToBlockParameters(module.functions[0]);
+    require(report.changed, "the merge slot should have been promoted");
+    const auto verification = verifyModule(module);
+    require(verification.ok(), "promoted MIR with an await did not verify:\n" +
+                                  verification.describe());
+    SuspensionLiveness liveness(module.functions[0]);
+    require(liveness.points().size() == 1, "promotion must not lose the suspension point");
+    std::cout << "mir promotion across await: PASS\n";
+}
+
 } // namespace
 
 int main() {
@@ -957,6 +1111,10 @@ int main() {
     testPromotionDeclinesLoopHeaderWithoutEntryValue();
     testPromotionDeclinesExceptionHandlers();
     testEdgeArgumentsAreCountedAgainstSuccessors();
+
+    testSuspensionLivenessPreservesLiveState();
+    testSuspensionLivenessKeepsBorrowsRooted();
+    testPromotionAcrossAwaitStillSuspends();
 
     if (failures != 0) {
         std::cerr << failures << " MIR SSA regression(s) failed\n";

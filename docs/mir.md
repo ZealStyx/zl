@@ -267,11 +267,13 @@ The verifier enforces all of these. They are the contract a backend may rely on.
 
 ## Instruction taxonomy
 
-54 opcodes, grouped by what they do. `opcodeShape(op)` answers, for any opcode,
-how many operands it takes, whether it produces a result, whether it may throw,
-and whether it has side effects. `opcodeUsesSlot` and `opcodeIsCall` are the
-other two shared predicates; the verifier and the printer both use them so they
-cannot disagree about which fields an opcode reads.
+100 opcodes, grouped by what they do. `opcodeShape(op)` answers, for any
+opcode, how many operands it takes, whether it produces a result, whether it
+may throw, and whether it has side effects. `opcodeUsesSlot` and `opcodeIsCall`
+are two of the shared predicates; `opcodeIsSuspension`, `opcodeIsBlocking`,
+`opcodeIsThreadBoundary`, `opcodeIsScopedLock`, and `opcodeIsFfi` classify the
+concurrency and native-boundary families. The verifier, the printer, and the
+analyses all use them so they cannot disagree about what an opcode means.
 
 - **Arithmetic / bitwise:** `Add Sub Mul Div Mod Pow Neg`, `BitAnd BitOr BitXor
   BitNot Shl Shr Ushr`
@@ -287,6 +289,19 @@ cannot disagree about which fields an opcode reads.
 - **Calls:** `Call InvokeMethod InvokeSuper InvokeStatic CallIndirect
   CallNative MakeClosure`
 - **Async:** `Await TaskCreate`
+- **Tasks:** `TaskSpawn TaskBlock TaskIgnore TaskCancel`
+- **Threads:** `ThreadStart ThreadJoin ThreadIsAlive`
+- **Channels:** `ChannelCreate ChannelSend ChannelReceive ChannelSize
+  ChannelSendAsync ChannelReceiveAsync`
+- **Scoped locks:** `MutexWithLock RwLockWithRead RwLockWithWrite`
+- **Atomics:** `AtomicLoad AtomicStore AtomicAdd`, `Bool`/`Double`/`Ref` lanes
+- **Semaphores:** `SemaphoreAcquire SemaphoreRelease SemaphoreAvailable
+  SemaphoreSetPermits SemaphoreTryAcquire SemaphoreReleaseMany`
+- **Conditions:** `ConditionWait ConditionWaitFor ConditionNotifyOne
+  ConditionNotifyAll`
+- **Shared state:** `SharedCreate SharedGet SharedSet SharedWithLock`
+- **FFI:** `FfiCall HandleBorrow HandleConsume HandleClose CallbackRegister
+  CallbackInvoke CallbackClose`
 - **Misc:** `Nop RangeInBounds Log`
 
 Terminators: `Return Jump Branch Switch Throw Unreachable`.
@@ -312,6 +327,125 @@ to a real runtime assertion (the MIR→bytecode backend emits the VM's
 being trusted. Only an identity refinement (operand type already equals the
 asserted type) may be treated as a no-op, because there the MIR checker proved
 the fact the assertion would re-check.
+
+---
+
+## Concurrency and the native boundary
+
+Tasks, threads, channels, locks, atomics, shared cells, and the FFI boundary
+all lower to dedicated operations — never to opaque `call_native` — so the
+middle end can see the runtime contract each one carries: which operations
+suspend, which block, which cross a thread boundary, which hold a lock, and
+which leave the VM entirely. Every one of these operations is marked as
+throwing in `opcodeShape` (each validates its receiver and raises on a
+mismatch), so exception edges treat them like the calls they are.
+
+### Suspension
+
+`await` is the only suspension point: it parks the async frame on the
+scheduler and resumes later with the payload. Spawning a task, starting a
+thread, and the channel `sendAsync`/`receiveAsync` constructors only *create*
+work — they do not suspend — and every blocking wait (`task_block`,
+`thread_join`, `channel_send`/`channel_receive`, the scoped locks,
+`semaphore_acquire`, `condition_wait`/`condition_wait_for`) parks the
+*thread*, not the frame. Blocking inside an `async` function therefore strands
+the scheduler worker, and the verifier warns at every such site.
+
+`SuspensionLiveness` (`dataflow.hpp`) reports, for each `await`, everything
+that must survive the park: every SSA value still to be read plus every slot
+still to be loaded, each with its type — and, for slots, its ownership and
+borrow source, so a backend can see that a borrow binding itself is part of
+the preserved frame. The await's own result is excluded (produced by the
+resumption, not preserved across the suspension), as are constants and
+statics; both lists are deterministically ordered. The verifier separately
+proves every borrow crossing an `await` roots in owned-frame storage
+(transitively through borrow-of-borrow chains; a caller-owned borrow parameter
+never roots), rejecting the suspension otherwise.
+
+### Thread confinement
+
+`task_spawn` and `thread_start` take a synchronous, zero-argument closure and
+run it on another thread. Only `Shared<T>` and the synchronisation primitives
+(`Atomic`, `Mutex`, `RwLock`, `Semaphore`, `Channel`, `Condition`) may cross
+with it — the same rule the checker's confinement check enforces, mirrored so
+hand-built MIR is held to it too. Anything else the closure captures
+(including a bare `this`) is rejected; captures the verifier cannot resolve
+stay the runtime gate's job, which raises there.
+
+The spawned task's payload is the closure's own return, and the verifier
+checks the two agree when the body resolves. An empty-body lambda reports
+`nil` rather than `void`, so MIR spells that payload `Task<void>` — the
+`Task<nil>` the checker names never appears — matching the closure body's own
+void return and the runtime nil the task completes with.
+
+`task_block` waits for a task and yields its payload, and is rejected in
+`async` code (which suspends with `await` instead). `task_ignore` detaches
+failure propagation; `task_cancel` requests cancellation, which the task
+observes at its next suspension point. MIR models the request edge only,
+because the runtime delivers nothing beyond it either.
+
+### Scoped locks and shared state
+
+`mutex_with_lock`, `rwlock_with_read`/`rwlock_with_write`, and
+`shared_with_lock` run a synchronous closure with the lock held and produce
+the closure's value — including the runtime nil of a void body, which an
+`unknown`- or `nil`-typed temp may name (a concretely-typed one contradicts
+the body and is rejected). The body itself must neither suspend nor hand work
+to another thread: a direct `await`, `task_spawn`, or `thread_start` inside it
+is rejected. An *indirect* suspension — the body calls a function that awaits
+— is not caught, exactly as the checker does not catch it either; the lock is
+still held at runtime, and that gap is documented on the opcode rather than
+papered over.
+
+`shared_create` builds a `Shared<T>` cell (`share(x)`), and `shared_get` /
+`shared_set` are single synchronised accesses. Each access is atomic; a
+read-modify-write *sequence* is not, so a function that reads and writes
+without `shared_with_lock` gets one warning naming the pattern. The
+`Shared.__get`/`__set`/`__withLock` dunders deliberately stay opaque native
+calls: lowering them to the dedicated operations would recurse through the
+same methods. `Time.sleepAsync` stays opaque for the opposite reason: it is a
+scheduler timer, not a synchronisation primitive.
+
+### Channels, atomics, semaphores, conditions
+
+Channels are untyped and bounded: `channel_create` takes an `int` capacity,
+`channel_send`/`channel_receive` block when full/empty, `channel_size` reads
+the backlog, and `channel_send_async`/`channel_receive_async` return tasks for
+the async side. The send future is `Task<void>`; the receive future is
+`Task<unknown>` — the checker still names it `Task<void>`, a known
+imprecision the lowering corrects, because the task genuinely carries the
+received value. An `await` of a `Task<void>` normally defines no temp, but an
+`unknown`-typed one is accepted wherever the checker left the await unnamed
+(the `sendAsync` await observes `unknown`, not `void`); the temp names the
+runtime nil the backend then pops, which is also what keeps the stack effect
+identical to the reference compiler's `Await`+`Pop`.
+
+Atomics lower one lane per representation (`atomic_load`/`store`/`add` for
+`int`, `bool` and `double` lanes, `atomic_load_ref`/`store_ref` for objects),
+each pinning its own result type. Semaphores spell all six operations
+(`acquire`/`release`/`available`/`set_permits`/`try_acquire`/`release_many`)
+with `int` counts; conditions spell
+`wait`/`wait_for`/`notify_one`/`notify_all`, where the bare `wait` — no
+predicate, no timeout — warns at every site, because a notify delivered before
+it blocks is lost.
+
+### The FFI boundary
+
+`ffi_call` names a library symbol plus one ABI tag per argument and one for
+the result (`NativeAbiTag`: `I64 F64 Bool Handle BufferView StructView
+Callback`), preserving the native signature in MIR so a later backend can
+marshal without re-deriving it. The verifier checks tags against the ZL
+operand types (an `unknown` operand is marshalled by the runtime's own
+packing), enforces the ownership contract (primitives carry none; a handle
+returns `Owned`; views cross only as borrows and can never be returned), and
+rejects a call with no symbol or mismatched tag/ownership counts. Handles live
+in `NativeHandle` values managed by
+`handle_borrow`/`handle_consume`/`handle_close`; callbacks are
+`NativeCallback` tokens behind `callback_register` (synchronous closures only
+— the registry invokes them under a lease, with no scheduler to park on) with
+arity/result-checked `callback_invoke` and `callback_close`. The MIR→bytecode
+backend fails closed on the whole family: FFI has no bytecode spelling, so any
+function using it is stubbed rather than mistranslated.
 
 ---
 
@@ -733,22 +867,33 @@ errors, and a module with notes can still verify.
 
 ## Tests
 
-- `tests/mir_tests.cpp` (`zl-mir-tests`) — 47 regressions. Builds MIR by hand
+- `tests/mir_tests.cpp` (`zl-mir-tests`) — 65 regressions. Builds MIR by hand
   and checks the verifier rejects each class of malformed module. A
   lowering-only test could never reach most of these shapes, because the builder
-  refuses to produce them.
-- `tests/mir_lowering_tests.cpp` (`zl-mir-lowering-tests`) — 33 regressions.
+  refuses to produce them. The concurrency set pins the opcode
+  shapes/predicates, the task/thread/channel/lock/atomic/semaphore/condition/
+  shared/FFI/callback typing rules (accept and reject sides), the
+  void-body-temp compatibility rule, and the bare-wait and unlocked-access
+  warnings.
+- `tests/mir_lowering_tests.cpp` (`zl-mir-lowering-tests`) — 42 regressions.
   Drives the real pipeline on small programs and asserts on the MIR that comes
   out — including the specific properties an earlier lowerer got wrong, and the
   end-to-end merge (`if/else` writing one variable, then read) coming out as a
   block parameter with one argument per edge, interface widening verifying, and
-  member visibility surviving into the module.
-- `tests/mir_ssa_tests.cpp` (`zl-mir-ssa-tests`) — 27 regressions. Covers the
+  member visibility surviving into the module, and every concurrency
+  primitive lowering to its dedicated operation (`task_spawn`/`task_block`/
+  `task_ignore`/`task_cancel`, `thread_start`/`join`/`is_alive`, the channel
+  family, the scoped locks, every atomic lane, semaphores and conditions, and
+  `shared_create`/`get`/`set`).
+- `tests/mir_ssa_tests.cpp` (`zl-mir-ssa-tests`) — 30 regressions. Covers the
   CFG queries (predecessors/successors, reachability, dominance, dominator tree,
   dominance frontiers, dead blocks), the data-flow layer (def-use, liveness,
   constants), every way a block parameter or edge argument can be malformed, and
   the promotion pass including the slots it must *decline* and the fact that a
-  declined promotion leaves the function untouched.
+  declined promotion leaves the function untouched, per-`await` suspension
+  liveness (live temps and slots with types, borrow bindings with ownership
+  and source, the owned root crossing with the borrow), and promotion
+  composing with a suspension point.
 - `tests/mir_ownership_tests.cpp` (`zl-mir-ownership-tests`) — the
   ownership/lifetime suite. Hand-built MIR naming one invalid state each
   (use after drop, double drop, drop after move, drop while borrowed
