@@ -1,5 +1,7 @@
 #include "zl/mir/dataflow.hpp"
 
+#include "zl/mir/folding.hpp"
+
 #include <algorithm>
 
 namespace zl::mir {
@@ -52,28 +54,6 @@ void applyLiveStep(const Instruction& instruction, LivenessFact& live) {
     }
 }
 
-std::optional<Constant> makeInt(std::int64_t value) {
-    Constant c;
-    c.kind = ConstKind::Int;
-    c.intValue = value;
-    return c;
-}
-std::optional<Constant> makeDouble(double value) {
-    Constant c;
-    c.kind = ConstKind::Double;
-    c.doubleValue = value;
-    return c;
-}
-std::optional<Constant> makeBool(bool value) {
-    Constant c;
-    c.kind = ConstKind::Bool;
-    c.boolValue = value;
-    return c;
-}
-
-bool isInt(const std::optional<Constant>& c) { return c && c->kind == ConstKind::Int; }
-bool isDouble(const std::optional<Constant>& c) { return c && c->kind == ConstKind::Double; }
-bool isBool(const std::optional<Constant>& c) { return c && c->kind == ConstKind::Bool; }
 
 } // namespace
 
@@ -368,113 +348,18 @@ std::optional<ConstId> ConstantAnalysis::evaluateOperand(const Operand& operand)
     return it == constantIds_.end() ? std::nullopt : std::optional<ConstId>(it->second);
 }
 
-// Folding is deliberately small: only operations whose result is the same
-// whether or not a runtime check would have fired, and only when the operands
-// are both constants the VM would see with the same shape. Anything else
-// (string concatenation, division by a zero it cannot see through) reports
-// "not known" rather than guessing.
+// Folding is delegated to the shared evaluator in folding.hpp, so the analysis
+// and the constant-folding pass cannot disagree about what a constant
+// instruction computes.
+//
+// That evaluator is deliberately more conservative than the arithmetic it
+// replaces, and the difference is the point: ZL raises on integer overflow, on
+// division by zero and on an out-of-range shift, so an operation that would
+// raise is reported as "not known" and left in the MIR to raise at runtime.
+// Folding it into a wrapped constant would turn a thrown error into a value,
+// which is a behaviour change dressed up as an optimisation.
 std::optional<Constant> ConstantAnalysis::fold(const Instruction& instruction) const {
-    const bool unary = instruction.opcode == Opcode::Neg || instruction.opcode == Opcode::Not ||
-                       instruction.opcode == Opcode::BitNot || instruction.opcode == Opcode::Widen;
-    if (!unary && instruction.operands.size() != 2) return std::nullopt;
-    if (instruction.operands.empty()) return std::nullopt;
-
-    // Operands are folded through the *pool*, so a constant only propagates
-    // while the module already spells it out.
-    auto constantOfOperand = [&](std::size_t i) -> std::optional<Constant> {
-        if (i >= instruction.operands.size()) return std::nullopt;
-        const auto id = evaluateOperand(instruction.operands[i]);
-        if (!id) return std::nullopt;
-        const Constant* c = module_.constant(*id);
-        return c ? std::optional<Constant>(*c) : std::nullopt;
-    };
-    const std::optional<Constant> a = constantOfOperand(0);
-    const std::optional<Constant> b = constantOfOperand(1);
-
-    auto compare = [&](auto intOp, auto doubleOp) -> std::optional<Constant> {
-        if (isInt(a) && isInt(b)) return makeBool(intOp(a->intValue, b->intValue));
-        if (isDouble(a) && isDouble(b)) return makeBool(doubleOp(a->doubleValue, b->doubleValue));
-        return std::nullopt;
-    };
-
-    switch (instruction.opcode) {
-        case Opcode::Add:
-            if (isInt(a) && isInt(b)) return makeInt(a->intValue + b->intValue);
-            if (isDouble(a) && isDouble(b)) return makeDouble(a->doubleValue + b->doubleValue);
-            return std::nullopt;
-        case Opcode::Sub:
-            if (isInt(a) && isInt(b)) return makeInt(a->intValue - b->intValue);
-            if (isDouble(a) && isDouble(b)) return makeDouble(a->doubleValue - b->doubleValue);
-            return std::nullopt;
-        case Opcode::Mul:
-            if (isInt(a) && isInt(b)) return makeInt(a->intValue * b->intValue);
-            if (isDouble(a) && isDouble(b)) return makeDouble(a->doubleValue * b->doubleValue);
-            return std::nullopt;
-        case Opcode::Div:
-            if (isInt(a) && isInt(b) && b->intValue != 0) return makeInt(a->intValue / b->intValue);
-            if (isDouble(a) && isDouble(b) && b->doubleValue != 0.0)
-                return makeDouble(a->doubleValue / b->doubleValue);
-            return std::nullopt;
-        case Opcode::Mod:
-            if (isInt(a) && isInt(b) && b->intValue != 0) return makeInt(a->intValue % b->intValue);
-            return std::nullopt;
-        case Opcode::Neg:
-            if (isInt(a)) return makeInt(-a->intValue);
-            if (isDouble(a)) return makeDouble(-a->doubleValue);
-            return std::nullopt;
-        case Opcode::Not:
-            if (isBool(a)) return makeBool(!a->boolValue);
-            return std::nullopt;
-        case Opcode::BitNot:
-            if (isInt(a)) return makeInt(~a->intValue);
-            return std::nullopt;
-        case Opcode::BitAnd:
-            if (isInt(a) && isInt(b)) return makeInt(a->intValue & b->intValue);
-            return std::nullopt;
-        case Opcode::BitOr:
-            if (isInt(a) && isInt(b)) return makeInt(a->intValue | b->intValue);
-            return std::nullopt;
-        case Opcode::BitXor:
-            if (isInt(a) && isInt(b)) return makeInt(a->intValue ^ b->intValue);
-            return std::nullopt;
-        case Opcode::Shl:
-            if (isInt(a) && isInt(b) && b->intValue >= 0 && b->intValue < 64) {
-                return makeInt(static_cast<std::int64_t>(static_cast<std::uint64_t>(a->intValue)
-                                                         << b->intValue));
-            }
-            return std::nullopt;
-        case Opcode::Shr:
-            if (isInt(a) && isInt(b) && b->intValue >= 0 && b->intValue < 64)
-                return makeInt(a->intValue >> b->intValue);
-            return std::nullopt;
-        case Opcode::Widen:
-            if (isInt(a)) return makeDouble(static_cast<double>(a->intValue));
-            return std::nullopt;
-        case Opcode::Eq:
-            if (isInt(a) && isInt(b)) return makeBool(a->intValue == b->intValue);
-            if (isDouble(a) && isDouble(b)) return makeBool(a->doubleValue == b->doubleValue);
-            if (isBool(a) && isBool(b)) return makeBool(a->boolValue == b->boolValue);
-            return std::nullopt;
-        case Opcode::Ne:
-            if (isInt(a) && isInt(b)) return makeBool(a->intValue != b->intValue);
-            if (isDouble(a) && isDouble(b)) return makeBool(a->doubleValue != b->doubleValue);
-            if (isBool(a) && isBool(b)) return makeBool(a->boolValue != b->boolValue);
-            return std::nullopt;
-        case Opcode::Lt:
-            return compare([](std::int64_t x, std::int64_t y) { return x < y; },
-                           [](double x, double y) { return x < y; });
-        case Opcode::Le:
-            return compare([](std::int64_t x, std::int64_t y) { return x <= y; },
-                           [](double x, double y) { return x <= y; });
-        case Opcode::Gt:
-            return compare([](std::int64_t x, std::int64_t y) { return x > y; },
-                           [](double x, double y) { return x > y; });
-        case Opcode::Ge:
-            return compare([](std::int64_t x, std::int64_t y) { return x >= y; },
-                           [](double x, double y) { return x >= y; });
-        default:
-            return std::nullopt;
-    }
+    return foldInstruction(module_, instruction);
 }
 
 // What a value's own definition implies, given the constants known right now.
