@@ -196,15 +196,16 @@ bool promoteOnCopy(const Function& original, Function& working, SsaPromotionRepo
     // --- 1. profile every slot ------------------------------------------
     std::unordered_map<SlotId, SlotProfile> profiles;
     for (const auto& block : working.blocks) {
-        for (const auto& instruction : block.instructions) {
+        for (std::size_t i = 0; i < block.instructions.size(); ++i) {
+            const Instruction& instruction = block.instructions[i];
             if (instruction.slot == 0) continue;
             SlotProfile& profile = profiles[instruction.slot];
             switch (instruction.opcode) {
                 case Opcode::Store:
-                    profile.stores.emplace_back(block.id, 0);
+                    profile.stores.emplace_back(block.id, i);
                     break;
                 case Opcode::Load:
-                    profile.loads.emplace_back(block.id, 0);
+                    profile.loads.emplace_back(block.id, i);
                     break;
                 case Opcode::Move:
                 case Opcode::Drop:

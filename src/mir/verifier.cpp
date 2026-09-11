@@ -547,18 +547,22 @@ private:
                           std::to_string(handler.catchType), block.id, -1, block.location);
                 }
                 const BasicBlock* target = function_.block(handler.block);
-                if (target && target->kind == BlockKind::Catch) {
+                if (target && (target->kind == BlockKind::Catch || target->kind == BlockKind::Cleanup)) {
+                    // A catch block binds the caught value (or message); a
+                    // cleanup block binds the thrown object so it can rethrow
+                    // it after the finally body runs.
                     if (handler.catchSlot == 0) {
-                        error("exception handler for catch block b" + std::to_string(handler.block) +
+                        error("exception handler for handler block b" + std::to_string(handler.block) +
                               " does not name a slot for the caught value", block.id, -1, block.location);
                     } else if (!function_.slot(handler.catchSlot)) {
-                        error("exception handler for catch block b" + std::to_string(handler.block) +
+                        error("exception handler for handler block b" + std::to_string(handler.block) +
                               " names unknown catch slot " + std::to_string(handler.catchSlot),
                               block.id, -1, block.location);
                     }
                 } else if (handler.catchSlot != 0 && target && target->kind == BlockKind::Normal) {
                     error("exception handler names catch slot " + std::to_string(handler.catchSlot) +
-                          " but its target block b" + std::to_string(handler.block) + " is not a catch block",
+                          " but its target block b" + std::to_string(handler.block) +
+                          " is neither a catch nor a cleanup block",
                           block.id, -1, block.location);
                 }
             }

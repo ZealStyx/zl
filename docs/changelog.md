@@ -2,6 +2,50 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-11 — MIR lowering: structural match, copy-update, and try/finally
+
+The last lowering gaps close. `try/finally`, structural match patterns, `data`
+copy-update, function references, and object-typed collection literals now lower
+into valid MIR that executes identically through `--mir-vm`; the bytecode
+compiler/VM stays the semantic reference, and every case below was checked
+against it with a fixture in addition to the 50-example differential corpus.
+
+**try/finally.** `ExceptionHandler` gains an `isFinally` flag. A finally handler
+is a catch-all placed innermost in its try's chain (after the catches, so the
+catches get first refusal), whose target is a `Cleanup` block that binds the
+thrown object into a pending slot, runs the finally body, and throws the slot
+again. Normal completion runs the same body in a plain block, and
+`return`/`break`/`continue` inline the active finalizers innermost-first, mirroring
+the reference compiler's `activeFinallyBlocks_`. The bytecode backend spells a
+finally handler as `PushFinallyHandler` and binds the pending slot exactly like a
+catch binding. Two backend bugs surfaced and were fixed along the way:
+`handlerGroups`' union-find dereferenced `end()` once a component's root was
+reached (latent until a try had two handlers — two catches, or a catch plus a
+finally), and `PushFinallyHandler`'s patched target never got the per-function
+base offset (latent until the handler was actually reached).
+
+**Structural match.** `lowerMatchPattern` walks one arm's pattern recursively —
+`data` destructures fields, `list`/`set` check length then members, `map` checks
+entry presence then values — and every sub-pattern branches to the same
+fall-through the top-level arm chain uses. Positional data patterns
+(`Pair(v, w)`) failed in the checker first (`unknown data field 'Pair.'`), so
+`TypeChecker` now writes declaration-order field names back into the arm before
+the bytecode compiler or the lowerer sees it.
+
+**data copy-update.** `base with { ... }` lowers to `alloc` plus per-field
+copies (walking the parent chain, as the verifier does) and coerced updates.
+
+**A promotion bug the new shapes exposed.** `promoteSlotsToBlockParameters`
+profiled every store at instruction index 0 instead of its real index, so the
+"every store already carries the slot's declared type" eligibility check read
+the block's first instruction. It still passed because the old match shape put a
+`refine` at index 0 of each arm body, which incidentally declined the arm's
+slots and left the function with nothing to promote; the structural-match shape
+moved the refine to its own block, the decline disappeared, and a dynamic
+(`unknown`) slot got promoted and silently retyped to `list<int>`. Profiling now
+records the real instruction index, so the eligibility check reads the store it
+is deciding about and the dynamic slot stays in memory form.
+
 ## 2026-09-10 — MIR backend: the differential corpus is the whole example set
 
 The last 7 known-gap examples — Generics, Closures, CollectionAlgorithms,
