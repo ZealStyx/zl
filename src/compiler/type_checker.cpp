@@ -3236,10 +3236,24 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
         }
         if (armUnconditional && arm.patternKind == MatchExpr::PatternKind::Wildcard) unconditionalPatternSeen = true;
         symbols_.pushScope();
+        // Positional data patterns (`Pair(v, w)`) carry empty field names in
+        // the AST; the checker resolves them by declaration order here and
+        // writes the names back so the bytecode compiler and the MIR lowerer
+        // both see concrete fields instead of re-deriving the order.
+        if (arm.patternKind == MatchExpr::PatternKind::Data && arm.positional) {
+            if (const auto* shape = semanticModel_.findClass(arm.typePattern.name)) {
+                std::size_t positionalIndex = 0;
+                for (auto& field : arm.dataFields) {
+                    if (positionalIndex < shape->fieldOrder.size())
+                        field.fieldName = shape->fieldOrder[positionalIndex++];
+                }
+            }
+        }
         MatchExpr::Pattern p;
         p.kind = arm.patternKind; p.raw = arm.raw; p.literalType = arm.literalType;
         p.enumTypeName = arm.enumTypeName; p.enumMemberName = arm.enumMemberName;
         p.typePattern = arm.typePattern; p.bindingName = arm.bindingName;
+        p.positional = arm.positional;
         for (const auto& field : arm.dataFields) {
             MatchExpr::DataFieldPattern copied;
             copied.fieldName = field.fieldName;

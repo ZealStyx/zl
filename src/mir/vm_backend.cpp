@@ -278,14 +278,6 @@ private:
             return false;
         }
         for (const BasicBlock& block : fn.blocks) {
-            // Catch blocks are entered by the unwinder and translate cleanly
-            // (see the handler sync in emitTerminator). A cleanup block - a
-            // finally region - has no translation yet, because lowering does
-            // not produce one either.
-            if (block.kind == BlockKind::Cleanup) {
-                reason = "block kind " + std::string(blockKindName(block.kind));
-                return false;
-            }
             for (const Instruction& ins : block.instructions) {
                 if (!isSupportedOpcode(ins.opcode)) {
                     reason = "opcode " + std::string(opcodeName(ins.opcode));
@@ -597,8 +589,12 @@ private:
             // caught value on the stack - the exception object for a typed
             // catch, the stringified message for a catch-all. Binding it to
             // the clause's slot is the first thing the block does, exactly
-            // like the reference's DefineVar at each handler.
-            if (block.kind == BlockKind::Catch) emitCatchBinding(fn, block, body);
+            // like the reference's DefineVar at each handler. A cleanup (finally)
+            // block is entered the same way, but the value is always the thrown
+            // object, and the block rethrows it at the end.
+            if (block.kind == BlockKind::Catch || block.kind == BlockKind::Cleanup) {
+                emitCatchBinding(fn, block, body);
+            }
             // Block parameters are the MIR's phi nodes. The VM has no phi, but
             // block parameters and slots are interchangeable in meaning, so the
             // lowering is exactly the memory form: each predecessor stores the
@@ -619,10 +615,12 @@ private:
             if (it != body.label.end()) body.code[patch.first].operand = it->second;
         }
 
-        // Append, translating local addresses to global ones.
+        // Append, translating local addresses to global ones. A finally
+        // handler's target is a block address like a jump's or a catch
+        // handler's, so it needs the same base adjustment.
         for (auto& ins : body.code) {
             if (ins.op == OpCode::Jump || ins.op == OpCode::JumpIfFalse ||
-                ins.op == OpCode::PushHandler) {
+                ins.op == OpCode::PushHandler || ins.op == OpCode::PushFinallyHandler) {
                 ins.operand += body.base;
             }
         }
@@ -1401,7 +1399,7 @@ private:
     // throw is dispatched dynamically against whatever is installed.
 
     static bool sameHandler(const ExceptionHandler& a, const ExceptionHandler& b) {
-        return a.block == b.block && a.catchType == b.catchType;
+        return a.block == b.block && a.catchType == b.catchType && a.isFinally == b.isFinally;
     }
 
     static std::size_t commonPrefix(const std::vector<ExceptionHandler>& a,
@@ -1438,11 +1436,20 @@ private:
         }
         for (std::size_t k = target.size(); k > shared; --k) {
             const ExceptionHandler& handler = target[k - 1];
-            // A typed catch carries the class name (bare, so the runtime can
-            // match it against the thrown object's class and walk subclasses);
-            // operand2 is 1-based so 0 can mean catch-all. The group id is
-            // what makes a throw inside a catch body skip this try's other
-            // handlers: the runtime removes the whole group on dispatch.
+            // A finally handler is installed as a catch-all that rethrows
+            // after the cleanup block runs; the runtime pushes the thrown
+            // object (not a stringified message) and the rethrow is the
+            // cleanup block's own terminator. A typed catch carries the class
+            // name (bare, so the runtime can match it against the thrown
+            // object's class and walk subclasses); operand2 is 1-based so 0
+            // can mean catch-all. The group id is what makes a throw inside a
+            // catch body skip this try's other handlers: the runtime removes
+            // the whole group on dispatch.
+            if (handler.isFinally) {
+                const std::size_t index = body.emit(OpCode::PushFinallyHandler, 0, line);
+                body.patches.emplace_back(index, handler.block);
+                continue;
+            }
             const std::size_t typeIndex =
                 handler.catchType != 0
                     ? addName(bareTypeName(handler.catchType)) + 1
@@ -1462,21 +1469,22 @@ private:
         return runtimeTypeName(module_.types, type);
     }
 
-    // A catch block's bound value lands in the slot its handler names; find
-    // that slot by locating the handler that targets this block.
+    // A catch (or finally cleanup) block's bound value lands in the slot its
+    // handler names; find that slot by locating the handler that targets this
+    // block. For a cleanup block the value is the thrown object itself.
     void emitCatchBinding(const Function& fn, const BasicBlock& block, Body& body) {
         for (const BasicBlock& b : fn.blocks) {
             for (const ExceptionHandler& handler : b.exceptionHandlers) {
                 if (handler.block != block.id) continue;
                 if (handler.catchSlot == 0) {
-                    throw std::runtime_error("MIR backend: catch block without a binding slot");
+                    throw std::runtime_error("MIR backend: handler target block without a binding slot");
                 }
                 body.emit(OpCode::DefineVar, addName(slotLocal(handler.catchSlot)),
                           block.location.line);
                 return;
             }
         }
-        throw std::runtime_error("MIR backend: catch block named by no handler");
+        throw std::runtime_error("MIR backend: handler target block named by no handler");
     }
 
     // All handlers of one try statement share a group id. Two adjacent
@@ -1492,12 +1500,7 @@ private:
         }
         std::unordered_map<BlockId, BlockId> parent;
         auto find = [&parent](BlockId x) {
-            auto it = parent.find(x);
-            if (it == parent.end()) return x;
-            while (it->second != x) {
-                x = it->second;
-                it = parent.find(x);
-            }
+            while (parent.count(x) && parent.at(x) != x) x = parent.at(x);
             return x;
         };
         auto indexOf = [](const BasicBlock& block, BlockId handlerBlock) -> std::size_t {
@@ -1520,7 +1523,11 @@ private:
                         break;
                     }
                 }
-                if (siblings) parent[find(x)] = find(y);
+                if (siblings) {
+                    const BlockId rootX = find(x);
+                    const BlockId rootY = find(y);
+                    if (rootX != rootY) parent[rootX] = rootY;
+                }
             }
         }
         std::unordered_map<BlockId, std::size_t> groups;
