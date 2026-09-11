@@ -37,6 +37,73 @@ Both print, on stderr, a per-function ledger: which functions were compiled
 natively, and for every other function *by name and with a reason* why it was
 left to the VM. The two lists always account for every function in the module.
 
+### A worked example
+
+    tools/native_demo.sh ./build/zl_language
+
+walks one small program through every stage — source, MIR, native IR,
+disassembled machine code — then maps the emitted bytes executable, calls them
+as ordinary System V functions, and diffs the results against the VM. Given
+
+```zl
+static func sumTo(int n): int {
+    var acc = 0
+    var i = 1
+    while (i <= n) {
+        acc = acc + i
+        i = i + 1
+    }
+    return acc
+}
+```
+
+MIR keeps the mutable locals as slots and the loop as a real CFG:
+
+```
+b1 (entry):
+  store slot 1('acc'), 0:int
+  store slot 2('i'), 1:int
+  jump b2
+b2:
+  %1:int = load slot 2('i')
+  %2:bool = le %1:int, $0:int
+  branch %2:bool, b3, b4
+b3:
+  ...
+  jump b2
+b4:
+  %8:int = load slot 1('acc')
+  return %8:int
+```
+
+Selection turns `le` into the class-specific `icmp.le`, MIR slots into frame
+slots, and constants into `imm.i`:
+
+```
+bb2 (mir2):
+  %4:int = load slot2:i
+  %5:int = icmp.le %4:t1, %1:n
+  branch %5:t2, bb3, bb4
+```
+
+and emission produces the loop, with the back edge resolved by relocation:
+
+```
+ 55:  mov    rax,QWORD PTR [rbp-0x10]   ; load i
+ 6a:  mov    rcx,QWORD PTR [rbp-0x18]   ; load n (spilled from rdi)
+ 71:  cmp    rax,rcx
+ 74:  setle  al
+ 77:  movzx  rax,al
+ 89:  test   rax,rax
+ 8c:  je     0x115                      ; -> bb4
+ 92:  jmp    0x97                       ; -> bb3
+...
+110:  jmp    0x55                        ; back edge
+```
+
+Running `sumTo`, `biggest` and `mix` as native functions produces exactly the
+VM's output, which is what the script asserts.
+
 ## Target abstraction
 
 `include/zl/native/target.hpp` is the boundary. Above it, nothing is
@@ -207,6 +274,9 @@ they are mapped executable, direct calls are relocated, and the result is called
 through a function pointer and compared against what ZL's semantics say the
 program computes. A backend test that only inspects the IR proves the backend
 agrees with itself.
+
+`tools/native_demo.sh` is the same idea in shell form, for looking at rather
+than asserting on.
 
 It covers the calling-convention invariants, the value-class mapping (including
 that unknown fails closed), integer and float arithmetic, all comparisons
