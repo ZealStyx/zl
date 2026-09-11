@@ -137,21 +137,25 @@ Use `scripts/run_regressions.sh` / `scripts/run_regressions.bat` for the full pe
 regression corpus, including package-manager cases, and `scripts/native_gate.sh` /
 `scripts/native_gate.ps1` for the native compiler gate.
 
-Three differential harnesses cover the MIR pipeline on `examples/`:
+Four differential harnesses cover the MIR pipeline on `examples/`:
 
 ```bash
 tools/mir_backend_diff.sh ./build/zl_language     # backend vs reference path
 tools/mir_promotion_diff.sh ./build/zl_language   # block params vs store/load
 tools/mir_opt_diff.sh ./build/zl_language         # optimised vs unoptimised
+tools/mir_opt_check_all.sh ./build/zl_language    # the same, statically, wider
 ```
 
 The first must stay at 22 matching with the 9 documented fail-closed gaps. The
 second compares `--mir-vm` with and without `ZL_MIR_PROMOTE=1`; it must report 0
 differing (27 compared, 32 not yet runnable by the backend). The third compares
-`--mir-vm` with and without `ZL_MIR_OPT=1` and must report 0 differing; it is
-currently 50 of 50, with none skipped. All three are the check that a change to
-the IR, the promotion pass, the optimiser, or the backend did not alter
-behaviour.
+`--mir-vm` with and without `ZL_MIR_OPT=1` - run both, compare the output - and
+must report 0 differing; it is currently 50 of 50, none skipped. The fourth does
+not need the backend at all: it runs `zl --mir-opt-check` over every `.zl` in
+`examples/` *and* `stdlib/`, which is how the optimiser gets checked against the
+generics, async, task, lock and FFI code the backend cannot execute yet; it is
+currently 76 of 76 equivalent. All four are the check that a change to the IR,
+the promotion pass, the optimiser, or the backend did not alter behaviour.
 
 Both discover the `_lib` module roots themselves and set `ZL_EXTRA_ROOTS`, so a
 program that imports a sibling module is genuinely compared instead of failing to

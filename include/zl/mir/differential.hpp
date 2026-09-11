@@ -67,12 +67,26 @@ struct DifferentialOptions {
     // when the pipeline under test *is* the default one and the question is
     // whether it is idempotent.
     bool normalizeBefore{true};
+    // The pipeline used to build that normalised reference. Empty means the
+    // default one.
+    //
+    // It has to be the same pipeline the `after` module was built with. The
+    // event comparison asks "did the optimiser remove anything it should not
+    // have", and it answers that by measuring `after` against a reference that
+    // has had the same removal opportunities. Judge a module built by one
+    // pass against a reference built by eight and every event the other seven
+    // would have deleted is reported as a divergence - which is a statement
+    // about the comparison, not about the module.
+    std::string referencePipeline;
     // Optimisation may not make the program bigger. A pass that adds
     // instructions is either wrong or not finished; either way, say so.
     bool requireNoGrowth{true};
     std::size_t maxMismatches{32};
 
     [[nodiscard]] std::string describe() const;
+    // The options with `referencePipeline` set to `spec`, so a caller that
+    // optimised with a named pipeline asks for a reference built the same way.
+    [[nodiscard]] DifferentialOptions withReferencePipeline(std::string spec) const;
 };
 
 struct DifferentialMismatch {

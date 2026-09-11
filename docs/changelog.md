@@ -54,7 +54,9 @@ fail) or local stores (deciding whether one is observable is the same work the
 optimiser does to remove it), and it cannot see values at all — so
 `tools/mir_opt_diff.sh` runs every program in `examples/` both ways and compares
 its output and exit status byte for byte. Currently **50 of 50 identical, none
-skipped**.
+skipped**. `tools/mir_opt_check_all.sh` is the wide sibling: it needs no backend,
+so it also covers the 26 stdlib modules - the generics, `async`, task, lock and
+FFI code the backend stubs today - and is currently **76 of 76 equivalent**.
 
 **A miscompile the runtime half caught, and the static half could not.**
 `examples/intermediate/Closures.zl` printed `1 1 1` where it should print
@@ -68,7 +70,13 @@ every store in a function with captures (how the runtime spells capture
 persistence is a backend contract the pass does not restate), and both suites
 pin it.
 
-Regressions: `tests/mir_pass_tests.cpp` (`zl-mir-opt-tests`), 139 checks of
+The "no event lost" rule is measured against a reference built by the *same*
+pipeline (`DifferentialOptions::referencePipeline`), so a pipeline named with
+`ZL_MIR_OPT_PASSES` is judged against itself rather than against the default
+one - measuring a module built by one pass against a reference built by eight
+reports every event the other seven would have deleted.
+
+Regressions: `tests/mir_pass_tests.cpp` (`zl-mir-opt-tests`), 146 checks of
 hand-built MIR with no front end; `tests/mir_opt_pipeline_tests.cpp`
 (`zl-mir-opt-pipeline-tests`), 79 checks that lower, optimise, verify, compare
 statically and then *run both versions* and compare their output. Command line:

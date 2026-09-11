@@ -105,9 +105,19 @@ std::string renderSignature(const Module& module, const Function& function) {
 //     passes. What it does catch is any rewrite the pipeline does not justify:
 //     an added effect, a removed output, a changed call, a lost ownership
 //     event.
-Module baselineOf(const Module& module) {
+// The unoptimised module with the pipeline under test run over it: the set of
+// events this pipeline *can* remove, which is what "removed something it should
+// not have" is measured against.
+Module baselineOf(const Module& module, const std::string& pipeline) {
     Module copy = module;
-    PassManager manager = PassManager::defaultPipeline();
+    std::string error;
+    PassManager manager = (!pipeline.empty() && pipeline != "default")
+                              ? PassManager::namedPipeline(pipeline, error)
+                              : PassManager::defaultPipeline();
+    // An unknown name cannot have produced the module being judged - the
+    // command line rejects one before it optimises anything - so falling back
+    // to the default is the only reference that means anything here.
+    if (!error.empty()) manager = PassManager::defaultPipeline();
     OptimizationOptions options;
     options.verifyBetweenPasses = false;
     options.verifyAtEnd = false;
@@ -151,8 +161,15 @@ std::string DifferentialOptions::describe() const {
     out << "structure=" << (compareStructure ? "yes" : "no")
         << " observable-events=" << (compareObservableEvents ? "yes" : "no")
         << " no-growth=" << (requireNoGrowth ? "yes" : "no")
+        << " reference=" << (referencePipeline.empty() ? "default" : referencePipeline)
         << " max-mismatches=" << maxMismatches;
     return out.str();
+}
+
+DifferentialOptions DifferentialOptions::withReferencePipeline(std::string spec) const {
+    DifferentialOptions options = *this;
+    options.referencePipeline = std::move(spec);
+    return options;
 }
 
 std::string DifferentialMismatch::describe() const {
@@ -248,7 +265,7 @@ DifferentialResult compareModules(const Module& before, const Module& after,
     // The module the optimised one is judged against: the unoptimised module
     // with the default pipeline run over it, unless the caller opted out (which
     // makes the event comparison strict against the raw original).
-    const Module reference = options.normalizeBefore ? baselineOf(before) : before;
+    const Module reference = options.normalizeBefore ? baselineOf(before, options.referencePipeline) : before;
 
     const std::size_t shared = std::min(before.functions.size(), after.functions.size());
     for (std::size_t i = 0; i < shared; ++i) {

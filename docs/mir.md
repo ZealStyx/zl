@@ -977,7 +977,7 @@ errors, and a module with notes can still verify.
   overloads keeping distinct dispatch identities; and SSA promotion declining
   to retype a dynamic slot.
 
-- `tests/mir_pass_tests.cpp` (`zl-mir-opt-tests`) — 139 regressions. The
+- `tests/mir_pass_tests.cpp` (`zl-mir-opt-tests`) — 146 regressions. The
   optimiser's executable specification, written against hand-built MIR: the
   effect table and the rules that discharge `MayThrow`, the evaluator's
   refusals, each pass's rewrite *and* each pass's declinations, the closure

@@ -18,6 +18,7 @@ zl --emit-mir-opt out.mir program.zl   # emit the optimised MIR
 zl --mir-opt-check program.zl          # optimise and check it is equivalent
 ZL_MIR_OPT=1 zl --mir-vm program.zl    # run the optimised MIR
 tools/mir_opt_diff.sh                  # run the corpus both ways, compare
+tools/mir_opt_check_all.sh             # check every example and stdlib module
 ```
 
 ---
@@ -274,6 +275,14 @@ modules and reports any difference it can see:
   not reported as a divergence while deleting code that can is;
 * **no slot write invented** — a slot write may be removed, never added.
 
+The "not lost" rule is measured against a reference built by **the same
+pipeline** (`DifferentialOptions::referencePipeline`). Judge a module built by
+one pass against a reference built by eight and every event the other seven
+would have deleted is reported as a divergence — which would be a statement
+about the comparison, not about the module. This is why `--mir-opt-check`
+reports equivalence for `ZL_MIR_OPT_PASSES=fold-constants` as readily as for
+the default pipeline.
+
 An *observable event* is an instruction whose effect set contains something the
 outside world, another thread, or the language's lifetime discipline can see:
 output, calls, heap writes, task and thread operations, synchronization,
@@ -302,7 +311,28 @@ statistic. The same check runs inside
 `tests/mir_opt_pipeline_tests.cpp`, where the VM's output is captured and
 compared in-process.
 
-Current state: **50 of 50 example programs identical**, 0 skipped.
+Current state: **50 of 50 example programs identical**, 0 skipped — the 9 files
+under an `examples/*/_lib/` directory are importable module sources rather than
+runnable programs and are not counted.
+
+### Across the whole corpus: `tools/mir_opt_check_all.sh`
+
+The runtime harness is the strongest check there is and the narrowest, because
+it can only cover programs the MIR bytecode backend can execute — and much of
+the most interesting code in the language is not in that set. The stdlib is
+full of generics, `async`, tasks, locks, atomics and native calls whose
+functions the backend currently stubs.
+
+`tools/mir_opt_check_all.sh` needs no backend: for every `.zl` under
+`examples/` and `stdlib/` it runs `--mir-opt-check` and reports any file whose
+optimised form is not equivalent to its unoptimised one. It is the wide check
+where the runtime harness is the deep one, and neither substitutes for the
+other — this one cannot see values, and that one cannot reach this one's code.
+A file that will not load on its own is skipped and listed, not failed: it says
+nothing about the optimiser.
+
+Current state: **76 of 76 equivalent** (50 examples, 26 stdlib modules), 0
+divergent, 0 skipped.
 
 ---
 
@@ -333,7 +363,7 @@ failure.
 
 ## Tests
 
-- `tests/mir_pass_tests.cpp` (`zl-mir-opt-tests`) — 139 checks, MIR built by
+- `tests/mir_pass_tests.cpp` (`zl-mir-opt-tests`) — 146 checks, MIR built by
   hand, no front end. The effect table; the discharge rules (an `add` that
   cannot raise becomes removable, one that can does not); the evaluator's
   refusals (overflow, division by zero, `INT64_MIN / -1`, out-of-range shifts,
@@ -341,7 +371,9 @@ failure.
   store rule; pipeline ordering and the registry; rollback of a pass that
   corrupts the MIR; analysis caching and invalidation; snapshots and the diff;
   and the differential validator catching a deleted `log` and a changed
-  signature while accepting a real optimisation.
+  signature while accepting a real optimisation — and the reference-pipeline
+  rule from both sides: a module built by one pass is equivalent against a
+  reference built the same way, and divergent against one built by all eight.
 - `tests/mir_opt_pipeline_tests.cpp` (`zl-mir-opt-pipeline-tests`) — 79 checks
   over real ZL programs: lower → verify → optimise → verify → static
   differential → **run both versions and compare their output and exit code**.
@@ -349,7 +381,9 @@ failure.
   values, loops, strings and static calls, ownership, a closure that mutates a
   capture, a division by zero that must still raise, and a program the
   optimiser has nothing to say about.
-- `tools/mir_opt_diff.sh` — the corpus harness described above.
+- `tools/mir_opt_diff.sh` — the runtime corpus harness described above.
+- `tools/mir_opt_check_all.sh` — the static corpus sweep: every example and
+  every stdlib module checked with `--mir-opt-check`.
 
 A note on the library entry points: `optimizeModule(module, options)` is the
 one-call form; `PassManager::defaultPipeline()` / `namedPipeline(spec, error)`

@@ -143,7 +143,9 @@ std::filesystem::path resolveStdlibRoot(const char* argv0) {
 // MIR, or the final verification failed. Both are reported; neither is
 // recoverable by carrying on.
 
-[[nodiscard]] bool optimizeMIRForCommandLine(zl::mir::Module& module) {
+// `pipelineUsed` is handed back so the differential check can build its
+// reference with the same passes; see DifferentialOptions::referencePipeline.
+[[nodiscard]] bool optimizeMIRForCommandLine(zl::mir::Module& module, std::string* pipelineUsed = nullptr) {
     const char* spec = std::getenv("ZL_MIR_OPT_PASSES");
     const char* snapshots = std::getenv("ZL_MIR_OPT_SNAPSHOT_DIR");
     const bool verbose = std::getenv("ZL_MIR_OPT_VERBOSE") != nullptr;
@@ -160,6 +162,8 @@ std::filesystem::path resolveStdlibRoot(const char* argv0) {
             std::cerr << "  available pass: " << name << "\n";
         return false;
     }
+
+    if (pipelineUsed) *pipelineUsed = (spec != nullptr && *spec != '\0') ? spec : "default";
 
     const zl::mir::OptimizationReport report = manager.run(module, options);
     if (verbose) std::cerr << report.describeTrace();
@@ -181,8 +185,13 @@ std::filesystem::path resolveStdlibRoot(const char* argv0) {
 // The differential check: the optimised module must observe what the
 // unoptimised one observes. Runs on every command that optimises, because the
 // one thing worse than a slow optimiser is a wrong one that nobody ran.
-[[nodiscard]] bool checkMIRDifferential(const zl::mir::Module& before, const zl::mir::Module& after) {
-    const zl::mir::DifferentialResult result = zl::mir::compareModules(before, after);
+[[nodiscard]] bool checkMIRDifferential(const zl::mir::Module& before, const zl::mir::Module& after,
+                                       const std::string& pipeline = {}) {
+    // Judged against a reference built by the same pipeline. Measuring a module
+    // built by one pass against a reference built by all eight would report
+    // every event the other seven would have deleted as a divergence.
+    const zl::mir::DifferentialResult result = zl::mir::compareModules(
+        before, after, zl::mir::DifferentialOptions{}.withReferencePipeline(pipeline));
     std::cerr << result.describe() << "\n";
     for (const auto& note : result.notes) std::cerr << "  note: " << note << "\n";
     if (result.equivalent) return true;
@@ -370,8 +379,9 @@ int main(int argc, char** argv) {
                 if (!report.ok()) { std::cerr << report.describe(); return 4; }
 
                 const zl::mir::Module unoptimized = lowered.module;
-                if (!optimizeMIRForCommandLine(lowered.module)) return 4;
-                if (!checkMIRDifferential(unoptimized, lowered.module)) return 4;
+                std::string optPipeline;
+                if (!optimizeMIRForCommandLine(lowered.module, &optPipeline)) return 4;
+                if (!checkMIRDifferential(unoptimized, lowered.module, optPipeline)) return 4;
 
                 const std::string text = zl::mir::printModule(lowered.module);
                 if (std::string(argv[2]) == "-") {
@@ -413,8 +423,9 @@ int main(int argc, char** argv) {
                 if (!report.ok()) { std::cerr << report.describe(); return 4; }
 
                 const zl::mir::Module unoptimized = lowered.module;
-                if (!optimizeMIRForCommandLine(lowered.module)) return 4;
-                if (!checkMIRDifferential(unoptimized, lowered.module)) return 4;
+                std::string optPipeline;
+                if (!optimizeMIRForCommandLine(lowered.module, &optPipeline)) return 4;
+                if (!checkMIRDifferential(unoptimized, lowered.module, optPipeline)) return 4;
                 std::cout << "mir-opt-check: equivalent\n";
                 return 0;
             } catch (const std::exception& e) {
@@ -466,8 +477,9 @@ int main(int argc, char** argv) {
                 // tools/mir_opt_diff.sh runs the corpus both ways and compares.
                 if (std::getenv("ZL_MIR_OPT") != nullptr) {
                     const zl::mir::Module unoptimized = lowered.module;
-                    if (!optimizeMIRForCommandLine(lowered.module)) return 4;
-                    if (!checkMIRDifferential(unoptimized, lowered.module)) return 4;
+                    std::string optPipeline;
+                    if (!optimizeMIRForCommandLine(lowered.module, &optPipeline)) return 4;
+                    if (!checkMIRDifferential(unoptimized, lowered.module, optPipeline)) return 4;
                 }
                 const auto backend = zl::mir::compileModuleToBytecode(lowered.module);
                 if (!backend.ok()) {

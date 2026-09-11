@@ -933,6 +933,80 @@ void testDifferentialCatchesARemovedObservation() {
     require(result.describe().find("mismatch") != std::string::npos, "the report says so");
 }
 
+// `if 1 < 2 { log("t") } else { log("u") }`. Folding decides the condition; only
+// the branch-simplification and dead-block passes remove the untaken arm and
+// the log inside it. So the two pipelines disagree about one observable event,
+// which is exactly the situation the reference pipeline exists for.
+Module buildDecidedBranchProgram(const char* moduleName) {
+    ModuleBuilder builder(moduleName);
+    TypeArena& types = builder.types();
+    FunctionBuilder fb = builder.addFunction("Ref.main()");
+    fb.setReturnType(types.voidType());
+    const BlockId entry = fb.addBlock();
+    const BlockId taken = fb.addBlock();
+    const BlockId untaken = fb.addBlock();
+    fb.setCurrentBlock(entry);
+    const TempId condition = fb.emitBinary(Opcode::Lt, Operand::constant(builder.constantInt(1), types.intType()),
+                                           Operand::constant(builder.constantInt(2), types.intType()),
+                                           types.boolType());
+    fb.emitBranch(Operand::temp(condition, types.boolType()), taken, untaken);
+    fb.setCurrentBlock(taken);
+    fb.emitLog(Operand::constant(builder.constantString("taken"), types.stringType()));
+    fb.emitReturn();
+    fb.setCurrentBlock(untaken);
+    fb.emitLog(Operand::constant(builder.constantString("untaken"), types.stringType()));
+    fb.emitReturn();
+    fb.finish();
+    return builder.take();
+}
+
+// The reference module has to be built by the pipeline under test. Judge a
+// module built by one pass against a reference built by eight and every event
+// the other seven would have deleted is reported as a divergence - which says
+// something about the comparison and nothing about the module.
+void testDifferentialReferencePipeline() {
+    const Module before = buildDecidedBranchProgram("reference-pipeline");
+    Module after = before;
+    {
+        std::string error;
+        PassManager manager = PassManager::namedPipeline("fold-constants", error);
+        require(error.empty(), "fold-constants is a pass name");
+        OptimizationOptions options;
+        options.verifyAtEnd = false;
+        (void)manager.run(after, options);
+    }
+    auto logsIn = [](const Module& module) {
+        std::size_t count = 0;
+        for (const Function& function : module.functions)
+            for (const BasicBlock& block : function.blocks)
+                for (const Instruction& instruction : block.instructions)
+                    if (instruction.opcode == Opcode::Log) ++count;
+        return count;
+    };
+
+    // The premise of the whole test: the two pipelines really do disagree.
+    Module fullyOptimized = before;
+    (void)optimizeModule(fullyOptimized);
+    require(logsIn(after) == 2, "folding alone leaves both logs in place");
+    require(logsIn(fullyOptimized) == 1, "the full pipeline deletes the untaken one");
+
+    const DifferentialOptions matching = DifferentialOptions{}.withReferencePipeline("fold-constants");
+    const DifferentialResult withMatchingReference = compareModules(before, after, matching);
+    require(withMatchingReference.equivalent,
+            "against a reference built the same way, the module is equivalent: " +
+                withMatchingReference.describe());
+    require(matching.referencePipeline == "fold-constants", "the pipeline is carried on the options");
+
+    // The default pipeline also simplifies the branch and deletes the untaken
+    // arm, so it is one observable event shorter than the module above.
+    const DifferentialResult withDefaultReference = compareModules(before, after, DifferentialOptions{});
+    require(!withDefaultReference.equivalent,
+            "against a reference built by the full pipeline, the same module is reported as divergent");
+    require(!withDefaultReference.mismatches.empty() &&
+                withDefaultReference.mismatches[0].kind == "observable-events",
+            "and the mismatch is an event the reference removed and this pipeline did not");
+}
+
 void testDifferentialCatchesStructuralDamage() {
     const Module before = buildArithmeticProgram();
     Module after = before;
@@ -1014,6 +1088,7 @@ int main() {
     testSnapshotsAndDiff();
     testDifferentialAcceptsARealOptimization();
     testDifferentialCatchesARemovedObservation();
+    testDifferentialReferencePipeline();
     testDifferentialCatchesStructuralDamage();
     testDefaultPipelineEndToEnd();
 
