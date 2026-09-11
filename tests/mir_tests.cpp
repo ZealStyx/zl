@@ -1940,8 +1940,9 @@ void testFfiCallRules() {
     (void)fb.emitFfiCall("lib", "open", {}, {}, NativeAbiTag::Handle, types.nativeHandleType(),
                          {}, NativeOwnership::Owned);
     (void)fb.emitHandleBorrow(fb.parameterOperand(handle), types.nativeHandleType());
-    (void)fb.emitHandleConsume(fb.parameterOperand(handle), types.nativeHandleType());
-    fb.emitHandleClose(fb.parameterOperand(handle));
+    // consume transfers the handle: only the resulting value may be closed.
+    const auto transferred = fb.emitHandleConsume(fb.parameterOperand(handle), types.nativeHandleType());
+    fb.emitHandleClose(Operand::temp(transferred, types.nativeHandleType()));
     fb.emitReturn();
     fb.finish();
     Module module = builder.take();

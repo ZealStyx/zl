@@ -10,6 +10,7 @@
 
 #include "zl/compiler/operator_rules.hpp"
 #include "zl/mir/analysis.hpp"
+#include "zl/mir/safety.hpp"
 
 namespace zl::mir {
 namespace {
@@ -149,7 +150,7 @@ const char* severityName(DiagnosticSeverity severity) noexcept {
 
 std::string Diagnostic::describe() const {
     std::ostringstream out;
-    out << severityName(severity) << ": ";
+    out << severityName(severity) << " [mir." << propertyName(property) << "]: ";
     if (!function.empty()) out << "in " << function << ": ";
     if (block != kNoBlock) out << "block b" << block;
     if (instructionIndex >= 0) out << "[" << instructionIndex << "]";
@@ -193,14 +194,20 @@ public:
 
     void run(VerificationReport& report) {
         report_ = &report;
+        property_ = SafetyProperty::TypeFlow;
         checkSignature();
         if (function_.blocks.empty()) return;
+        property_ = SafetyProperty::Definition;
         collectDefinitions();
+        property_ = SafetyProperty::ControlFlow;
         checkControlFlow();
         checkInstructions();
+        property_ = SafetyProperty::Definition;
         checkDominance();
         if (options_.checkOwnership) checkOwnershipFlow();
+        property_ = SafetyProperty::Concurrency;
         checkSharedAtomicity();
+        appendSafetyAnalysis(module_, function_, options_, report);
         report_ = nullptr;
     }
 
@@ -248,20 +255,30 @@ public:
 
 private:
     // --- diagnostics ------------------------------------------------------
+    SafetyProperty property_{SafetyProperty::Structure};
+    bool emitFlowDiagnostics_{true};
+
     bool saturated() const {
         return options_.maxErrors != 0 && report_ && report_->errorCount() >= options_.maxErrors;
     }
 
     void error(const std::string& message, BlockId block = kNoBlock, long index = -1,
                SourceLocation location = {}) {
-        if (!report_ || saturated()) return;
+        if (!report_ || saturated() || !emitFlowDiagnostics_) return;
         Diagnostic d;
         d.severity = DiagnosticSeverity::Error;
         d.function = function_.name;
         d.block = block;
         d.instructionIndex = index;
         d.message = message;
+        if (location.file.empty()) location.file = function_.location.file;
+        if (!location.valid()) {
+            if (const auto* b = function_.block(block)) location = b->location;
+            if (!location.valid()) location = function_.location;
+        }
+        if (location.file.empty()) location.file = function_.location.file;
         d.location = location;
+        d.property = property_;
         report_->diagnostics.push_back(std::move(d));
     }
 
@@ -274,7 +291,14 @@ private:
         d.block = block;
         d.instructionIndex = index;
         d.message = message;
+        if (location.file.empty()) location.file = function_.location.file;
+        if (!location.valid()) {
+            if (const auto* b = function_.block(block)) location = b->location;
+            if (!location.valid()) location = function_.location;
+        }
+        if (location.file.empty()) location.file = function_.location.file;
         d.location = location;
+        d.property = property_;
         report_->diagnostics.push_back(std::move(d));
     }
 
@@ -462,6 +486,7 @@ private:
         if (!from || !to) return;
         if (from->kind != TypeKind::Unknown) return;
         if (to->kind == TypeKind::Unknown || to->kind == TypeKind::TypeParam || to->kind == TypeKind::Void) return;
+        property_ = SafetyProperty::DynamicBoundary;
         error(what + " passes a dynamic (unknown) value where " + render(targetId) +
               " is declared without a runtime type assertion; lower the boundary as refine",
               block, index, loc);
@@ -623,6 +648,7 @@ private:
 
         for (std::size_t i = 0; i < function_.blocks.size(); ++i) {
             const auto& block = function_.blocks[i];
+            property_ = SafetyProperty::ControlFlow;
             if (!seenIds.insert(block.id).second) {
                 error("duplicate block id b" + std::to_string(block.id));
                 continue;
@@ -684,6 +710,7 @@ private:
             checkTerminator(block);
         }
 
+        property_ = SafetyProperty::ControlFlow;
         // A catch block must be reachable only by raising. If it also has a
         // normal predecessor, two different executions arrive with different
         // expectations about the catch slot, which no backend can honour.
@@ -715,15 +742,20 @@ private:
             if (cfg_.reachableWithUnwind().count(block.id)) continue;
             const std::string message = "block b" + std::to_string(block.id) +
                                         " is unreachable from the entry block";
+            property_ = SafetyProperty::Reachability;
             if (options_.unreachableBlocksAreErrors) error(message, block.id, -1, block.location);
             else warn(message, block.id, -1, block.location);
         }
 
+        property_ = SafetyProperty::TypeFlow;
         checkBlockParameters();
+        property_ = SafetyProperty::ControlFlow;
         checkEdgesConsistency();
     }
 
     void checkTerminator(const BasicBlock& block) {
+        property_ = block.terminator.kind == TerminatorKind::Return
+            ? SafetyProperty::Return : SafetyProperty::ControlFlow;
         const auto& t = block.terminator;
         const BlockId id = block.id;
         if (t.kind == TerminatorKind::None) {
@@ -1022,11 +1054,13 @@ private:
             }
             case OperandKind::Temp: {
                 if (operand.index == kNoTemp) {
+                    property_ = SafetyProperty::Definition;
                     error(what + " refers to no temp", block, index, loc);
                     return false;
                 }
                 const auto it = definitions_.find(operand.index);
                 if (it == definitions_.end()) {
+                    property_ = SafetyProperty::Definition;
                     error(what + " refers to temp %" + std::to_string(operand.index) +
                           ", which is never defined in this function", block, index, loc);
                     return false;
@@ -1117,6 +1151,7 @@ private:
     }
 
     void checkInstruction(const BasicBlock& block, const Instruction& instruction, long index) {
+        property_ = instructionProperty(instruction.opcode);
         const BlockId id = block.id;
         const OpcodeShape& shape = opcodeShape(instruction.opcode);
         const SourceLocation& loc = instruction.location;
@@ -1255,6 +1290,7 @@ private:
             }
             case Opcode::Move:
                 if (slot.ownership != zl::OwnershipKind::OWNED) {
+                    property_ = SafetyProperty::Ownership;
                     error("move from " + slotName + " whose storage is '" +
                           std::string(zl::ownershipName(slot.ownership)) + "'; only an owned slot can be moved",
                           id, index, loc);
@@ -2154,6 +2190,17 @@ private:
                 if (instruction.target.nativeName.empty()) {
                     error("call_native has no native target name", id, index, loc);
                     return;
+                }
+                if (instruction.target.argumentTypes.size() != operands.size()) {
+                    error("call_native argument contract arity disagrees with operands", id, index, loc);
+                } else {
+                    for (std::size_t i = 0; i < operands.size(); ++i) {
+                        const auto expected = instruction.target.argumentTypes[i];
+                        if (!validType(expected, "native argument contract", id, index, loc)) continue;
+                        if (!assignable(operands[i].type, expected))
+                            error("call_native argument " + std::to_string(i) + " violates recorded type contract",
+                                  id, index, loc);
+                    }
                 }
                 // Ownership metadata, when present, must cover every argument:
                 // a partial list would leave a backend guessing which argument
@@ -3081,12 +3128,15 @@ private:
         // Same, for owned *parameters* released by slot-less drops (the
         // parameter index is the identity; params cannot move).
         std::set<SlotId> droppedParams;
-        // borrow slot -> owner slot (0 when the owner is not a known slot)
+        // Borrow slot -> root: local slot id, or slots.size()+1+parameter
+        // index. Zero means conflicting/unknown roots. This is MAY-active.
         std::map<SlotId, SlotId> borrows;
+        std::set<SlotId> mustBorrows;
 
         friend bool operator==(const FlowState& a, const FlowState& b) noexcept {
             return a.moved == b.moved && a.dropped == b.dropped &&
-                   a.droppedParams == b.droppedParams && a.borrows == b.borrows;
+                   a.droppedParams == b.droppedParams && a.borrows == b.borrows &&
+                   a.mustBorrows == b.mustBorrows;
         }
     };
 
@@ -3103,55 +3153,88 @@ private:
         out.dropped.insert(b.dropped.begin(), b.dropped.end());
         out.droppedParams = a.droppedParams;
         out.droppedParams.insert(b.droppedParams.begin(), b.droppedParams.end());
-        // A borrow survives the join only if it is active on every incoming
-        // path. Conflicting owners collapse to "unknown owner" rather than
-        // being dropped, so a later move still sees the claim.
-        for (const auto& [slot, owner] : a.borrows) {
-            const auto other = b.borrows.find(slot);
-            if (other == b.borrows.end()) continue;
-            out.borrows.emplace(slot, other->second == owner ? owner : 0);
+        // Exclusion needs MAY-active borrows: one predecessor retaining a
+        // borrow is enough to make a move/drop unsafe. Valid use/end needs
+        // MUST-active borrows. Do not confuse these two lattice components.
+        out.borrows = a.borrows;
+        for (const auto& [slot, owner] : b.borrows) {
+            auto it = out.borrows.find(slot);
+            if (it == out.borrows.end()) out.borrows.emplace(slot, owner);
+            else if (it->second != owner) it->second = 0;
         }
+        std::set_intersection(a.mustBorrows.begin(), a.mustBorrows.end(),
+                              b.mustBorrows.begin(), b.mustBorrows.end(),
+                              std::inserter(out.mustBorrows, out.mustBorrows.end()));
         return out;
     }
 
     void checkOwnershipFlow() {
+        std::set<BlockId> identities;
+        for (const auto& b : function_.blocks) if (!identities.insert(b.id).second) return;
+        if (!cfg_.isValid(function_.entryBlock)) return;
         const std::size_t count = function_.blocks.size();
-        std::vector<FlowState> outState(count);
+        std::vector<FlowState> inputs(count), outState(count), unwindState(count);
         std::vector<bool> hasOut(count, false);
-
-        // Iterate in reverse post-order until the state stops changing. Both
-        // components are monotone (moved only grows, borrows only shrink), so
-        // this terminates.
+        // Solve before emitting. Emitting during iteration reports transient
+        // facts and duplicates errors once per loop traversal. No iteration cap:
+        // the finite may/must lattice converges, or it is an analysis bug.
+        emitFlowDiagnostics_ = false;
         bool changed = true;
-        std::size_t guard = 0;
-        while (changed && guard++ < count + 8) {
+        while (changed) {
             changed = false;
-            for (BlockId id : cfg_.reversePostOrder()) {
+            for (const auto& block : function_.blocks) {
+                const BlockId id = block.id;
+                if (!cfg_.reachableWithUnwind().count(id)) continue;
                 const std::size_t index = cfg_.indexOf(id);
                 FlowState input;
-                bool first = true;
+                bool first = id != function_.entryBlock;
+                const auto merge = [&](const FlowState& incoming) {
+                    if (first) { input = incoming; first = false; }
+                    else input = join(input, incoming);
+                };
                 for (BlockId pred : cfg_.predecessors(id)) {
-                    const std::size_t predIndex = cfg_.indexOf(pred);
-                    if (!hasOut[predIndex]) continue;
-                    if (first) { input = outState[predIndex]; first = false; }
-                    else input = join(input, outState[predIndex]);
+                    const auto pi = cfg_.indexOf(pred);
+                    if (hasOut[pi]) merge(outState[pi]);
                 }
-                FlowState next = input;
-                transfer(*function_.block(id), input, next, id);
-                if (!hasOut[index] || !(outState[index] == next)) {
+                for (BlockId pred : cfg_.unwindPredecessors(id)) {
+                    const auto pi = cfg_.indexOf(pred);
+                    if (hasOut[pi]) merge(unwindState[pi]);
+                }
+                if (first) continue;
+                inputs[index] = input;
+                FlowState next, unwind;
+                transfer(block, input, next, id, &unwind);
+                if (!hasOut[index] || !(outState[index] == next) || !(unwindState[index] == unwind)) {
                     outState[index] = next;
+                    unwindState[index] = unwind;
                     hasOut[index] = true;
                     changed = true;
                 }
             }
         }
+        emitFlowDiagnostics_ = true;
+        for (const auto& block : function_.blocks) {
+            const auto index = cfg_.indexOf(block.id);
+            if (!hasOut[index]) continue;
+            FlowState ignored;
+            transfer(block, inputs[index], ignored, block.id);
+        }
     }
 
-    void transfer(const BasicBlock& block, const FlowState& input, FlowState& state, BlockId id) {
+    void transfer(const BasicBlock& block, const FlowState& input, FlowState& state, BlockId id,
+                  FlowState* unwind = nullptr) {
         state = input;
+        bool hasUnwind = false;
+        const auto captureUnwind = [&] {
+            if (!unwind) return;
+            *unwind = hasUnwind ? join(*unwind, state) : state;
+            hasUnwind = true;
+        };
         for (std::size_t i = 0; i < block.instructions.size(); ++i) {
             const auto& instruction = block.instructions[i];
             const long index = static_cast<long>(i);
+            property_ = instructionProperty(instruction.opcode);
+            if (opcodeShape(instruction.opcode).mayThrow) captureUnwind();
             const SourceLocation& loc = instruction.location;
             const Slot* slot = function_.slot(instruction.slot);
             const std::string slotName = slot ? "local '" + slot->name + "'" : "an unknown local";
@@ -3161,8 +3244,10 @@ private:
             // attempted use for the diagnostic.
             const auto checkLive = [&](SlotId slot, const std::string& what) {
                 if (state.moved.count(slot)) {
+                    property_ = SafetyProperty::Move;
                     error(what + " " + slotName + " after it was moved", id, index, loc);
                 } else if (state.dropped.count(slot)) {
+                    property_ = SafetyProperty::ResourceLifetime;
                     error(what + " " + slotName + " after it was dropped", id, index, loc);
                 }
             };
@@ -3178,6 +3263,11 @@ private:
                     state.dropped.erase(instruction.slot);
                     break;
                 case Opcode::Load:
+                    if (slot && slot->ownership == zl::OwnershipKind::BORROW &&
+                        !state.mustBorrows.count(instruction.slot)) {
+                        property_ = SafetyProperty::Borrow;
+                        error("read of " + slotName + " without an active borrow on every path", id, index, loc);
+                    }
                     checkLive(instruction.slot, "read of");
                     break;
                 case Opcode::Move:
@@ -3196,9 +3286,14 @@ private:
                     state.moved.insert(instruction.slot);
                     break;
                 case Opcode::Borrow: {
-                    const SlotId ownerSlot = ownerSlotOf(instruction.operands.empty()
-                                                             ? Operand::none()
-                                                             : instruction.operands[0]);
+                    const Operand ownerValue = instruction.operands.empty() ? Operand::none() : instruction.operands[0];
+                    // Keep parameter roots distinct from slot roots. Zero is
+                    // reserved for an unknown/conflicting root at a join.
+                    const SlotId ownerSlot = ownerValue.kind == OperandKind::Param
+                        ? static_cast<SlotId>(function_.slots.size() + 1 + ownerValue.index)
+                        : ownerSlotOf(ownerValue);
+                    if (ownerValue.kind == OperandKind::Param && state.droppedParams.count(ownerValue.index))
+                        error("borrow of parameter after it was dropped", id, index, loc);
                     if (ownerSlot != 0 && state.moved.count(ownerSlot)) {
                         const Slot* owner = function_.slot(ownerSlot);
                         error("borrow of " + (owner ? "local '" + owner->name + "'" : "an unknown local") +
@@ -3209,14 +3304,16 @@ private:
                               " after it was dropped; a borrow cannot outlive a released owner", id, index, loc);
                     }
                     state.borrows[instruction.slot] = ownerSlot;
+                    state.mustBorrows.insert(instruction.slot);
                     break;
                 }
                 case Opcode::EndBorrow:
-                    if (!state.borrows.count(instruction.slot)) {
+                    if (!state.mustBorrows.count(instruction.slot)) {
                         error("end_borrow of " + slotName + ", which does not hold an active borrow here",
                               id, index, loc);
                     }
                     state.borrows.erase(instruction.slot);
+                    state.mustBorrows.erase(instruction.slot);
                     break;
                 case Opcode::Drop: {
                     // The two spellings: release of a slot's storage (slot is
@@ -3246,9 +3343,9 @@ private:
                         error("drop of " + slotName + " after it was dropped; a resource releases exactly once",
                               id, index, loc);
                     }
-                    // A ZL borrow is function-scoped: it ends when the
-                    // function does, at the same point as the exit cleanup.
-                    // A release in that trailing cleanup region therefore
+                    // Borrows whose scopes extend to function exit end at
+                    // the same point as the exit cleanup. A release in that
+                    // trailing cleanup region therefore
                     // cannot invalidate a still-used borrow - there is no
                     // later use. Anywhere else, dropping an owner while a
                     // borrow is live leaves that borrow pointing at a
@@ -3257,7 +3354,7 @@ private:
                     const bool exitRelease = isTrailingCleanup(block, i);
                     if (!exitRelease) {
                         for (const auto& [borrowSlot, owner] : state.borrows) {
-                            if (owner != target || owner == 0) continue;
+                            if (owner != target && owner != 0) continue;
                             const Slot* borrow = function_.slot(borrowSlot);
                             error("drop of " + slotName + " while it is borrowed by " +
                                   (borrow ? "local '" + borrow->name + "'" : "an unknown local") +
@@ -3277,22 +3374,16 @@ private:
                     // chains resolve transitively, a caller-owned borrow
                     // parameter never roots, and anything else (a GC owner, a
                     // computed temp, a constant) is unsafe. The transfer runs
-                    // once per fixpoint iteration, so violations are
-                    // deduplicated rather than reported repeatedly.
+                    // during solving without emitting; the reporting replay
+                    // observes only converged facts.
                     for (const auto& [borrowSlot, owner] : state.borrows) {
                         (void)owner;
-                        if (!borrowRootsInOwned(borrowSlot)) {
-                            const auto key =
-                                std::make_tuple(id, index, borrowSlot);
-                            if (reportedAwaitBorrows_.insert(key).second) {
-                                const Slot* borrow = function_.slot(borrowSlot);
-                                error("await while borrow " +
-                                      (borrow ? "local '" + borrow->name + "'" : "slot " +
-                                                                                  std::to_string(borrowSlot)) +
-                                      " without an owned-frame lifetime is active; end the borrow or use an "
-                                      "owned/shared value before suspension",
-                                      id, index, loc);
-                            }
+                        if (!borrowRootsInOwned(borrowSlot, state)) {
+                            const Slot* borrow = function_.slot(borrowSlot);
+                            error("await while borrow " +
+                                  (borrow ? "local '" + borrow->name + "'" : "slot " + std::to_string(borrowSlot)) +
+                                  " without an owned-frame lifetime is active; end the borrow or use an "
+                                  "owned/shared value before suspension", id, index, loc);
                         }
                     }
                     break;
@@ -3300,7 +3391,12 @@ private:
                 default:
                     break;
             }
+            if (opcodeShape(instruction.opcode).mayThrow) captureUnwind();
         }
+        if (block.terminator.kind == TerminatorKind::Throw) captureUnwind();
+        // A nominal handler edge with no identifiable throwing instruction is
+        // conservatively seeded from entry, never from successful block exit.
+        if (unwind && !hasUnwind) *unwind = input;
     }
 
     // True when instruction `index` sits in a block's trailing cleanup region:
@@ -3323,47 +3419,25 @@ private:
         return it == provenance_.end() ? 0 : it->second;
     }
 
-    // The Borrow instruction that established `borrowSlot`, if this function
-    // holds one. A borrow slot is established once; re-borrowing the same slot
-    // without an intervening EndBorrow is already an ownership-flow error.
-    const Instruction* findBorrow(SlotId borrowSlot) const {
-        for (const auto& block : function_.blocks) {
-            for (const auto& instruction : block.instructions) {
-                if (instruction.opcode == Opcode::Borrow && instruction.slot == borrowSlot) {
-                    return &instruction;
-                }
+    // Resolve the converged flow root, NOT the first syntactic Borrow in
+    // the function. Rebinding or merging different owners cannot inherit a
+    // proof from an unrelated path. Unknown roots conservatively fail proof.
+    bool borrowRootsInOwned(SlotId borrowSlot, const FlowState& state) const {
+        std::set<SlotId> seen;
+        while (seen.insert(borrowSlot).second) {
+            const auto it = state.borrows.find(borrowSlot);
+            if (it == state.borrows.end() || it->second == 0) return false;
+            const SlotId owner = it->second;
+            if (owner > function_.slots.size()) {
+                const auto param = owner - function_.slots.size() - 1;
+                return param < function_.parameters.size() && !state.droppedParams.count(param) &&
+                       function_.parameters[param].ownership == zl::OwnershipKind::OWNED;
             }
-        }
-        return nullptr;
-    }
-
-    // True when the borrow held in `borrowSlot` ultimately roots in an owned
-    // local or parameter: the MIR form of the checker's borrowRootOwner proof.
-    bool borrowRootsInOwned(SlotId borrowSlot) const {
-        std::unordered_set<SlotId> seen;
-        SlotId current = borrowSlot;
-        while (seen.insert(current).second) {
-            const Instruction* borrow = findBorrow(current);
-            if (!borrow || borrow->operands.empty()) return false;
-            const Operand& owner = borrow->operands[0];
-            // A parameter roots only when the caller handed over owned
-            // storage; a borrowed parameter ("<borrow-parameter>" in the
-            // checker) still lacks a region proof.
-            if (owner.kind == OperandKind::Param) {
-                if (owner.index >= function_.parameters.size()) return false;
-                return function_.parameters[owner.index].ownership == zl::OwnershipKind::OWNED;
-            }
-            if (owner.kind != OperandKind::Temp) return false;
-            const SlotId provenance = ownerSlotOf(owner);
-            if (provenance == 0) return false;
-            const Slot* slot = function_.slot(provenance);
-            if (!slot) return false;
+            const Slot* slot = function_.slot(owner);
+            if (!slot || state.moved.count(owner) || state.dropped.count(owner)) return false;
             if (slot->ownership == zl::OwnershipKind::OWNED) return true;
-            // Borrow-of-borrow: resolve transitively, exactly as the checker
-            // walks borrowSources_. Anything else (GC storage, ...) is not an
-            // owned-frame root.
             if (slot->ownership != zl::OwnershipKind::BORROW) return false;
-            current = provenance;
+            borrowSlot = owner;
         }
         return false;
     }
@@ -3378,9 +3452,6 @@ private:
     std::unordered_map<TempId, Definition> definitions_;
     std::unordered_map<TempId, std::uint32_t> tempTypes_;
     std::unordered_map<TempId, SlotId> provenance_;
-    // (block, instruction, borrow slot) triples already reported by the
-    // await/borrow rule, so the fixpoint loop cannot repeat them.
-    std::set<std::tuple<BlockId, long, SlotId>> reportedAwaitBorrows_;
 };
 
 } // namespace

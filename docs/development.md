@@ -169,3 +169,10 @@ Release packaging is driven by CMake/CPack — see [`packaging/README.md`](../pa
 On Linux the release configuration produces native TGZ, ZIP, and DEB packages. Windows
 and macOS releases should be built on native runners using the same CMake/CPack
 configuration; the repository includes a GitHub Actions release matrix for those builds.
+
+## MIR safety evaluation
+
+The non-executing `--safety-check` command and the adversarial-corpus evaluation
+harness distinguish parser, semantic, MIR, and runtime outcomes without bypassing
+earlier checks. See [MIR safety analysis](mir-safety.md) for the property matrix,
+abstract domains, source provenance, reproduction commands, and limitations.
