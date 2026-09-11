@@ -42,6 +42,12 @@ struct ExceptionHandler {
     // Slot the caught value is bound to in the target block. Required for a
     // Catch block.
     SlotId catchSlot{0};
+    // A `finally` handler: catch-all in the same sense as an untyped catch,
+    // but the runtime rethrows after the cleanup runs, so the target block
+    // binds the thrown *object* (not the stringified message) and must throw
+    // it again when it finishes. Marked so the backend can translate the two
+    // catch-all spellings differently (`PushFinallyHandler` vs `PushHandler`).
+    bool isFinally{false};
 };
 
 // How an edge was created. Recorded on the edge so a consumer can tell real

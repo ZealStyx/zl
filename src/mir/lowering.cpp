@@ -230,6 +230,10 @@ struct LoweringContext {
 struct LoopContext {
     BlockId continueTarget{kNoBlock};
     BlockId breakTarget{kNoBlock};
+    // Number of active finally blocks when the loop was entered. A break or
+    // continue from inside the loop runs the finalizers opened after loop
+    // entry (innermost first) before leaving, exactly as the reference does.
+    std::size_t finallyDepth{0};
 };
 
 // A name in scope resolves either to a mutable slot or directly to a parameter.
@@ -270,6 +274,10 @@ struct LocalRef {
     }
 };
 
+// Deep-copies a match pattern so an arm's nested patterns can be lowered
+// uniformly through the same recursive walk the top-level pattern uses.
+zl::MatchExpr::Pattern cloneMatchPattern(const zl::MatchExpr::Pattern& source);
+
 struct FunctionLowerer {
     LoweringContext& ctx;
     FunctionBuilder fb;
@@ -283,6 +291,10 @@ struct FunctionLowerer {
     std::vector<LoopContext> loops;
     // Dynamic handler chain for blocks created from here on.
     std::vector<ExceptionHandler> activeHandlers;
+    // Finally blocks active at the current point, innermost last. A
+    // return/break/continue runs them inner-to-outer before leaving; a thrown
+    // exception runs them through the finally handler instead.
+    std::vector<const zl::BlockStmt*> activeFinallyBlocks;
     // Names this body assigns to or moves out of (storage keys). A binding that
     // is in here needs real storage; one that is not can stay an SSA value.
     std::unordered_set<std::string> writtenLocals;
@@ -462,6 +474,8 @@ struct FunctionLowerer {
                 return await(static_cast<const zl::AwaitExpr&>(*node));
             case zl::NodeKind::DataLiteralExpr:
                 return dataLiteral(static_cast<const zl::DataLiteralExpr&>(*node));
+            case zl::NodeKind::DataUpdateExpr:
+                return dataUpdate(static_cast<const zl::DataUpdateExpr&>(*node));
             case zl::NodeKind::MatchExpr:
                 return matchExpr(static_cast<const zl::MatchExpr&>(*node));
             case zl::NodeKind::LambdaExpr:
@@ -966,6 +980,60 @@ struct FunctionLowerer {
         return instance;
     }
 
+    // `base with { field: value, ... }` - an immutable copy-update of a data
+    // record. The reference compiles this to CopyObject followed by per-field
+    // writes; MIR spells the copy out as an allocation plus one field_load /
+    // field_store per field, so the graph shows exactly what is copied and what
+    // is replaced rather than hiding the copy inside an opcode.
+    [[nodiscard]] Operand dataUpdate(const zl::DataUpdateExpr& node) {
+        const SourceLocation loc = location(&node);
+        Operand base = expression(node.base.get());
+        if (base.isNone()) return Operand::none();
+        const TypeId objectType = typeOfNode(&node);
+        const Type* baseType = ctx.builder.types().find(objectType);
+        if (!baseType || baseType->kind != TypeKind::Object || baseType->name.empty()) {
+            unsupported(&node, "`with` update on a non-object receiver");
+            return Operand::none();
+        }
+        const Operand instance = Operand::temp(fb.emitAlloc(baseType->name, {}, objectType, loc), objectType);
+
+        // The field list of the record, own fields then inherited ones. The
+        // language forbids redeclaring an inherited field, so a most-derived
+        // walk visits each storage slot once; the seen-set is a cycle guard
+        // against malformed input rather than an expectation of shadowing.
+        std::vector<std::pair<std::string, TypeId>> fields;
+        std::unordered_set<std::string> seen;
+        std::string current = baseType->name;
+        std::size_t guard = 0;
+        while (!current.empty() && guard++ < 64) {
+            const ClassLayout* layout = ctx.builder.module().classLayout(current);
+            if (!layout) break;
+            for (const auto& field : layout->fields) {
+                if (field.isStatic || !seen.insert(field.name).second) continue;
+                fields.emplace_back(field.name, field.type);
+            }
+            current = layout->parent;
+        }
+        // Copy every field from the base, then overwrite the named ones.
+        for (const auto& field : fields) {
+            const Operand value = Operand::temp(fb.emitFieldLoad(base, field.first, field.second, loc),
+                                                field.second);
+            fb.emitFieldStore(instance, field.first, value, loc);
+        }
+        for (const auto& update : node.fields) {
+            Operand value = expression(update.second.get());
+            if (value.isNone()) return Operand::none();
+            TypeId fieldType = 0;
+            for (const auto& field : fields) {
+                if (field.first == update.first) { fieldType = field.second; break; }
+            }
+            if (fieldType != 0) value = coerce(value, fieldType, loc);
+            if (value.isNone()) return Operand::none();
+            fb.emitFieldStore(instance, update.first, value, loc);
+        }
+        return instance;
+    }
+
     [[nodiscard]] Operand fieldAccess(const zl::FieldAccessExpr& node) {
         const SourceLocation loc = location(&node);
         if (node.isEnumMemberAccess) {
@@ -998,8 +1066,29 @@ struct FunctionLowerer {
                                      ctx.builder.types().doubleType());
         }
         if (node.isFunctionReference) {
-            unsupported(&node, "function reference");
-            return Operand::none();
+            // `Worker.run` as a value: a first-class callable with no captures.
+            // The referenced member is a static function, resolved through the
+            // class hierarchy exactly as the bytecode compiler resolves it (a
+            // subclass may name a static its parent declares). The result type
+            // carries the full callable signature - parameter and return types -
+            // because the checker recorded them on this node, so later stages
+            // can validate arity and argument types without re-deriving them.
+            const auto* idNode = node.object && node.object->kind == zl::NodeKind::Identifier
+                                     ? static_cast<const zl::Identifier*>(node.object.get())
+                                     : nullptr;
+            if (!idNode) {
+                unsupported(&node, "function reference whose owner could not be resolved");
+                return Operand::none();
+            }
+            const std::string suffix = node.resolvedFunctionDispatch.describe();
+            const FunctionId callee = lookupFunctionInClass(idNode->name, suffix);
+            if (callee == kNoFunction) {
+                unsupported(&node, "function reference to '" + idNode->name + "." + suffix +
+                                       "' which was not lowered");
+                return Operand::none();
+            }
+            const TypeId type = typeOfNode(&node);
+            return Operand::temp(fb.emitMakeClosure(callee, {}, type, loc), type);
         }
         if (node.isStaticFieldAccess) {
             const TypeId type = typeOfNode(&node);
@@ -1055,11 +1144,28 @@ struct FunctionLowerer {
 
     [[nodiscard]] Operand collectionLiteral(const zl::CollectionLiteral& node) {
         const SourceLocation loc = location(&node);
-        const TypeId type = typeOfNode(&node);
+        TypeId type = typeOfNode(&node);
         const Type* collection = ctx.builder.types().find(type);
         if (!collection || !isCollectionType(*collection)) {
-            unsupported(&node, "collection literal of type " + ctx.builder.types().render(type));
-            return Operand::none();
+            // An empty literal (`[]`, `{}`) has no elements for the checker to
+            // infer a type from, so it records `unknown` even though the call
+            // or assignment it sits in fixes a concrete collection type. The
+            // AST still knows the literal's shape; build an untyped container
+            // of that shape and let the typed boundary refine it, exactly as
+            // the reference's runtime type contract does. A heterogeneous
+            // literal (`[1, "a"]`) lands here too and is a list.
+            const std::string kind = node.isMap ? "map"
+                                       : (!node.targetCollectionKind.empty() ? node.targetCollectionKind
+                                                                             : "list");
+            if (kind == "map") {
+                type = ctx.builder.types().mapType(ctx.builder.types().unknownType(),
+                                                   ctx.builder.types().unknownType());
+            } else if (kind == "set") {
+                type = ctx.builder.types().setType(ctx.builder.types().unknownType());
+            } else {
+                type = ctx.builder.types().listType(ctx.builder.types().unknownType());
+            }
+            collection = ctx.builder.types().find(type);
         }
         const TempId collection_ = fb.emitNewCollection(type, loc);
         const Operand result = Operand::temp(collection_, type);
@@ -1279,7 +1385,7 @@ struct FunctionLowerer {
         fb.emitBranch(condition, bodyBlock, exitBlock, loc);
 
         gotoBlock(bodyBlock);
-        loops.push_back(LoopContext{conditionBlock, exitBlock});
+        loops.push_back(LoopContext{conditionBlock, exitBlock, activeFinallyBlocks.size()});
         statement(node.body.get());
         loops.pop_back();
         if (!isDead()) fb.emitJump(conditionBlock, loc);
@@ -1294,7 +1400,7 @@ struct FunctionLowerer {
 
         fb.emitJump(bodyBlock, loc);
         gotoBlock(bodyBlock);
-        loops.push_back(LoopContext{conditionBlock, exitBlock});
+        loops.push_back(LoopContext{conditionBlock, exitBlock, activeFinallyBlocks.size()});
         statement(node.body.get());
         loops.pop_back();
         if (!isDead()) fb.emitJump(conditionBlock, loc);
@@ -1343,7 +1449,7 @@ struct FunctionLowerer {
         fb.emitBranch(keepGoing, bodyBlock, exitBlock, loc);
 
         gotoBlock(bodyBlock);
-        loops.push_back(LoopContext{stepBlock, exitBlock});
+        loops.push_back(LoopContext{stepBlock, exitBlock, activeFinallyBlocks.size()});
         statement(node.body.get());
         loops.pop_back();
         if (!isDead()) fb.emitJump(stepBlock, loc);
@@ -1362,7 +1468,16 @@ struct FunctionLowerer {
             unsupported(&node, "break outside a loop");
             return;
         }
-        fb.emitJump(loops.back().breakTarget, location(&node));
+        const LoopContext& loop = loops.back();
+        // A break exits the loop but leaves the current lexical region, so the
+        // finalizers opened inside the loop run first, innermost first - the
+        // same order the reference emits - and only then the edge to the loop
+        // exit removes their handlers (via the normal chain sync).
+        for (std::size_t i = activeFinallyBlocks.size(); i > loop.finallyDepth; --i) {
+            emitFinallyCleanup(i - 1);
+        }
+        if (isDead()) return;
+        fb.emitJump(loop.breakTarget, location(&node));
     }
 
     void continueStatement(const zl::ContinueStmt& node) {
@@ -1370,7 +1485,31 @@ struct FunctionLowerer {
             unsupported(&node, "continue outside a loop");
             return;
         }
-        fb.emitJump(loops.back().continueTarget, location(&node));
+        const LoopContext& loop = loops.back();
+        for (std::size_t i = activeFinallyBlocks.size(); i > loop.finallyDepth; --i) {
+            emitFinallyCleanup(i - 1);
+        }
+        if (isDead()) return;
+        fb.emitJump(loop.continueTarget, location(&node));
+    }
+
+    // Runs the finalizer at `firstIndex` by lowering its body inline at the
+    // current point. The body being emitted is removed from the active list
+    // while it is lowered, so a return/break/continue written *inside* the
+    // finalizer cleans up only the outer finalizers instead of recursing into
+    // itself - the same guard the reference uses.
+    void emitFinallyCleanup(std::size_t firstIndex) {
+        if (firstIndex >= activeFinallyBlocks.size()) return;
+        const zl::BlockStmt* block = activeFinallyBlocks[firstIndex];
+        const auto saved = activeFinallyBlocks;
+        activeFinallyBlocks.assign(saved.begin(), saved.begin() + static_cast<std::ptrdiff_t>(firstIndex));
+        statement(block);
+        activeFinallyBlocks = saved;
+    }
+
+    // All currently active finalizers, innermost first.
+    void emitActiveFinallyCleanup() {
+        for (std::size_t i = activeFinallyBlocks.size(); i > 0; --i) emitFinallyCleanup(i - 1);
     }
 
     // Emits the deterministic end-of-lifetime events for every owned local
@@ -1401,6 +1540,8 @@ struct FunctionLowerer {
         const SourceLocation loc = location(&node);
         const TypeId returnType = fb.function().returnType;
         if (!node.value) {
+            emitActiveFinallyCleanup();
+            if (isDead()) return;
             emitOwnedCleanup(loc);
             fb.emitReturn(Operand::none(), loc);
             return;
@@ -1409,6 +1550,10 @@ struct FunctionLowerer {
         if (value.isNone()) return;
         value = coerce(value, returnType, loc);
         if (value.isNone()) return;
+        // A return leaves every region opened up to here, so its finalizers run
+        // inner-to-outer before the owned cleanup and the actual return.
+        emitActiveFinallyCleanup();
+        if (isDead()) return;
         emitOwnedCleanup(loc);
         fb.emitReturn(value, loc);
     }
@@ -1421,17 +1566,17 @@ struct FunctionLowerer {
 
     void tryStatement(const zl::TryStmt& node) {
         const SourceLocation loc = location(&node);
-        if (node.finallyBlock) {
-            // `finally` needs cleanup on every exit path, including break,
-            // continue and return. Getting that wrong would silently drop
-            // cleanup, so it is explicitly out of scope for this phase.
-            unsupported(&node, "try/finally");
+        const bool hasFinally = node.finallyBlock != nullptr;
+        if (node.catches.empty() && !hasFinally) {
+            unsupported(&node, "try without a catch clause or a finally block");
             return;
         }
-        if (node.catches.empty()) {
-            unsupported(&node, "try without a catch clause");
-            return;
-        }
+
+        // The handler chain in force just outside this try: the catches (and
+        // the finally's cleanup block) run under it, and the block after the
+        // try resumes it. Blocks are all created up front so their ids stay in
+        // one contiguous run, but their bodies are lowered below in any order.
+        const std::vector<ExceptionHandler> savedHandlers = activeHandlers;
 
         const BlockId afterBlock = newBlock(const_cast<zl::TryStmt*>(&node));
         std::vector<BlockId> catchBlocks;
@@ -1446,21 +1591,48 @@ struct FunctionLowerer {
                                               false, zl::OwnershipKind::GC, {}, loc);
             fb.function().slots[static_cast<std::size_t>(binding - 1)].isCatchBinding = true;
             const BlockId catchBlock = fb.addBlock(BlockKind::Catch, loc);
+            // A catch body runs after this try's handlers were removed on
+            // dispatch, so its chain is the one in force just outside the try:
+            // a throw inside a catch is caught by the *outer* handlers.
+            fb.block(catchBlock).exceptionHandlers = savedHandlers;
             catchBlocks.push_back(catchBlock);
             handlers.push_back(ExceptionHandler{catchType, catchBlock, binding});
         }
 
-        // Handlers are searched in source order, which is the order the chain
-        // is stored in.
-        const std::vector<ExceptionHandler> savedHandlers = activeHandlers;
+        // A finally block adds two blocks. The handler (innermost: appended
+        // after the catches so it is searched only when no catch matches) is a
+        // catch-all that rethrows after cleanup; its target binds the thrown
+        // object into a pending slot, runs the finally body, and throws that
+        // slot again. Normal completion runs the same body in a plain block
+        // and then falls through to the join.
+        BlockId finallyRethrowBlock = kNoBlock;
+        BlockId finallyNormalBlock = kNoBlock;
+        SlotId pendingSlot = 0;
+        if (hasFinally) {
+            const TypeId exceptionType = ctx.builder.types().objectType("Exception");
+            pendingSlot = fb.addSlot("__finally_pending", exceptionType, true, zl::OwnershipKind::GC, {}, loc);
+            fb.function().slots[static_cast<std::size_t>(pendingSlot - 1)].isCatchBinding = true;
+            finallyRethrowBlock = fb.addBlock(BlockKind::Cleanup, loc);
+            // The cleanup block also runs after dispatch, under the outer
+            // chain only.
+            fb.block(finallyRethrowBlock).exceptionHandlers = savedHandlers;
+            finallyNormalBlock = newBlock(const_cast<zl::TryStmt*>(&node));
+            ExceptionHandler finallyHandler{0, finallyRethrowBlock, pendingSlot};
+            finallyHandler.isFinally = true;
+            handlers.push_back(finallyHandler);
+        }
+
+        // The try body runs with the new chain installed: outer handlers, then
+        // this try's catches, then its finally handler.
         activeHandlers = savedHandlers;
         for (const auto& handler : handlers) activeHandlers.push_back(handler);
-        // The try body runs with the new chain installed.
         const BlockId tryBlock = newBlock(const_cast<zl::TryStmt*>(&node));
         fb.emitJump(tryBlock, loc);
         gotoBlock(tryBlock);
+        if (hasFinally) activeFinallyBlocks.push_back(static_cast<const zl::BlockStmt*>(node.finallyBlock.get()));
         statement(node.tryBlock.get());
-        if (!isDead()) fb.emitJump(afterBlock, loc);
+        if (hasFinally) activeFinallyBlocks.pop_back();
+        if (!isDead()) fb.emitJump(hasFinally ? finallyNormalBlock : afterBlock, loc);
         activeHandlers = savedHandlers;
 
         for (std::size_t i = 0; i < node.catches.size(); ++i) {
@@ -1468,9 +1640,25 @@ struct FunctionLowerer {
             pushScope();
             bindLocal(storageKey(node.catches[i].storageName, node.catches[i].varName),
                       LocalRef::slotRef(handlers[i].catchSlot));
+            if (hasFinally) activeFinallyBlocks.push_back(static_cast<const zl::BlockStmt*>(node.finallyBlock.get()));
             statement(node.catches[i].block.get());
+            if (hasFinally) activeFinallyBlocks.pop_back();
             popScope();
+            if (!isDead()) fb.emitJump(hasFinally ? finallyNormalBlock : afterBlock, loc);
+        }
+
+        if (hasFinally) {
+            gotoBlock(finallyNormalBlock);
+            statement(node.finallyBlock.get());
             if (!isDead()) fb.emitJump(afterBlock, loc);
+
+            gotoBlock(finallyRethrowBlock);
+            statement(node.finallyBlock.get());
+            if (!isDead()) {
+                const TypeId exceptionType = ctx.builder.types().objectType("Exception");
+                const Operand pending = Operand::temp(fb.emitLoad(pendingSlot, loc), exceptionType);
+                fb.emitThrow(pending, loc);
+            }
         }
         gotoBlock(afterBlock);
     }
@@ -1499,6 +1687,24 @@ struct FunctionLowerer {
                                               const std::string& signatureSuffix) const {
         const auto found = ctx.functionIds.find(className + "." + signatureSuffix);
         return found == ctx.functionIds.end() ? kNoFunction : found->second;
+    }
+
+    // Resolves a function referenced by its declaring class, walking the
+    // inheritance chain the same way the bytecode compiler does. A static
+    // member reference such as `Child.helper` must resolve to `Parent.helper`
+    // when `Parent` declares it and `Child` only inherits it.
+    [[nodiscard]] FunctionId lookupFunctionInClass(const std::string& className,
+                                                   const std::string& signatureSuffix) const {
+        std::string current = className;
+        std::size_t guard = 0;
+        while (!current.empty() && guard++ < 64) {
+            const FunctionId found = lookupFunctionIn(current, signatureSuffix);
+            if (found != kNoFunction) return found;
+            const auto parent = ctx.classParents.find(current);
+            if (parent == ctx.classParents.end()) break;
+            current = parent->second;
+        }
+        return kNoFunction;
     }
 
     // The instantiation a call site selected. A MIR function stays a generic
@@ -1603,46 +1809,278 @@ struct FunctionLowerer {
     // A match arm's literal, as an operand. Patterns carry the token text
     // rather than a Literal node, so this is the same parsing `constOperand`
     // does, keyed off the arm instead of off an AST node.
-    [[nodiscard]] Operand patternLiteral(const zl::MatchExpr::Arm& arm, TypeId subjectType) {
-        switch (arm.literalType) {
-            case zl::TokenType::INT_LITERAL: {
-                std::int64_t value = 0;
-                try { value = std::stoll(arm.raw); } catch (...) { value = 0; }
-                return Operand::constant(ctx.builder.constantInt(value), ctx.builder.types().intType());
+    [[nodiscard]] Operand patternValue(const zl::MatchExpr::Pattern& pattern, TypeId subjectType) {
+        switch (pattern.kind) {
+            case zl::MatchExpr::PatternKind::Literal: {
+                switch (pattern.literalType) {
+                    case zl::TokenType::INT_LITERAL: {
+                        std::int64_t value = 0;
+                        try { value = std::stoll(pattern.raw); } catch (...) { value = 0; }
+                        return Operand::constant(ctx.builder.constantInt(value), ctx.builder.types().intType());
+                    }
+                    case zl::TokenType::DECIMAL_LITERAL:
+                    case zl::TokenType::FLOAT_LITERAL: {
+                        double value = 0.0;
+                        try { value = std::stod(pattern.raw); } catch (...) { value = 0.0; }
+                        return Operand::constant(ctx.builder.constantDouble(value),
+                                                 ctx.builder.types().doubleType());
+                    }
+                    case zl::TokenType::BOOL_LITERAL:
+                        return Operand::constant(ctx.builder.constantBool(pattern.raw == "true"),
+                                                 ctx.builder.types().boolType());
+                    case zl::TokenType::STRING_LITERAL:
+                        return Operand::constant(ctx.builder.constantString(pattern.raw),
+                                                 ctx.builder.types().stringType());
+                    case zl::TokenType::KW_NULL:
+                        // `null` in a pattern is a value of the subject's type;
+                        // typing it bare nil would make the comparison read as
+                        // comparing different types.
+                        return Operand::constant(ctx.builder.constantNil(),
+                                                 subjectType ? subjectType : ctx.builder.types().nilType());
+                    default:
+                        unsupported(nullptr, "match literal '" + pattern.raw + "'");
+                        return Operand::none();
+                }
             }
-            case zl::TokenType::DECIMAL_LITERAL:
-            case zl::TokenType::FLOAT_LITERAL: {
-                double value = 0.0;
-                try { value = std::stod(arm.raw); } catch (...) { value = 0.0; }
-                return Operand::constant(ctx.builder.constantDouble(value), ctx.builder.types().doubleType());
-            }
-            case zl::TokenType::BOOL_LITERAL:
-                return Operand::constant(ctx.builder.constantBool(arm.raw == "true"),
-                                         ctx.builder.types().boolType());
-            case zl::TokenType::STRING_LITERAL: {
-                std::string text = arm.raw;
-                if (text.size() >= 2 && (text.front() == '"' || text.front() == '\''))
-                    text = text.substr(1, text.size() - 2);
-                return Operand::constant(ctx.builder.constantString(std::move(text)),
-                                         ctx.builder.types().stringType());
-            }
-            case zl::TokenType::KW_NULL:
-                // Typed as the subject rather than as bare nil: `null` in a
-                // pattern is a value of whatever the subject is, and typing it
-                // nil would make the arm's comparison read as comparing
-                // different types.
-                return Operand::constant(ctx.builder.constantNil(),
-                                         subjectType ? subjectType : ctx.builder.types().nilType());
+            case zl::MatchExpr::PatternKind::EnumMember:
+                return Operand::constant(
+                    ctx.builder.constantEnumMember(pattern.enumTypeName, pattern.enumMemberName),
+                    ctx.builder.types().objectType(pattern.enumTypeName));
             default:
-                unsupported(nullptr, "match literal '" + arm.raw + "'");
+                unsupported(nullptr, "pattern value for a non-literal pattern");
                 return Operand::none();
         }
+    }
+
+    [[nodiscard]] Operand callNative(const std::string& qualifiedName, std::vector<Operand> arguments,
+                                     TypeId resultType, SourceLocation loc) {
+        const auto native = zl::findNativeSignature(qualifiedName);
+        if (!native) {
+            unsupported(nullptr, "native '" + qualifiedName + "' which is not in the catalog");
+            return Operand::none();
+        }
+        return Operand::temp(fb.emitCallNative(qualifiedName, static_cast<std::int32_t>((*native)->id),
+                                               std::move(arguments), resultType,
+                                               (*native)->taskValueType != zl::ZlType::UNKNOWN, loc),
+                             resultType);
+    }
+
+    // The element/key/value type a structural pattern inspects, drawn from the
+    // subject's own type arguments so the tests stay typed without guessing.
+    [[nodiscard]] TypeId elementTypeOf(const Type* type) const {
+        return type && !type->arguments.empty() ? type->arguments.front() : ctx.builder.types().unknownType();
+    }
+    [[nodiscard]] TypeId keyTypeOf(const Type* type) const {
+        return type && !type->arguments.empty() ? type->arguments.front() : ctx.builder.types().unknownType();
+    }
+    [[nodiscard]] TypeId valueTypeOf(const Type* type) const {
+        return type && type->arguments.size() >= 2 ? type->arguments[1] : ctx.builder.types().unknownType();
+    }
+    // The declared type of a field on a class/data layout, walking the parent
+    // chain exactly as the verifier does for field access.
+    [[nodiscard]] TypeId fieldTypeOf(TypeId objectType, const std::string& fieldName) const {
+        const Type* type = ctx.builder.types().find(objectType);
+        std::string current = type ? type->name : std::string{};
+        std::size_t guard = 0;
+        while (!current.empty() && guard++ < 64) {
+            const ClassLayout* layout = ctx.builder.module().classLayout(current);
+            if (!layout) break;
+            if (const FieldLayout* field = layout->field(fieldName)) return field->type;
+            current = layout->parent;
+        }
+        return ctx.builder.types().unknownType();
+    }
+
+    // Lowers the test chain for one pattern against `subject`. Every point
+    // where the pattern cannot match branches to `fail`; when the whole pattern
+    // matches, control continues at `success`. Bindings named by the pattern are
+    // bound into the current scope under their storage names.
+    [[nodiscard]] bool lowerMatchPattern(const zl::MatchExpr::Pattern& pattern, const Operand& subject,
+                                         BlockId success, BlockId fail,
+                                         const zl::MatchExpr::Arm& arm, SourceLocation loc) {
+        const TypeId boolType = ctx.builder.types().boolType();
+        const TypeId intType = ctx.builder.types().intType();
+        const Type* subjectType = ctx.builder.types().find(subject.type);
+
+        switch (pattern.kind) {
+            case zl::MatchExpr::PatternKind::Wildcard:
+                break; // matches any value
+            case zl::MatchExpr::PatternKind::Variable:
+                if (!pattern.bindingName.empty() && pattern.bindingName != "_") {
+                    const auto storage = arm.storageBindings.find(pattern.bindingName);
+                    bindLocalBoth(pattern.bindingName,
+                                  storage == arm.storageBindings.end() ? std::string{} : storage->second,
+                                  LocalRef::valueRef(subject));
+                }
+                break;
+            case zl::MatchExpr::PatternKind::Literal:
+            case zl::MatchExpr::PatternKind::EnumMember: {
+                Operand value = patternValue(pattern, subject.type);
+                if (value.isNone()) return false;
+                Operand test = Operand::temp(fb.emitBinary(Opcode::Eq, subject, value, boolType, loc), boolType);
+                const BlockId next = newBlock(nullptr);
+                fb.emitBranch(test, next, fail, loc);
+                gotoBlock(next);
+                break;
+            }
+            case zl::MatchExpr::PatternKind::Type: {
+                const TypeId narrowed = types.fromAnnotation(pattern.typePattern);
+                if (narrowed == 0) {
+                    unsupported(nullptr, "type pattern '" + pattern.typePattern.name + "'");
+                    return false;
+                }
+                Operand test = Operand::temp(fb.emitTypeTest(subject, narrowed, loc), boolType);
+                const BlockId next = newBlock(nullptr);
+                fb.emitBranch(test, next, fail, loc);
+                gotoBlock(next);
+                if (!pattern.bindingName.empty() && pattern.bindingName != "_") {
+                    Operand value = subject;
+                    if (narrowed != subject.type) {
+                        value = Operand::temp(fb.emitRefine(subject, narrowed, loc), narrowed);
+                    }
+                    const auto storage = arm.storageBindings.find(pattern.bindingName);
+                    bindLocalBoth(pattern.bindingName,
+                                  storage == arm.storageBindings.end() ? std::string{} : storage->second,
+                                  LocalRef::valueRef(value));
+                }
+                break;
+            }
+            case zl::MatchExpr::PatternKind::Data: {
+                const TypeId narrowed = ctx.builder.types().objectType(pattern.typePattern.name);
+                Operand test = Operand::temp(fb.emitTypeTest(subject, narrowed, loc), boolType);
+                const BlockId next = newBlock(nullptr);
+                fb.emitBranch(test, next, fail, loc);
+                gotoBlock(next);
+                for (const auto& field : pattern.fields) {
+                    if (!field.pattern) continue;
+                    const TypeId fieldType = fieldTypeOf(narrowed, field.fieldName);
+                    Operand fieldValue = Operand::temp(fb.emitFieldLoad(subject, field.fieldName, fieldType, loc),
+                                                       fieldType);
+                    const BlockId after = newBlock(nullptr);
+                    if (!lowerMatchPattern(*field.pattern, fieldValue, after, fail, arm, loc)) return false;
+                    gotoBlock(after);
+                }
+                break;
+            }
+            case zl::MatchExpr::PatternKind::List: {
+                const bool isSet = pattern.containerKind == "set" || pattern.containerKind == "Set";
+                Operand length = callNative("Collection.length", {subject}, intType, loc);
+                if (length.isNone()) return false;
+                const Operand size = Operand::constant(
+                    ctx.builder.constantInt(static_cast<std::int64_t>(pattern.elements.size())), intType);
+                Operand same = Operand::temp(fb.emitBinary(Opcode::Eq, length, size, boolType, loc), boolType);
+                const BlockId next = newBlock(nullptr);
+                fb.emitBranch(same, next, fail, loc);
+                gotoBlock(next);
+                if (isSet) {
+                    for (const auto& child : pattern.elements) {
+                        if (!child || child->kind == zl::MatchExpr::PatternKind::Wildcard) continue;
+                        Operand value = patternValue(*child, elementTypeOf(subjectType));
+                        if (value.isNone()) return false;
+                        Operand has = callNative("Collection.setHas", {subject, value}, boolType, loc);
+                        if (has.isNone()) return false;
+                        const BlockId after = newBlock(nullptr);
+                        fb.emitBranch(has, after, fail, loc);
+                        gotoBlock(after);
+                    }
+                } else {
+                    const TypeId elementType = elementTypeOf(subjectType);
+                    for (std::size_t i = 0; i < pattern.elements.size(); ++i) {
+                        if (!pattern.elements[i]) continue;
+                        const Operand index = Operand::constant(ctx.builder.constantInt(static_cast<std::int64_t>(i)),
+                                                                intType);
+                        Operand item = Operand::temp(fb.emitIndexLoad(subject, index, elementType, loc), elementType);
+                        const BlockId after = newBlock(nullptr);
+                        if (!lowerMatchPattern(*pattern.elements[i], item, after, fail, arm, loc)) return false;
+                        gotoBlock(after);
+                    }
+                }
+                break;
+            }
+            case zl::MatchExpr::PatternKind::Map: {
+                Operand length = callNative("Collection.length", {subject}, intType, loc);
+                if (length.isNone()) return false;
+                const Operand size = Operand::constant(
+                    ctx.builder.constantInt(static_cast<std::int64_t>(pattern.mapEntries.size())), intType);
+                Operand same = Operand::temp(fb.emitBinary(Opcode::Eq, length, size, boolType, loc), boolType);
+                const BlockId next = newBlock(nullptr);
+                fb.emitBranch(same, next, fail, loc);
+                gotoBlock(next);
+                for (const auto& entry : pattern.mapEntries) {
+                    if (!entry.key) continue;
+                    Operand key = patternValue(*entry.key, keyTypeOf(subjectType));
+                    if (key.isNone()) return false;
+                    Operand has = callNative("Collection.mapHas", {subject, key}, boolType, loc);
+                    if (has.isNone()) return false;
+                    const BlockId after = newBlock(nullptr);
+                    fb.emitBranch(has, after, fail, loc);
+                    gotoBlock(after);
+                    if (entry.value) {
+                        const TypeId valueType = valueTypeOf(subjectType);
+                        Operand value = Operand::temp(fb.emitIndexLoad(subject, key, valueType, loc), valueType);
+                        const BlockId afterValue = newBlock(nullptr);
+                        if (!lowerMatchPattern(*entry.value, value, afterValue, fail, arm, loc)) return false;
+                        gotoBlock(afterValue);
+                    }
+                }
+                break;
+            }
+        }
+        if (failed) return false;
+        fb.emitJump(success, loc);
+        return true;
+    }
+
+    // Assembles the top-level pattern for an arm from the arm's own fields, so
+    // a literal arm and a destructuring arm lower through the same recursive
+    // walk.
+    [[nodiscard]] zl::MatchExpr::Pattern armPattern(const zl::MatchExpr::Arm& arm) const {
+        zl::MatchExpr::Pattern root;
+        root.kind = arm.patternKind;
+        root.raw = arm.raw;
+        root.literalType = arm.literalType;
+        root.enumTypeName = arm.enumTypeName;
+        root.enumMemberName = arm.enumMemberName;
+        root.typePattern = arm.typePattern;
+        root.bindingName = arm.bindingName;
+        root.containerKind = arm.containerKind;
+        root.positional = arm.positional;
+        root.line = arm.line;
+        for (const auto& field : arm.dataFields) {
+            zl::MatchExpr::DataFieldPattern copied;
+            copied.fieldName = field.fieldName;
+            copied.line = field.line;
+            copied.pattern = field.pattern ? std::make_unique<zl::MatchExpr::Pattern>(
+                                                 cloneMatchPattern(*field.pattern))
+                                           : nullptr;
+            root.fields.push_back(std::move(copied));
+        }
+        for (const auto& child : arm.listElements) {
+            root.elements.push_back(child ? std::make_unique<zl::MatchExpr::Pattern>(
+                                                cloneMatchPattern(*child))
+                                          : nullptr);
+        }
+        for (const auto& entry : arm.mapEntries) {
+            zl::MatchExpr::MapEntryPattern copied;
+            copied.line = entry.line;
+            copied.key = entry.key ? std::make_unique<zl::MatchExpr::Pattern>(
+                                         cloneMatchPattern(*entry.key))
+                                   : nullptr;
+            copied.value = entry.value ? std::make_unique<zl::MatchExpr::Pattern>(
+                                             cloneMatchPattern(*entry.value))
+                                       : nullptr;
+            root.mapEntries.push_back(std::move(copied));
+        }
+        return root;
     }
 
     // `match` lowers to a chain of two-way branches, one test block per arm:
     // test the arm, run it on success, fall through to the next arm's test on
     // failure. That is the shape the bytecode compiler produces, kept here so
-    // the two backends cannot drift apart on which arm wins.
+    // the two backends cannot drift apart on which arm wins. Structural
+    // patterns nest the same shape: a field/element/value sub-pattern is its
+    // own branch chain, and a failed sub-pattern falls through to the arm's
+    // next sibling or the next arm's test.
     [[nodiscard]] Operand matchExpr(const zl::MatchExpr& node) {
         const SourceLocation loc = location(&node);
         // The subject is evaluated exactly once, before any arm runs. A guard
@@ -1679,89 +2117,51 @@ struct FunctionLowerer {
             const bool lastArm = i + 1 == node.arms.size();
             const BlockId bodyBlock = newBlock(const_cast<zl::MatchExpr*>(&node));
             const BlockId following = lastArm ? noMatchBlock : newBlock(const_cast<zl::MatchExpr*>(&node));
+            const BlockId passedGuard = arm.guard ? newBlock(const_cast<zl::MatchExpr*>(&node)) : kNoBlock;
+            const BlockId success = arm.guard ? passedGuard : bodyBlock;
 
-            // --- the arm's test ------------------------------------------
-            gotoBlock(nextTest);
-            Operand test;
-            // The type a binding pattern narrows the subject to.
-            TypeId narrowed = subject.type;
-            switch (arm.patternKind) {
-                case zl::MatchExpr::PatternKind::Wildcard:
-                    break;
-                case zl::MatchExpr::PatternKind::Variable:
-                    break;
-                case zl::MatchExpr::PatternKind::Literal: {
-                    Operand literal = patternLiteral(arm, subject.type);
-                    if (literal.isNone()) return Operand::none();
-                    test = Operand::temp(fb.emitBinary(Opcode::Eq, subject, literal, boolType, armLoc), boolType);
-                    break;
-                }
-                case zl::MatchExpr::PatternKind::EnumMember: {
-                    if (arm.enumTypeName.empty()) {
-                        unsupported(&node, "enum pattern whose enum name could not be resolved");
-                        return Operand::none();
-                    }
-                    Operand member = Operand::constant(
-                        ctx.builder.constantEnumMember(arm.enumTypeName, arm.enumMemberName),
-                        ctx.builder.types().objectType(arm.enumTypeName));
-                    test = Operand::temp(fb.emitBinary(Opcode::Eq, subject, member, boolType, armLoc), boolType);
-                    break;
-                }
-                case zl::MatchExpr::PatternKind::Type: {
-                    narrowed = types.fromAnnotation(arm.typePattern);
-                    if (narrowed == 0) {
-                        unsupported(&node, "type pattern '" + arm.typePattern.name + "'");
-                        return Operand::none();
-                    }
-                    test = Operand::temp(fb.emitTypeTest(subject, narrowed, armLoc), boolType);
-                    break;
-                }
-                default:
-                    // Data, list and map patterns destructure. They need field
-                    // and element tests this IR does not spell out yet.
-                    unsupported(&node, "structural match pattern");
-                    return Operand::none();
-            }
-            if (failed) return Operand::none();
-            // A wildcard or variable pattern cannot fail, so its arm needs no
-            // test at all - branching on a constant true would only add a block
-            // the next pass would have to remove.
-            if (test.isNone()) fb.emitJump(bodyBlock, armLoc);
-            else fb.emitBranch(test, bodyBlock, following, armLoc);
-
-            // --- the arm's body ------------------------------------------
-            gotoBlock(bodyBlock);
+            // Bindings named anywhere in the pattern are scoped to the arm, so
+            // the scope opens before the test chain runs and closes after the
+            // arm's body.
             pushScope();
-            if (!arm.bindingName.empty() && arm.bindingName != "_") {
-                Operand value = subject;
-                if (arm.patternKind == zl::MatchExpr::PatternKind::Type && narrowed != subject.type) {
-                    // The test above proved the runtime type, so retyping is
-                    // what lets the arm use the narrowed member instead of the
-                    // whole union.
-                    value = Operand::temp(fb.emitRefine(subject, narrowed, armLoc), narrowed);
-                }
-                const auto storage = arm.storageBindings.find(arm.bindingName);
-                bindLocalBoth(arm.bindingName,
-                              storage == arm.storageBindings.end() ? std::string{} : storage->second,
-                              LocalRef::valueRef(value));
+
+            // --- the arm's test chain -------------------------------------
+            gotoBlock(nextTest);
+            if (!lowerMatchPattern(armPattern(arm), subject, success, following, arm, armLoc)) {
+                popScope();
+                return Operand::none();
             }
-            if (arm.patternKind == zl::MatchExpr::PatternKind::Type && narrowed != subject.type &&
-                node.subject && node.subject->kind == zl::NodeKind::Identifier) {
-                // `int _ => ... value ...` narrows the *subject* too, not just
-                // the arm's own binding - the arm body keeps spelling the
-                // subject's name and means the narrowed member. Without this
-                // the body would still see the whole union.
+
+            // A type, data, or enum pattern narrows the *subject* identifier
+            // too, so the arm body may keep spelling the subject's name and
+            // mean the matched member. Only a subject whose static type the
+            // pattern actually narrows gets the refine.
+            if (node.subject && node.subject->kind == zl::NodeKind::Identifier) {
                 const auto& subjectId = static_cast<const zl::Identifier&>(*node.subject);
-                bindLocalBoth(subjectId.name, subjectId.storageName, LocalRef::valueRef(
-                    Operand::temp(fb.emitRefine(subject, narrowed, armLoc), narrowed)));
+                TypeId narrowed = subject.type;
+                if (arm.patternKind == zl::MatchExpr::PatternKind::Type) {
+                    narrowed = types.fromAnnotation(arm.typePattern);
+                } else if (arm.patternKind == zl::MatchExpr::PatternKind::Data) {
+                    narrowed = ctx.builder.types().objectType(arm.typePattern.name);
+                } else if (arm.patternKind == zl::MatchExpr::PatternKind::EnumMember) {
+                    narrowed = ctx.builder.types().objectType(arm.enumTypeName);
+                }
+                if (narrowed != 0 && narrowed != subject.type) {
+                    bindLocalBoth(subjectId.name, subjectId.storageName, LocalRef::valueRef(
+                        Operand::temp(fb.emitRefine(subject, narrowed, armLoc), narrowed)));
+                }
             }
+
+            // --- the arm's guard ------------------------------------------
             if (arm.guard) {
+                gotoBlock(passedGuard);
                 Operand guard = asCondition(expression(arm.guard.get()), arm.guard.get());
                 if (failed || guard.isNone()) { popScope(); return Operand::none(); }
-                const BlockId passed = newBlock(const_cast<zl::MatchExpr*>(&node));
-                fb.emitBranch(guard, passed, following, armLoc);
-                gotoBlock(passed);
+                fb.emitBranch(guard, bodyBlock, following, armLoc);
             }
+
+            // --- the arm's body -------------------------------------------
+            gotoBlock(bodyBlock);
             Operand value = expression(arm.result.get());
             if (failed || value.isNone()) { popScope(); return Operand::none(); }
             fb.emitStore(resultSlot, coerce(value, resultType, armLoc), armLoc);
@@ -1859,6 +2259,45 @@ struct FunctionLowerer {
 // ---------------------------------------------------------------------------
 // Program-level lowering
 // ---------------------------------------------------------------------------
+
+// True when `needle` occurs anywhere inside `haystack`. Used to attribute a
+// lambda to the class whose method body contains it.
+zl::MatchExpr::Pattern cloneMatchPattern(const zl::MatchExpr::Pattern& source) {
+    zl::MatchExpr::Pattern out;
+    out.kind = source.kind;
+    out.raw = source.raw;
+    out.literalType = source.literalType;
+    out.enumTypeName = source.enumTypeName;
+    out.enumMemberName = source.enumMemberName;
+    out.typePattern = source.typePattern;
+    out.bindingName = source.bindingName;
+    out.containerKind = source.containerKind;
+    out.positional = source.positional;
+    out.line = source.line;
+    for (const auto& child : source.elements) {
+        out.elements.push_back(child ? std::make_unique<zl::MatchExpr::Pattern>(cloneMatchPattern(*child))
+                                     : nullptr);
+    }
+    for (const auto& entry : source.mapEntries) {
+        zl::MatchExpr::MapEntryPattern copied;
+        copied.line = entry.line;
+        copied.key = entry.key ? std::make_unique<zl::MatchExpr::Pattern>(cloneMatchPattern(*entry.key))
+                               : nullptr;
+        copied.value = entry.value ? std::make_unique<zl::MatchExpr::Pattern>(cloneMatchPattern(*entry.value))
+                                   : nullptr;
+        out.mapEntries.push_back(std::move(copied));
+    }
+    for (const auto& field : source.fields) {
+        zl::MatchExpr::DataFieldPattern copied;
+        copied.fieldName = field.fieldName;
+        copied.line = field.line;
+        copied.pattern = field.pattern
+                             ? std::make_unique<zl::MatchExpr::Pattern>(cloneMatchPattern(*field.pattern))
+                             : nullptr;
+        out.fields.push_back(std::move(copied));
+    }
+    return out;
+}
 
 // True when `needle` occurs anywhere inside `haystack`. Used to attribute a
 // lambda to the class whose method body contains it.

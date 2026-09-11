@@ -1031,12 +1031,12 @@ class FlowOnLowered {
     std::cout << "mir lowering data flow: PASS\n";
 }
 
-void testUnsupportedConstructStaysValid() {
-    // `finally` is not lowered yet. The function must be marked incomplete and
-    // noted, but the module still has to verify: a bail-out partway through a
-    // body must not leave unterminated or unreachable blocks behind.
-    const auto lowered = lower("Unsupported", R"ZL(
-class Unsupported {
+void testFinallyLowers() {
+    // `finally` now lowers completely: the normal path runs the finally body in
+    // a plain block, the unwind path runs it in a Cleanup block reached through
+    // a catch-all finally handler, and that block rethrows the pending value.
+    const auto lowered = lower("Finally", R"ZL(
+class Finally {
     func main(): void {
         try {
             log("work")
@@ -1048,13 +1048,17 @@ class Unsupported {
     }
 }
 )ZL");
-    require(lowered.ok, "a partially lowered module did not verify:\n" + lowered.errors);
-    require(hasDiagnostic(lowered, "unsupported"),
-            "the unsupported construct was not reported as a note");
-    const auto* function = findFunction(lowered, "Unsupported.main");
-    require(function != nullptr, "the partially lowered function is missing");
-    require(function && function->incomplete, "the partially lowered function is not marked incomplete");
-    std::cout << "mir lowering partial support: PASS\n";
+    requireClean(lowered, "try/finally");
+    require(contains(lowered, "Finally.main", "[cleanup]"),
+            "try/finally did not lower to a cleanup block");
+    require(contains(lowered, "Finally.main", "handler any =>"),
+            "try/finally did not lower a catch-all finally handler");
+    require(contains(lowered, "Finally.main", "throw"),
+            "the finally cleanup block does not rethrow the pending value");
+    const auto* function = findFunction(lowered, "Finally.main");
+    require(function != nullptr, "the lowered function is missing");
+    require(function && !function->incomplete, "try/finally left the function marked incomplete");
+    std::cout << "mir lowering try/finally: PASS\n";
 }
 
 void testWholeExampleCorpusShape() {
@@ -1150,7 +1154,7 @@ int main() {
     testBranchMergeBecomesBlockParameter();
     testDataFlowQueriesAnswerForLoweredCode();
 
-    testUnsupportedConstructStaysValid();
+    testFinallyLowers();
     testWholeExampleCorpusShape();
 
     if (failures != 0) {

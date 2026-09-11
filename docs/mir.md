@@ -253,9 +253,15 @@ The verifier enforces all of these. They are the contract a backend may rely on.
 ### Exceptions
 
 25. **A catch block has no normal predecessors.** It is reachable only along
-    unwind edges. A catch block that control can also fall into is invalid.
+    unwind edges. A catch block that control can also fall into is invalid. The
+    same applies to a cleanup block: a `finally` region entered along an unwind
+    edge has no normal predecessor, and a catch or cleanup block names the slot
+    its handler binds (the caught value for a catch, the thrown object for a
+    finally, which the block rethrows).
 26. **Handler order is search order**, innermost last, matching how the chain is
-    installed dynamically as blocks are created.
+    installed dynamically as blocks are created. A finally handler is a
+    catch-all that sits innermost of its `try` (after its catches, so the
+    catches get first refusal) and rethrows after the cleanup block runs.
 
 ---
 
@@ -452,15 +458,32 @@ metadata that type checking consumes and discards:
 
 ### What is not lowered yet
 
-`try/finally`, `try` with no `catch`, structural (`data`/list/map) match
-patterns, `data` copy-update (`base with { ... }`), function references,
-object-typed collection literals, and a method call whose receiver semantic
-analysis could not resolve to a class. Each produces a note and an
-incomplete function rather than malformed MIR. (The `Shared<T>.get()` case once
-listed here resolves again — generic-class receivers come back out of semantic
-analysis fully typed, as `Shared<int>.get(): int`.)
+A method call whose receiver semantic analysis could not resolve to a class is
+the one remaining note: it lowers to a diagnostic and an incomplete function
+rather than malformed MIR, and a valid program does not reach it (the checker
+rejects the unresolved receiver first). Every construct that used to be listed
+here now lowers completely:
 
-Most of what is left is one root cause rather than several: a bare `func`
+- `try/finally` lowers to an exception handler with a `Cleanup` target. The
+  handler is a catch-all (`isFinally`) that the bytecode backend spells as
+  `PushFinallyHandler`; the target block binds the thrown object into a pending
+  slot, runs the finally body, and throws the slot again. Normal completion
+  runs the same body in a plain block, and `return`/`break`/`continue` inside
+  the try region inline the active finalizers innermost-first, exactly where the
+  reference compiler does.
+- Structural (`data`/list/map/set) match patterns lower to the same two-way
+  branch chain as every other arm, nesting per field/element/value: `data`
+  destructures fields, `list`/`set` check length then members, `map` checks
+  entry presence then values. Positional data patterns (`Pair(v, w)`) have their
+  field names resolved to declaration order by the checker before lowering.
+- `data` copy-update (`base with { ... }`) lowers to an `alloc` plus per-field
+  copies and coerced updates.
+- Function references lower to `MakeClosure` with no captures, resolved through
+  the class hierarchy so an inherited static reference works.
+- Object-typed collection literals build an untyped container of the literal's
+  shape instead of bailing out.
+
+What remains is a fidelity question rather than a lowering gap: a bare `func`
 parameter carries no signature, so semantic analysis types its body's
 expressions UNKNOWN and MIR records that faithfully instead of inventing a type.
 Fixing it means inferring lambda parameter types at call sites, in the checker —
