@@ -132,6 +132,7 @@ Full syntax and semantics: **[docs/language-guide.md](docs/language-guide.md)**.
 | [docs/packages.md](docs/packages.md) | Imports, the stdlib root, and `zlpkg` dependency management |
 | [docs/native.md](docs/native.md) | Native boundary, `@native` compilation, `zl-bind`, FFI, async |
 | [docs/mir.md](docs/mir.md) | MIR — the typed mid-level IR: structures, invariants, verifier, lowering |
+| [docs/native-backend.md](docs/native-backend.md) | The native backend: target abstraction, calling conventions, value classes, native IR, MIR → machine code |
 | [docs/mir-optimizer.md](docs/mir-optimizer.md) | The MIR optimiser: pass/analysis managers, effect classification, the safety contract, differential validation |
 | [docs/tooling.md](docs/tooling.md) | Editor/test tooling, `zl-lsp`, `zl-test`, fast diagnostics, document symbols |
 | [docs/development.md](docs/development.md) | Build details, stdlib lookup, testing, packaging |
