@@ -11,6 +11,7 @@
 
 
 #include "zl/common/executable_path.hpp"
+#include "zl/common/json.hpp"
 #include "zl/common/stdlib_version.hpp"
 #include "zl/compiler/module_loader.hpp"
 #include "zl/compiler/type_checker.hpp"
@@ -127,6 +128,80 @@ std::filesystem::path resolveStdlibRoot(const char* argv0) {
 } // namespace
 
 
+// Observation-only pipeline: no runtime and no optimisations. Each result names
+// the actual boundary reached; unsupported lowering is never a verification pass.
+int safetyCheck(const char* file, const char* executable, const std::string& stopAfter = "mir") {
+    using zl::common::jsonString;
+    std::string stage = "setup";
+    std::string parsing = "not-reached", semantic = "not-reached", mir = "not-reached";
+    std::string notes = "[]", incomplete = "[]", verification = "null";
+    const auto array = [&](const std::vector<std::string>& strings) {
+        std::string out = "[";
+        for (std::size_t i = 0; i < strings.size(); ++i) {
+            if (i) out += ',';
+            out += jsonString(strings[i]);
+        }
+        return out + ']';
+    };
+    const auto finish = [&](int code, const std::string& outcome, const std::string& message) {
+        std::cout << "{\"schema_version\":1,\"file\":" << jsonString(file)
+                  << ",\"stage\":" << jsonString(stage) << ",\"outcome\":" << jsonString(outcome)
+                  << ",\"message\":" << jsonString(message)
+                  << ",\"layers\":{\"parsing\":" << jsonString(parsing)
+                  << ",\"semantic\":" << jsonString(semantic) << ",\"mir\":" << jsonString(mir)
+                  << ",\"runtime\":\"not-run\"},\"lowering_notes\":" << notes
+                  << ",\"incomplete_functions\":" << incomplete
+                  << ",\"verification\":" << verification << "}\n";
+        return code;
+    };
+    try {
+        std::vector<std::filesystem::path> roots;
+        if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
+            for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
+        const auto stdlib = resolveStdlibRoot(executable);
+        const auto version = zl::common::checkStdlibVersion(stdlib, ZL_VERSION_STRING);
+        if (!version.compatible) return finish(3, "environment-error", version.error);
+        roots.push_back(stdlib);
+        stage = "parsing";
+        zl::ModuleLoader loader(file, roots);
+        auto program = loader.load();
+        parsing = "accepted";
+        if (stopAfter == "parsing") return finish(0, "accepted", "parsing completed");
+        stage = "semantic";
+        zl::TypeChecker checker;
+        checker.check(*program, /*requireMain=*/false);
+        semantic = "accepted";
+        if (stopAfter == "semantic") return finish(0, "accepted", "semantic checking completed");
+        stage = "lowering";
+        auto lowered = zl::mir::lowerProgram(*program, checker);
+        notes = array(lowered.diagnostics);
+        incomplete = array(lowered.incompleteFunctions);
+        if (!lowered.success) return finish(6, "unsupported", "lowering did not complete");
+        stage = "mir";
+        zl::mir::VerifierOptions options;
+        options.auditBoundaries = true;
+        const auto report = zl::mir::verifyModule(lowered.module, options);
+        verification = report.toJson();
+        mir = report.ok() ? (lowered.complete() ? "verified" : "partial") : "rejected";
+        if (!report.ok()) return finish(4, "rejected", "MIR contract violation (may be a compiler defect)");
+        if (!lowered.complete()) return finish(6, "unsupported", "partial MIR is not a safety certificate");
+        return finish(0, "verified", "static verification does not discharge runtime obligations");
+    } catch (const zl::ParseError& e) {
+        parsing = "rejected";
+        return finish(1, "rejected", e.what());
+    } catch (const zl::TypeCheckError& e) {
+        semantic = "rejected";
+        return finish(1, "rejected", e.what());
+    } catch (const zl::ModuleError& e) {
+        return finish(7, "module-error", e.what());
+    } catch (const std::exception& e) {
+        // Lexer currently throws std::runtime_error, not a lexical error type.
+        // Keep this an unclassified failure; never turn arbitrary exceptions
+        // (including compiler bugs) into credited safety detections.
+        return finish(7, "unclassified-error", e.what());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MIR optimiser, as the command line drives it
 // ---------------------------------------------------------------------------
@@ -203,6 +278,16 @@ std::filesystem::path resolveStdlibRoot(const char* argv0) {
 int main(int argc, char** argv) {
     if (argc >= 2) {
         const std::string command = argv[1];
+        if (command == "--safety-check") {
+            std::string stop = "mir";
+            if (argc == 4 && std::string(argv[3]) == "--stop-after=parsing") stop = "parsing";
+            else if (argc == 4 && std::string(argv[3]) == "--stop-after=semantic") stop = "semantic";
+            else if (argc != 3) {
+                std::cerr << "usage: zl --safety-check <file.zl> [--stop-after=parsing|semantic]\n";
+                return 2;
+            }
+            return safetyCheck(argv[2], argv[0], stop);
+        }
         if (command == "--emit-machine-code") {
             if (argc != 4) {
                 std::cerr << "usage: zl --emit-machine-code <output.zlm> <file.zl>\n";
@@ -597,6 +682,7 @@ int main(int argc, char** argv) {
                          "  zl --emit-ssa <output|-> <file.zl>\n"
                          "  zl --emit-mir-opt <output|-> <file.zl>\n"
                          "  zl --mir-opt-check <file.zl>\n"
+                         "  zl --safety-check <file.zl>   JSON safety report; never executes\n"
                          "  zl --version\n"
                          "  zl --help\n";
             return 0;

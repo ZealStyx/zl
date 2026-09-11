@@ -256,6 +256,7 @@ struct LoopContext {
     // continue from inside the loop runs the finalizers opened after loop
     // entry (innermost first) before leaving, exactly as the reference does.
     std::size_t finallyDepth{0};
+    std::size_t scopeDepth{0};
 };
 
 // A name in scope resolves either to a mutable slot or directly to a parameter.
@@ -348,6 +349,7 @@ struct FunctionLowerer {
 
     [[nodiscard]] SourceLocation location(const zl::AstNode* node) const {
         SourceLocation loc;
+        loc.file = node && !node->sourceFile.empty() ? node->sourceFile : fb.function().location.file;
         if (node) loc.line = static_cast<std::uint32_t>(node->line);
         return loc;
     }
@@ -371,7 +373,27 @@ struct FunctionLowerer {
 
     // --- scopes and locals ------------------------------------------------
     void pushScope() { scopes.emplace_back(); }
-    void popScope() { scopes.pop_back(); }
+    void endBorrowsFromScope(std::size_t depth, SourceLocation loc = {}) {
+        if (isDead()) return;
+        std::set<SlotId> borrows;
+        for (std::size_t i = depth; i < scopes.size(); ++i) {
+            for (const auto& [name, local] : scopes[i]) {
+                (void)name;
+                const Slot* slot = fb.function().slot(local.slot);
+                if (slot && slot->ownership == zl::OwnershipKind::BORROW) borrows.insert(local.slot);
+            }
+        }
+        for (SlotId slot : borrows) {
+            const auto& declared = fb.function().slot(slot)->location;
+            fb.emitEndBorrow(slot, loc.valid() ? loc : declared);
+        }
+    }
+    void popScope() {
+        // The checker ends lexical borrows on scope exit. Make that event
+        // explicit: a may-borrow join must not "forget" it by accident.
+        endBorrowsFromScope(scopes.size() - 1);
+        scopes.pop_back();
+    }
 
     [[nodiscard]] LocalRef lookupLocal(const std::string& name) const {
         for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
@@ -960,7 +982,7 @@ struct FunctionLowerer {
             }
             Operand callee = local.isParameter
                                  ? fb.parameterOperand(local.param)
-                                 : Operand::temp(fb.emitLoad(local.slot, loc),
+                                 : local.isValue ? local.value : Operand::temp(fb.emitLoad(local.slot, loc),
                                                  fb.function().slot(local.slot)->type);
             std::vector<Operand> arguments;
             for (const auto& argument : node.arguments) {
@@ -1558,7 +1580,7 @@ struct FunctionLowerer {
             }
             captures.push_back(local.isParameter
                                    ? fb.parameterOperand(local.param)
-                                   : Operand::temp(fb.emitLoad(local.slot, loc),
+                                   : local.isValue ? local.value : Operand::temp(fb.emitLoad(local.slot, loc),
                                                    fb.function().slot(local.slot)->type));
         }
         // Now that the captured locals are known, the closure function can
@@ -1714,7 +1736,7 @@ struct FunctionLowerer {
         fb.emitBranch(condition, bodyBlock, exitBlock, loc);
 
         gotoBlock(bodyBlock);
-        loops.push_back(LoopContext{conditionBlock, exitBlock, activeFinallyBlocks.size()});
+        loops.push_back(LoopContext{conditionBlock, exitBlock, activeFinallyBlocks.size(), scopes.size()});
         statement(node.body.get());
         loops.pop_back();
         if (!isDead()) fb.emitJump(conditionBlock, loc);
@@ -1729,7 +1751,7 @@ struct FunctionLowerer {
 
         fb.emitJump(bodyBlock, loc);
         gotoBlock(bodyBlock);
-        loops.push_back(LoopContext{conditionBlock, exitBlock, activeFinallyBlocks.size()});
+        loops.push_back(LoopContext{conditionBlock, exitBlock, activeFinallyBlocks.size(), scopes.size()});
         statement(node.body.get());
         loops.pop_back();
         if (!isDead()) fb.emitJump(conditionBlock, loc);
@@ -1778,7 +1800,7 @@ struct FunctionLowerer {
         fb.emitBranch(keepGoing, bodyBlock, exitBlock, loc);
 
         gotoBlock(bodyBlock);
-        loops.push_back(LoopContext{stepBlock, exitBlock, activeFinallyBlocks.size()});
+        loops.push_back(LoopContext{stepBlock, exitBlock, activeFinallyBlocks.size(), scopes.size()});
         statement(node.body.get());
         loops.pop_back();
         if (!isDead()) fb.emitJump(stepBlock, loc);
@@ -1806,6 +1828,7 @@ struct FunctionLowerer {
             emitFinallyCleanup(i - 1);
         }
         if (isDead()) return;
+        endBorrowsFromScope(loop.scopeDepth, location(&node));
         fb.emitJump(loop.breakTarget, location(&node));
     }
 
@@ -1819,6 +1842,7 @@ struct FunctionLowerer {
             emitFinallyCleanup(i - 1);
         }
         if (isDead()) return;
+        endBorrowsFromScope(loop.scopeDepth, location(&node));
         fb.emitJump(loop.continueTarget, location(&node));
     }
 
@@ -2441,7 +2465,7 @@ struct FunctionLowerer {
 
         for (std::size_t i = 0; i < node.arms.size(); ++i) {
             const auto& arm = node.arms[i];
-            SourceLocation armLoc;
+            SourceLocation armLoc = loc;
             armLoc.line = static_cast<std::uint32_t>(arm.line);
             const bool lastArm = i + 1 == node.arms.size();
             const BlockId bodyBlock = newBlock(const_cast<zl::MatchExpr*>(&node));
@@ -2686,7 +2710,7 @@ void declareLayouts(LoweringContext& ctx) {
             const auto& iface = static_cast<const zl::InterfaceDecl&>(*declaration);
             InterfaceInfo& info = ctx.builder.addInterface(iface.name);
             info.bases = iface.extendsNames;
-            info.location.line = static_cast<std::uint32_t>(iface.line);
+            info.location = SourceLocation{iface.sourceFile, static_cast<std::uint32_t>(iface.line), 0};
             // An interface declares signatures, not bodies. They are recorded so
             // a call through an interface-typed receiver can be dispatched from
             // the interface's own declaration.
@@ -2714,7 +2738,7 @@ void declareLayouts(LoweringContext& ctx) {
                 layout.parentTypeName = zl::describeTypeAnnotation(baseType);
             }
             layout.interfaces = cls.implementsNames;
-            layout.location.line = static_cast<std::uint32_t>(cls.line);
+            layout.location = SourceLocation{cls.sourceFile, static_cast<std::uint32_t>(cls.line), 0};
             TypeConverter converter{ctx.builder.types(), cls.typeParams};
             for (const auto& member : cls.members) {
                 if (member->kind != zl::NodeKind::VarDecl) continue;
@@ -2735,7 +2759,7 @@ void declareLayouts(LoweringContext& ctx) {
                 // module never declared.
                 if (field.isStatic) {
                     (void)ctx.builder.addStatic(cls.name, field.name, fieldLayout.type, kNoFunction,
-                                                SourceLocation{{}, static_cast<std::uint32_t>(field.line), 0});
+                                                SourceLocation{field.sourceFile, static_cast<std::uint32_t>(field.line), 0});
                 }
             }
         } else if (declaration->kind == zl::NodeKind::DataDecl) {
@@ -2743,7 +2767,7 @@ void declareLayouts(LoweringContext& ctx) {
             ClassLayout& layout = ctx.builder.addClassLayout(data.name);
             layout.parent = data.extendsName;
             layout.isData = true;
-            layout.location.line = static_cast<std::uint32_t>(data.line);
+            layout.location = SourceLocation{data.sourceFile, static_cast<std::uint32_t>(data.line), 0};
             TypeConverter converter{ctx.builder.types(), kNoTypeParams};
             for (const auto& field : data.fields) {
                 FieldLayout fieldLayout;
@@ -2757,7 +2781,7 @@ void declareLayouts(LoweringContext& ctx) {
             ClassLayout& layout = ctx.builder.addClassLayout(enumeration.name);
             layout.isEnum = true;
             layout.enumMembers = enumeration.members;
-            layout.location.line = static_cast<std::uint32_t>(enumeration.line);
+            layout.location = SourceLocation{enumeration.sourceFile, static_cast<std::uint32_t>(enumeration.line), 0};
         }
     }
 }
@@ -2778,7 +2802,7 @@ void declareFunction(LoweringContext& ctx, const zl::FunctionDecl& function, con
     fb.setAccess(function.access == zl::AccessModifier::PRIVATE    ? MemberAccess::Private
                  : function.access == zl::AccessModifier::PROTECTED ? MemberAccess::Protected
                                                                     : MemberAccess::Public);
-    fb.setLocation(SourceLocation{{}, static_cast<std::uint32_t>(function.line), 0});
+    fb.setLocation(SourceLocation{function.sourceFile, static_cast<std::uint32_t>(function.line), 0});
     if (!typeParams.empty()) fb.setGenericTemplate(typeParams);
     for (const auto& annotation : function.annotations) {
         if (annotation.name == "native") fb.setNative(true);
@@ -2809,12 +2833,12 @@ void declareFunction(LoweringContext& ctx, const zl::FunctionDecl& function, con
             selfName += ">";
         }
         (void)fb.addParameter("this", converter.fromRendered(selfName), zl::OwnershipKind::GC, {},
-                              SourceLocation{{}, static_cast<std::uint32_t>(function.line), 0});
+                              SourceLocation{function.sourceFile, static_cast<std::uint32_t>(function.line), 0});
         fb.function().hasThisParameter = true;
     }
     for (const auto& parameter : function.params) {
         (void)fb.addParameter(parameter.name, converter.fromAnnotation(parameter.type), parameter.ownership,
-                              {}, SourceLocation{{}, static_cast<std::uint32_t>(parameter.type.line), 0});
+                              {}, SourceLocation{function.sourceFile, static_cast<std::uint32_t>(parameter.type.line), 0});
     }
 
     ctx.functionIds[fb.function().name] = fb.function().id;
@@ -2833,7 +2857,7 @@ void lowerLambda(LoweringContext& ctx, const zl::LambdaExpr& lambda) {
     FunctionBuilder fb = ctx.builder.functionBuilder(id);
     fb.setLambda(true);
     fb.setAsync(lambda.isAsync);
-    fb.setLocation(SourceLocation{{}, static_cast<std::uint32_t>(lambda.line), 0});
+    fb.setLocation(SourceLocation{lambda.sourceFile, static_cast<std::uint32_t>(lambda.line), 0});
     // A lambda written inside a generic class is generic over that class's
     // parameters: it closes over `this` and over locals whose types mention
     // them. Declaring the closure as a template is what makes those types legal

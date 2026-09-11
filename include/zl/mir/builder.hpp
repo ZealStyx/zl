@@ -86,6 +86,7 @@ public:
 
     [[nodiscard]] Module& module() { return module_; }
     [[nodiscard]] Function& function() { return function_; }
+    [[nodiscard]] const Function& function() const { return function_; }
     [[nodiscard]] TypeArena& types() { return module_.types; }
 
     // --- signature --------------------------------------------------------
