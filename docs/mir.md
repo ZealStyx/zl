@@ -16,6 +16,9 @@ re-deriving structure from the AST or from bytecode.
                                                     Module → verifyModule
                                                                │
                                                                ▼
+                                                    optimizeModule (opt-in)
+                                                               │
+                                                               ▼
                                                         printModule / backend
 ```
 
@@ -790,6 +793,50 @@ call site is what makes the check precise where it can be.
 
 ---
 
+## Optimisation
+
+MIR can be optimised after lowering. That layer is described in
+[`mir-optimizer.md`](mir-optimizer.md); what follows is the summary, because one
+of its constraints is a statement about MIR itself rather than about any pass.
+
+**The optimiser is a consumer of MIR, not a part of it.** It is reached from the
+command line (`--emit-mir-opt`, `--mir-opt-check`, `ZL_MIR_OPT=1 --mir-vm`),
+never implicitly, and nothing in MIR changed to accommodate it. `Module`,
+`Function` and `Instruction` are exactly what they were; the optimiser reads
+them, proves things about them, and hands back the same structures with fewer of
+them in.
+
+**The safety contract is the constraint MIR had to earn.** An optimisation is
+legal only if it preserves observable side effects, evaluation order, overflow
+behaviour, ownership, borrowing, drops, exceptions, synchronization, native
+resource lifetime, task behaviour and callback behaviour. That list can only be
+checked if the IR states the facts the checks need — which is why MIR records
+types on every value, effects in an explicit table (`effects.hpp`), exception
+edges as CFG edges rather than implied control flow, ownership on slots and
+bindings, and every suspension, thread and native-resource operation as its own
+opcode. An IR that erased any of those could not be optimised safely at all;
+the most it could do is guess.
+
+**Where safety cannot be proven, nothing is done.** Every pass counts what it
+declined as well as what it changed. The shipped passes are constant folding,
+constant propagation, dead-block elimination, dead-value elimination, simple
+algebraic simplification, redundant-conversion removal, branch simplification
+and local copy propagation — all of them either deleting work that provably
+cannot be observed or replacing a use with something provably equal. None of
+them reorders, sinks, hoists, inlines or duplicates.
+
+**Equivalence is checked twice, and the second check is the one that counts.**
+`compareModules` compares the two modules structurally and by observable event;
+`tools/mir_opt_diff.sh` runs every program in `examples/` both ways and compares
+its output and exit status. The static comparison deliberately ignores runtime
+checks and local stores, and cannot see values at all — running the program is
+what covers those. It is also what found the one miscompile so far (a
+dead-looking store in a closure body that is not dead, because ZL captures by
+value and a mutated capture persists between calls), which is the argument for
+having both rather than trusting the cleverer one.
+
+---
+
 ## Textual form
 
 `printModule` produces a readable dump, used by `zl --emit-mir`:
@@ -858,6 +905,21 @@ is how the backend is checked to behave identically on both forms - see
 example corpus (27 identical, 0 differing; the programs the bytecode backend
 cannot run yet are skipped as uninformative).
 
+The optimiser has its own commands:
+
+```bash
+zl --emit-mir-opt out.mir program.zl   # lower, optimise, write the result
+zl --emit-mir-opt - program.zl         # print it
+zl --mir-opt-check program.zl          # optimise and diff; exit 4 on divergence
+ZL_MIR_OPT=1 zl --mir-vm program.zl    # run the optimised MIR
+```
+
+`ZL_MIR_OPT_PASSES` selects the pipeline (`default`, `none`, or a comma-separated
+list of pass names), `ZL_MIR_OPT_SNAPSHOT_DIR` writes a before/after snapshot per
+changed pass, and `ZL_MIR_OPT_VERBOSE=1` prints the per-pass trace to stderr.
+`--mir-opt-check` is the static half; `tools/mir_opt_diff.sh` is the runtime
+half, and currently reports 50 of 50 example programs identical.
+
 Exit codes: `0` verified, `2` bad usage, `3` stdlib version mismatch, `4`
 verification failed (the module is not written), `5` the output could not be
 written, `1` a front-end failure. Lowering notes go to stderr; they are not
@@ -914,6 +976,20 @@ errors, and a module with notes can still verify.
   unknown store and a `Some<string>`-for-`Option<int>` return; distinct generic
   overloads keeping distinct dispatch identities; and SSA promotion declining
   to retype a dynamic slot.
+
+- `tests/mir_pass_tests.cpp` (`zl-mir-opt-tests`) — 139 regressions. The
+  optimiser's executable specification, written against hand-built MIR: the
+  effect table and the rules that discharge `MayThrow`, the evaluator's
+  refusals, each pass's rewrite *and* each pass's declinations, the closure
+  store rule, pipeline ordering and the registry, rollback of a corrupting
+  pass, analysis caching and invalidation, snapshots, and the differential
+  validator catching a deleted `log` or a changed signature while accepting a
+  real optimisation.
+- `tests/mir_opt_pipeline_tests.cpp` (`zl-mir-opt-pipeline-tests`) — 79
+  regressions over real ZL programs: lower → verify → optimise → verify → static
+  differential → run both versions and compare their output and exit code.
+- `tools/mir_opt_diff.sh` — the corpus harness: every program in `examples/`
+  run optimised and unoptimised, outputs compared byte for byte.
 
 Lowering is also exercised across `examples/`: every file is lowered and
 verified. 56 of the 59 lower and verify completely; the other 3 verify with

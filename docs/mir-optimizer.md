@@ -1,0 +1,358 @@
+# MIR optimiser
+
+The optimiser is the layer that takes a verified `zl::mir::Module` and returns a
+verified module that does the same thing with less work in it.
+
+It is deliberately the *last* thing that was built on top of MIR, and it is
+deliberately conservative. MIR's job is to be a contract the backends can trust;
+an optimiser that is clever before it is correct would break the one property
+the whole layer exists for. So the design rule is stated once and applied
+everywhere:
+
+> **Where safety cannot be proven, nothing is done.** Every pass counts what it
+> declined as well as what it changed. A skipped optimisation is a correct
+> program; a wrong one is a miscompile.
+
+```bash
+zl --emit-mir-opt out.mir program.zl   # emit the optimised MIR
+zl --mir-opt-check program.zl          # optimise and check it is equivalent
+ZL_MIR_OPT=1 zl --mir-vm program.zl    # run the optimised MIR
+tools/mir_opt_diff.sh                  # run the corpus both ways, compare
+```
+
+---
+
+## Contents
+
+- [The safety contract](#the-safety-contract)
+- [Side-effect classification](#side-effect-classification)
+- [The framework](#the-framework)
+- [The passes](#the-passes)
+- [What is deliberately not done](#what-is-deliberately-not-done)
+- [Differential validation](#differential-validation)
+- [Command line](#command-line)
+- [Tests](#tests)
+
+---
+
+## The safety contract
+
+An optimisation is legal here only if it preserves, exactly:
+
+| Property | Why it is easy to break | How it is held |
+| --- | --- | --- |
+| observable side effects | deleting a `log`, a call, a store | the effect table (`effects.hpp`) must say the instruction is removable |
+| evaluation order | moving or merging work | no pass reorders, sinks or hoists anything; they only delete or substitute |
+| overflow behaviour | folding `INT64_MAX + 1` into a wrapped value | `foldInstruction` refuses to fold an operation that would raise |
+| ownership | dropping a `move`/`borrow`/`drop` | the ownership family is never removable |
+| borrowing | moving a use past an `end_borrow` | ownership events are never moved or removed |
+| drops | deleting a deterministic release | `Drop` carries `Ownership` |
+| exceptions | deleting an instruction because its result is unused | `MayThrow` must be *discharged* before deletion |
+| synchronization | CSE-ing a second `atomic_load` | the sync family is `Synchronization`/`VolatileRead`: never removable, never merged |
+| native resource lifetime | removing a `handle_close` | the FFI family carries `NativeResource` |
+| task behaviour | dropping an `await`, a spawn, a cancel | `TaskEffect`/`Suspension`/`ThreadBoundary` |
+| callback behaviour | deduplicating a callback registration | the callback opcodes carry `NativeResource` and `Calls` |
+
+The two subtlest entries are worth expanding, because they are the ones a
+textbook optimiser gets wrong in ZL:
+
+**Overflow is an observable effect.** ZL's integer arithmetic *raises* on
+overflow, on division by zero and on an out-of-range shift (`VM::binaryArith`).
+So `Add` is classified `Pure | MayThrow`, and an instruction is only deleted
+once `MayThrow` has been discharged. That happens in three tiers, each a proof
+rather than a guess:
+
+1. every operand is a constant, so the shared evaluator decides — and it
+   refuses exactly the operations that raise;
+2. a constant makes the failure impossible whatever the other operands are:
+   `x + 0` cannot overflow, `x / 1` cannot divide by zero, `x << 3` cannot be
+   out of range;
+3. the operand *types* exclude the failure: an ordered comparison of two
+   numbers cannot raise "comparison operators require numbers".
+
+A dead `x * y` is still not deleted, because it can overflow, and deleting it
+would delete the program's error.
+
+**Floating point identities are narrowed to the ones that hold for every
+value.** `x + 0.0` is *not* rewritten to `x`, because `(-0.0) + 0.0` is `+0.0`
+and the sign of zero is observable. `x * 1.0`, `x / 1.0` and `x - 0.0` are,
+because they hold for NaN and both zeros alike.
+
+---
+
+## Side-effect classification
+
+`include/zl/mir/effects.hpp` is the single answer to "what does this
+instruction do besides compute?". Every pass asks it; no pass has its own
+notion of safe.
+
+| Effect | Meaning | Removable if result unused |
+| --- | --- | --- |
+| `Pure` | computes a value from its operands | yes |
+| `ReadsMemory` | reads a slot, field, element or static | yes |
+| `WritesMemory` | writes one | no |
+| `Allocation` | creates a new GC value | no |
+| `RuntimeCheck` | exists to raise: `refine`, `null_check`, handle validity | no |
+| `MayThrow` | may leave along an unwind edge | no (until discharged) |
+| `ObservableIO` | visible outside the program (`log`) | no |
+| `Synchronization` | locks, atomics, channels, semaphores, conditions, shared | no |
+| `VolatileRead` | two reads may differ | no |
+| `Calls` | transfers control to another function or native | no |
+| `TaskEffect` | creates/awaits/blocks/cancels/ignores a task | no |
+| `ThreadBoundary` | carries values to another thread | no |
+| `Suspension` | parks the async frame | no |
+| `NativeResource` | handle/callback/FFI lifecycle | no |
+| `Ownership` | `move`/`borrow`/`end_borrow`/`drop` | no |
+| `UnwindBarrier` | a scoped lock or cleanup whose release must run | no |
+
+Only `Pure` and `ReadsMemory` are compatible with deletion, and `MayThrow`
+must be discharged first. Everything else stays, even when nothing reads its
+result, because each of those instructions is a thing the program is *for*
+rather than a step towards one.
+
+Two consequences are worth naming because they surprise people:
+
+* **a static's read is a call.** ZL statics are lazily initialised, so
+  `StaticLoad` can run the class's initialiser; it is classified with `Calls`.
+* **arithmetic is not `Pure`** — see the previous section.
+
+---
+
+## The framework
+
+### Pass manager
+
+`PassManager` (`include/zl/mir/passes.hpp`) owns an ordered list of passes and
+runs them. Two kinds exist: `FunctionPass` (once per function — every
+optimisation here is one) and `ModulePass` (once per module — none ship today,
+because removing a function is not something this framework will do while
+reflection can reach it by name; the manager supports the kind so adding one
+later is not a restructuring).
+
+The pipeline runs to a fixpoint: it repeats until an iteration changes nothing,
+or `OptimizationOptions::maxIterations` is reached. It has to repeat, because
+the last pass feeds the first — a value that becomes constant late turns into a
+branch on a constant that was not constant on the way in.
+
+Passes are created **by name** through `PassRegistry`, so a pipeline can be
+written down (`ZL_MIR_OPT_PASSES=fold-constants,propagate-copies`) and the
+curated ordering lives in exactly one place.
+
+### Ordering, and why
+
+```text
+1. simplify-branches         decided branches, cheapest first
+2. eliminate-dead-blocks     prune what (1) stranded
+3. fold-constants            intern the constants; the analysis only reports
+                             constants the pool already has
+4. propagate-constants       carry them across blocks and through phis
+5. simplify-algebraic        identities whose operands only just became 0 or 1
+6. remove-redundant-conversions
+                             conversions that stopped converting
+7. propagate-copies          (5) and (6) leave copies behind; dissolve them
+8. eliminate-dead-values     everything above replaces *uses*; this removes
+                             the definitions that are now unread
+```
+
+### Analysis manager
+
+`FunctionAnalysisManager` owns one result per (analysis, function) and hands
+out references, so two passes cannot see two versions of the same fact. The
+freshness rule is stated once and is the caller's job:
+
+> a pass that mutates a function calls `analyses.invalidate(function)` before
+> it asks for another analysis.
+
+Nothing is silently recomputed — recomputing on every query would defeat the
+cache, and guessing would be worse. The report carries `analyses built` /
+`analyses reused` so the cache can be seen earning its keep.
+
+### Verification between passes
+
+Any pass that reports a change is followed by `verifyFunction`. This is the
+framework's central guard:
+
+* the check runs with `unreachableBlocksAreErrors = false`, because simplifying
+  a branch legitimately *creates* unreachable blocks for the pruning pass to
+  remove, and failing in between would make the two unable to cooperate;
+* if verification fails, the function is **restored from the pre-pass copy**
+  and the failure is recorded in the report. A broken rewrite never reaches a
+  backend;
+* a pass that throws is treated the same way — caught, restored, recorded;
+* the final `verifyModule` runs with the caller's own options, unrelaxed.
+
+`OptimizationReport::trustworthy()` is the summary: nothing was rolled back,
+and the final verification (if one was asked for) passed.
+
+### Snapshots and before/after inspection
+
+Three levels, all opt-in:
+
+* `OptimizationOptions::keepSnapshots` puts the textual MIR from before and
+  after each changed pass into the report (`MirSnapshot`).
+* `OptimizationOptions::snapshotDirectory` writes
+  `<n>-<pass>-<function>.mir` files, each containing the before, the after, the
+  verification result and a line diff.
+* `ZL_MIR_OPT_VERBOSE=1` prints the per-pass trace to stderr: one line per pass
+  per function, with instruction and block counts, the pass's own note, and any
+  rollback.
+
+`diffLines(before, after)` is the shared line diff (bounded LCS) used by the
+snapshot files and by anything else that needs to show what changed.
+
+---
+
+## The passes
+
+| Pass | What it does | What it refuses |
+| --- | --- | --- |
+| `simplify-branches` | a branch or switch on a constant becomes a jump; a branch whose arms agree becomes a jump; a jump through an empty block is threaded | a branch whose arms pass different block arguments; a block with parameters, instructions or a handler chain |
+| `eliminate-dead-blocks` | removes blocks no edge can enter, counting exception edges — a catch block is live even though nothing falls through to it | — |
+| `fold-constants` | evaluates an instruction whose operands are all constants and rewrites the uses of its result | overflow, division/modulo by zero, out-of-range shifts, mixed operand kinds, a result whose type disagrees |
+| `propagate-constants` | replaces a use with the constant every path agrees on, including a block parameter whose incoming edges all hand it the same constant | a constant whose type is not exactly the value's type |
+| `simplify-algebraic` | `x + 0`, `x * 1`, `x & ~0`, `x - x`, `x ^ x`, `x / 1`, `-(-x)`, `!(!x)`, self-comparisons | anything that could introduce or remove a raise; `x + 0.0` (sign of zero); `x * 0.0` (NaN, infinity) |
+| `remove-redundant-conversions` | `widen` of a double, `refine` to the type a value already has, `null_check` on a non-nullable type, `is_null` of one | a check whose operand type is `unknown` or an unsubstituted `T`, or is nullable |
+| `propagate-copies` | store-to-load forwarding, a second load of a slot nothing wrote in between, and a block parameter every incoming edge hands the same value | anything needing a fact from outside the block, or from an unreachable predecessor |
+| `eliminate-dead-values` | deletes an instruction whose result nothing reads and whose effect set allows deletion, and a store to a slot nothing reads | anything that can raise; any store in a closure body (below) |
+
+None of them reorders, sinks, hoists, merges or duplicates anything. Every
+rewrite is either "replace this use with something provably equal" or "delete
+this instruction that provably does nothing that can be seen".
+
+### The closure rule
+
+`eliminate-dead-values` will not remove a store in a function that has
+captures. A closure body's slots are the closure's *captured environment*, not
+this invocation's private locals: ZL captures by value, and a captured `var`
+that a closure mutates persists between calls of that closure. A store that
+looks dead ("nothing reads this slot again") is the thing that makes
+`makeCounter` count. This was found by the runtime differential on
+`examples/intermediate/Closures.zl`, and both the unit and the pipeline
+regressions now pin it.
+
+---
+
+## What is deliberately not done
+
+Stated so the absence is a decision rather than an oversight:
+
+* **no dead *store* elimination across paths.** A store is removed only when
+  the slot is read nowhere in the function at all. Removing one whose value is
+  read on some other path needs an inter-block reaching-definition proof this
+  framework does not claim to have.
+* **no function removal**, ever — reflection reaches functions by name.
+* **no inlining, no loop transformation, no vectorisation, no CSE across
+  volatile reads, no global value numbering.** Each needs an analysis this
+  layer does not have yet, and each can be added as a pass without touching the
+  framework.
+* **no reordering of any kind**, which is why evaluation order, exception
+  order and synchronization order are preserved by construction rather than by
+  argument.
+* **no module-level (inter-procedural) transform.** `ModulePass` exists; none
+  ship.
+
+---
+
+## Differential validation
+
+"Optimisation" and "the same program" are two claims, and the verifier only
+checks the first — a module can obey every MIR rule and still do something
+different. So the optimiser is checked twice.
+
+### Statically: `compareModules`
+
+`include/zl/mir/differential.hpp` compares the unoptimised and optimised
+modules and reports any difference it can see:
+
+* **structure** — the same functions in the same order with the same
+  signatures, the same classes and statics, the same entry point;
+* **no growth** — optimisation may not make the program bigger;
+* **no observable event invented** — the optimised module may delete, never
+  create. Unconditional, because it is the one thing that is never legitimate;
+* **no observable event lost** — compared against the unoptimised module *with
+  the default pipeline run over it*, so that deleting code which cannot run is
+  not reported as a divergence while deleting code that can is;
+* **no slot write invented** — a slot write may be removed, never added.
+
+An *observable event* is an instruction whose effect set contains something the
+outside world, another thread, or the language's lifetime discipline can see:
+output, calls, heap writes, task and thread operations, synchronization,
+volatile reads, native-resource events, ownership events, suspension, and
+raises. Two families are deliberately excluded, and both are covered by
+running the program instead:
+
+* **runtime checks** (`refine`, `null_check`, `field_load`). The optimiser may
+  delete one it has proved cannot fail, so counting them would make every
+  correct removal look like a divergence.
+* **writes to local slots**. They are observable only through a later read of
+  that slot, and deciding whether a given store can be observed is the same
+  work the optimiser does to remove it — counting them would make the
+  comparison either blind or circular.
+
+The comparison also cannot see **values**: rewriting `x + 0` to the wrong value
+changes no event at all. That is what the runtime half is for.
+
+### At run time: `tools/mir_opt_diff.sh`
+
+The corpus harness lowers every program under `examples/` twice — once as
+lowered, once optimised — translates both to bytecode, executes both, and
+compares their output and exit status byte for byte. A program that behaves
+differently is a miscompile, and the harness fails rather than reporting a
+statistic. The same check runs inside
+`tests/mir_opt_pipeline_tests.cpp`, where the VM's output is captured and
+compared in-process.
+
+Current state: **50 of 50 example programs identical**, 0 skipped.
+
+---
+
+## Command line
+
+```bash
+zl --emit-mir-opt out.mir program.zl   # write the optimised MIR
+zl --emit-mir-opt - program.zl         # print it
+zl --mir-opt-check program.zl          # optimise and diff; exit 4 on divergence
+ZL_MIR_OPT=1 zl --mir-vm program.zl    # run the optimised MIR
+```
+
+Environment:
+
+| Variable | Effect |
+| --- | --- |
+| `ZL_MIR_OPT_PASSES` | pipeline spec: `default`, `none`, or a comma-separated list of pass names |
+| `ZL_MIR_OPT_SNAPSHOT_DIR` | write one before/after snapshot per changed pass into this directory |
+| `ZL_MIR_OPT_VERBOSE` | print the per-pass trace to stderr |
+| `ZL_MIR_OPT` | with `--mir-vm`, optimise before translating (and run the differential check) |
+
+Exit codes follow the other MIR commands: `0` success, `2` bad usage, `3`
+stdlib version mismatch, `4` verification failed or the module was not
+observationally equivalent, `5` output could not be written, `1` front-end
+failure.
+
+---
+
+## Tests
+
+- `tests/mir_pass_tests.cpp` (`zl-mir-opt-tests`) — 139 checks, MIR built by
+  hand, no front end. The effect table; the discharge rules (an `add` that
+  cannot raise becomes removable, one that can does not); the evaluator's
+  refusals (overflow, division by zero, `INT64_MIN / -1`, out-of-range shifts,
+  mixed kinds); each pass's rewrite and each pass's declinations; the closure
+  store rule; pipeline ordering and the registry; rollback of a pass that
+  corrupts the MIR; analysis caching and invalidation; snapshots and the diff;
+  and the differential validator catching a deleted `log` and a changed
+  signature while accepting a real optimisation.
+- `tests/mir_opt_pipeline_tests.cpp` (`zl-mir-opt-pipeline-tests`) — 79 checks
+  over real ZL programs: lower → verify → optimise → verify → static
+  differential → **run both versions and compare their output and exit code**.
+  The programs cover folding, decided branches, identities on non-constant
+  values, loops, strings and static calls, ownership, a closure that mutates a
+  capture, a division by zero that must still raise, and a program the
+  optimiser has nothing to say about.
+- `tools/mir_opt_diff.sh` — the corpus harness described above.
+
+A note on the library entry points: `optimizeModule(module, options)` is the
+one-call form; `PassManager::defaultPipeline()` / `namedPipeline(spec, error)`
+give explicit control; `compareModules(before, after)` is the static
+differential. All three are usable from a backend the same way `--mir-vm` uses
+them.

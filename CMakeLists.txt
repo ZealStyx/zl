@@ -175,6 +175,42 @@ zl_add_optional_test(zl-mir-tests tests/mir_tests.cpp
     src/compiler/semantic_types.cpp
     src/common/type_name.cpp)
 
+# The optimiser framework: pass manager, analysis manager, snapshots, the
+# passes themselves, and the differential validator. It needs no front end, so
+# it stays a fast target like zl-mir-ssa-tests.
+zl_add_optional_test(zl-mir-opt-tests tests/mir_pass_tests.cpp
+    src/mir/analysis.cpp
+    src/mir/builder.cpp
+    src/mir/dataflow.cpp
+    src/mir/differential.cpp
+    src/mir/effects.cpp
+    src/mir/folding.cpp
+    src/mir/function.cpp
+    src/mir/instruction.cpp
+    src/mir/opt_constant.cpp
+    src/mir/opt_dead.cpp
+    src/mir/opt_simplify.cpp
+    src/mir/pass_manager.cpp
+    src/mir/printer.cpp
+    src/mir/ssa.cpp
+    src/mir/type.cpp
+    src/mir/verifier.cpp
+    src/compiler/operator_rules.cpp
+    src/compiler/semantic_types.cpp
+    src/common/type_name.cpp)
+
+# zl-mir-opt-pipeline-tests runs the optimiser over real ZL programs and diffs
+# the two modules twice - statically (compareModules) and by executing both
+# through the bytecode backend with their output captured - so it links the
+# whole compiler minus main(), like the lowering target.
+zl_add_optional_test(zl-mir-opt-pipeline-tests tests/mir_opt_pipeline_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+if(TARGET zl-mir-opt-pipeline-tests AND WIN32)
+    target_link_libraries(zl-mir-opt-pipeline-tests PRIVATE ws2_32)
+endif()
+if(TARGET zl-mir-opt-pipeline-tests)
+    target_link_libraries(zl-mir-opt-pipeline-tests PRIVATE Threads::Threads)
+endif()
+
 # zl-mir-lowering-tests drives the real pipeline - ModuleLoader, TypeChecker,
 # lowerProgram, verifyModule - so it links the whole compiler minus main().
 zl_add_optional_test(zl-mir-lowering-tests tests/mir_lowering_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
