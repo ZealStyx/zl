@@ -228,6 +228,20 @@ if(TARGET zl-mir-opt-pipeline-tests)
     target_link_libraries(zl-mir-opt-pipeline-tests PRIVATE Threads::Threads)
 endif()
 
+# zl-pipeline-tests owns the compiler pipeline itself: stage order, the
+# invariant that no backend sees unverified MIR, backend selection as a
+# code-generation decision only, and the exit-code contract. It links the whole
+# compiler minus main() (ZL_RUNTIME_VM_SOURCES) because these are end-to-end
+# properties: a pipeline assembled out of mocks would prove nothing about the
+# one that ships.
+zl_add_optional_test(zl-pipeline-tests tests/pipeline_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+if(TARGET zl-pipeline-tests AND WIN32)
+    target_link_libraries(zl-pipeline-tests PRIVATE ws2_32)
+endif()
+if(TARGET zl-pipeline-tests)
+    target_link_libraries(zl-pipeline-tests PRIVATE Threads::Threads)
+endif()
+
 # zl-mir-lowering-tests drives the real pipeline - ModuleLoader, TypeChecker,
 # lowerProgram, verifyModule - so it links the whole compiler minus main().
 zl_add_optional_test(zl-mir-lowering-tests tests/mir_lowering_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
@@ -417,6 +431,19 @@ zl_add_optional_test(zl-mir-safety-tests tests/mir_safety_tests.cpp
     src/compiler/operator_rules.cpp src/compiler/semantic_types.cpp src/common/type_name.cpp)
 
 include(CTest)
+if(BUILD_TESTING AND TARGET zl-pipeline-tests)
+    add_test(NAME pipeline COMMAND zl-pipeline-tests)
+endif()
+# The compiler boundary, enforced as a check rather than as a convention: the
+# backends cannot see the AST, the lowerer cannot infer, the front end has one
+# driver, and the legacy IR cannot grow a second consumer.
+if(BUILD_TESTING)
+    find_program(ZL_BASH NAMES bash)
+    if(ZL_BASH)
+        add_test(NAME boundary-lint COMMAND ${ZL_BASH}
+            ${CMAKE_SOURCE_DIR}/tools/boundary_lint.sh ${CMAKE_SOURCE_DIR})
+    endif()
+endif()
 if(BUILD_TESTING AND TARGET zl-mir-safety-tests)
     add_test(NAME mir-safety COMMAND zl-mir-safety-tests)
     find_program(ZL_SAFETY_PYTHON NAMES python3)

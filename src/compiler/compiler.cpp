@@ -1,7 +1,6 @@
 #include "zl/compiler/compiler.hpp"
 #include "zl/compiler/semantic_types.hpp"
 #include "zl/common/type_annotation.hpp"
-#include "zl/compiler/ir_lowering.hpp"
 #include "zl/vm/gc.hpp"
 #include <functional>
 
@@ -53,10 +52,14 @@ std::size_t Compiler::resolveFunctionIndex(const std::string& className,
 }
 
 Chunk Compiler::compile(const Program& program) {
-    // Phase 10: lower the semantically checked program into the stable IR representation.
-    // The VM bytecode path remains authoritative until native lowering is selected explicitly.
-    const auto irResult = zl::ir::lowerProgram(program);
-    (void)irResult; // Unsupported constructs remain on the authoritative VM path until their IR forms exist.
+    // No IR lowering happens here. This compiler is the *reference* AST ->
+    // bytecode path, kept for differential comparison against the MIR pipeline
+    // (`ZL_COMPILER=ast`), and it used to lower the whole program into the
+    // legacy `zl::ir` and discard the result on every compile. That was a second
+    // semantic lowering with no consumer: MIR is the compiler boundary now, and
+    // the only remaining legacy consumer is the portable-C++ emitter behind
+    // `--emit-native`. Deleting the call also deletes the last reason for the
+    // default path to know `zl::ir` exists.
     chunk_ = Chunk{};
     classParents_.clear();
     methodSlots_.clear();

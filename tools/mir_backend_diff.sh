@@ -8,6 +8,11 @@
 # script runs every runnable example through BOTH paths and compares (exit code
 # + stdout). It fails if any program that is expected to match actually differs.
 #
+# The two paths are: `ZL_COMPILER=ast zl file.zl` (the original AST -> bytecode
+# compiler) and `zl --mir-vm file.zl` (source -> MIR -> verify -> optimise ->
+# bytecode -> VM). The default `zl file.zl` is the second of those, which is why
+# the reference leg has to say which compiler it wants.
+#
 # The corpus is every .zl directly under an examples/ subdirectory - basics,
 # intermediate and advanced alike. (Directories named `_lib` hold importable
 # module sources, not runnable programs; they are one level deeper, so the glob
@@ -79,10 +84,38 @@ gap_fail=0
 failed=()
 gaps_that_now_pass=()
 
+# Runs once before the sweep: if ZL_COMPILER=ast stops selecting the reference
+# compiler, both legs become the MIR pipeline and every comparison below would
+# pass vacuously. A harness that cannot tell "identical" from "compared the
+# same thing with itself" is worse than no harness, so this fails loudly.
+probe=""
+for candidate in "${EXPECTED[@]}"; do
+    if [[ -f "$candidate" ]]; then probe="$candidate"; break; fi
+done
+if [[ -z "$probe" ]]; then
+    echo "error: no example programs found; nothing to compare" >&2
+    exit 2
+fi
+if ! ZL_COMPILER=ast "$ZL" "$probe" 2>&1 >/dev/null | grep -q "reference compiler"; then
+    echo "error: ZL_COMPILER=ast no longer selects the reference compiler;" >&2
+    echo "       this harness would compare the MIR pipeline with itself." >&2
+    exit 2
+fi
+if ! "$ZL" --mir-vm "$probe" 2>&1 >/dev/null | grep -q "^pipeline:"; then
+    echo "error: --mir-vm no longer runs the MIR pipeline;" >&2
+    echo "       this harness would compare the reference path with itself." >&2
+    exit 2
+fi
+
 run_one() {
     local f="$1"
     local ref_out mir_out ref_rc mir_rc
-    ref_out="$("$ZL" "$f" 2>/dev/null)"; ref_rc=$?
+    # ZL_COMPILER=ast is the reference path: the original AST -> bytecode
+    # compiler, kept for exactly this comparison. It is named explicitly
+    # because the default path is the MIR pipeline now, and running the
+    # pipeline on both sides would be a green line that measured nothing.
+    # The guard below is what keeps that from happening silently.
+    ref_out="$(ZL_COMPILER=ast "$ZL" "$f" 2>/dev/null)"; ref_rc=$?
     mir_out="$("$ZL" --mir-vm "$f" 2>/dev/null)"; mir_rc=$?
     # Two failures are not agreement. If the reference path cannot even load the
     # program, the comparison carries no information about the backend, so it is

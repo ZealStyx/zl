@@ -2,6 +2,128 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-12 - The boundary is enforced, and the compiler knows what runs
+
+The MIR boundary had rules and a component; this phase makes the rules fail the
+build when they break, and gives the compiler one question it could not answer
+before: which functions a program can actually enter.
+
+**The boundary rules are now a check.** `tools/boundary_lint.sh` (CTest
+`boundary-lint`) reads the tree and fails on a broken rule: a backend that
+includes the AST, the parser, the type checker, the module loader, the pipeline or
+the legacy IR; a typed lowerer that touches the checker except through
+`expressionType`; a `ModuleLoader` or `TypeChecker` constructed anywhere but the
+pipeline; a fifth consumer of `zl::ir`. It found the last hand-driven front end
+on its first run - `--emit-native` was still building its own roots, stdlib
+version check and type checker - which is exactly the drift the rules exist to
+prevent, so that path now runs pipeline stages 1-2 like every other command and
+keeps only its legacy emitter.
+
+**`--emit-native` is no longer the exception.** It is still the one consumer of
+the untyped `zl::ir` (that is what "frozen, not grown" means), but its front end
+is the pipeline's, so it inherits the shared roots, the stdlib-version check and
+the failure/exit-code mapping instead of its own copies. The MIR-based tiers
+(`--emit-native-ir`, `--emit-native-code`, `--emit-machine-code`) are unaffected.
+
+**The compiler can now say what a program can run.** `zl::mir::reachability`
+answers it from the verified module: an over-approximation that keeps every
+override in the receiver's hierarchy, keeps every same-named function when a
+dispatch site names a class the module does not have, keeps a referenced static's
+initializer (statics initialise lazily), and refuses to answer at all when the
+program reaches reflection's invoke family, because then the call graph is not
+closed. The direction of the approximation is the point: a function it calls
+unreachable really is unreachable, which is what a future dead-code pass needs.
+`--backend native` and `--pipeline-report` print it, so `5 function(s) compiled,
+283 left to the VM` is now followed by `1 of 288 function(s) can run` - the
+totals are about the module, and most of a module is stdlib the program never
+calls. Nothing deletes code yet; this is the analysis, adoption is separate.
+
+**`--strict-native` (`ZL_NATIVE_STRICT=1`)** turns `--backend native` into an
+all-or-nothing check for programs written to the native subset: it fails with the
+refusal reasons instead of reporting a partial tier.
+
+**`Function::simpleName` keeps its signature on purpose, and now says so.**
+Writing the dispatch test surfaced the trap: `simpleName` is the rendered name
+(`"speak()"`, `"add(int,int)"`), because two overloads of one name have to stay
+distinguishable, while a call site names the bare method. Every caller that
+matched one against the other had to slice the string itself.
+`Function::declaredName()` is that slice, named once, and the field's comment now
+describes what it holds instead of calling it the "unqualified source name".
+
+**Smaller fixes, each measured.** A failed stage now closes its own ledger line,
+so `--pipeline-report` shows where the pipeline stopped rather than stopping
+between two lines. A misspelled option is a usage error (exit 2) instead of being
+read as an entry file, which used to report `could not open file:
+--emit-mirr`. The structural digest now hashes callee identity and the
+constant/static/class/interface pools, so two modules that differ only in which
+of two identical functions a call names no longer digest the same.
+
+**Checks.** `zl-pipeline-tests` is 225 checks, adding the native ledger contract
+(every function accounted for exactly once, every refusal carrying a reason),
+strict-native's refusal and that it does not affect the bytecode backend, the
+dispatch/reachability cases, reflection refusing to close the graph, and a
+library having no answer. `tools/boundary_lint.sh` is new and in CTest. All five
+differential harnesses still pass on the corpus (50 of 50 identical each, 76
+equivalent for the static check), and every MIR, lowering, optimiser, ownership,
+type and native target still passes.
+
+## 2026-09-11 — MIR becomes the compiler boundary
+
+MIR stopped being a side pipeline. The compiler is now one staged pipeline -
+source → lexer/parser → semantic analysis → typed lowering → MIR → verification
+→ optimisation → selected backend - and every command in `zl_language` is that
+pipeline with different stage options. Documented in
+[`docs/pipeline.md`](pipeline.md).
+
+**The pipeline is a component, not a convention.** `zl::pipeline::Pipeline`
+(`include/zl/compiler/pipeline.hpp`, `src/compiler/pipeline.cpp`) owns six named
+stages with stated invariants, records what each one did, and refuses to run one
+out of turn: a stage's postcondition is the next stage's precondition. Skipped
+stages are recorded as skipped rather than omitted. Failures are data
+(`Failure { kind, stage, message, detail }`) and the kind selects both the
+reported label and the exit code, so a MIR failure is never reported as a
+lowering failure and vice versa.
+
+**No backend is ever handed unverified MIR.** Stage 4 runs `verifyModule`; stage
+6 verifies again immediately before a backend consumes the module, so a module
+mutated between the two is caught at the boundary rather than by a backend
+noticing something odd later. Turning stage 4 off without that re-check makes
+code generation *refuse* - there is no path from a source file to a backend that
+skips verification. `compileMirToNative` keeps its own re-check as well.
+
+**Backend selection is a code-generation decision only.** `--backend
+bytecode|native` (or `ZL_BACKEND`) picks the generator; both are handed the same
+module, which `zl --pipeline-report` proves mechanically by compiling the program
+once per backend and comparing the structural digests of the MIR boundary. The
+reference AST → bytecode compiler is kept unchanged behind `ZL_COMPILER=ast`, and
+`tools/backend_diff.sh` is the new gate: every example compiled and run three
+ways (reference, bytecode backend, native backend) must print identical bytes and
+exit identically, currently 50 of 50.
+
+**The default path now goes through MIR.** `zl file.zl` lowers to MIR, verifies
+it, optimises it (`ZL_MIR_OPT=0` to disable) and translates it with the bytecode
+backend. The VM is untouched and remains the behavioural reference, and it stays
+the execution driver: `--backend native` generates machine code for the subset
+the native tier can prove and reports `execution: VM`, because mixed-mode native
+execution does not exist yet. `tools/mir_backend_diff.sh` compares the reference
+path against the pipeline on the whole corpus (50 identical, 0 gaps).
+
+**Duplicated lowering removed.** `Compiler` no longer lowers every program into
+the legacy `zl::ir` and discards the result; `--emit-machine-code` now writes the
+same `ZLM1` container from the MIR native backend instead of going AST → `zl::ir`
+→ x86-64; and the eight hand-rolled copies of "load, check, lower, verify" in
+`main.cpp` are one set of stage options. `zl::ir` is left with a single
+quarantined consumer, the portable-C++ emitter behind `--emit-native`, which
+prints a note saying so.
+
+**New checks.** `zl-pipeline-tests` (188 checks) owns the composition: stage
+order, the unverified/modified-module refusals, backend parity in both MIR and
+behaviour, the opt-in stages being invisible when on and visible when skipped, and
+the exit-code table. `tools/backend_diff.sh` adds cross-process backend parity
+per program. All existing MIR, lowering, optimiser, ownership, type and native
+targets still pass, as do the four pre-existing differential harnesses (50 of 50
+each).
+
 ## 2026-09-11 — MIR optimiser framework
 
 The framework first, the transformations second, and the proof that they are
