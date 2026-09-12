@@ -21,17 +21,12 @@
 #include "zl/vm/vm.hpp"
 #include "zl/vm/native.hpp"
 #include "zl/compiler/native_compiler.hpp"
-#include "zl/compiler/ir_lowering.hpp"
-#include "zl/compiler/ir_optimizer.hpp"
-#include "zl/compiler/machine_code.hpp"
-#include "zl/mir/differential.hpp"
-#include "zl/mir/lowering.hpp"
-#include "zl/mir/passes.hpp"
+#include "zl/compiler/pipeline.hpp"
 #include "zl/mir/printer.hpp"
-#include "zl/mir/ssa.hpp"
-#include "zl/mir/verifier.hpp"
-#include "zl/mir/vm_backend.hpp"
+#include "zl/mir/reachability.hpp"
 #include "zl/native/pipeline.hpp"
+
+namespace pipeline = zl::pipeline;
 
 
 
@@ -126,6 +121,230 @@ std::filesystem::path resolveStdlibRoot(const char* argv0) {
     return adjacent;
 }
 
+// ---------------------------------------------------------------------------
+// Pipeline plumbing shared by every command
+// ---------------------------------------------------------------------------
+//
+// Since MIR became the compiler boundary, every command is the same six stages
+// with different stage options; the difference between `zl file.zl` and
+// `zl --emit-mir - file.zl` is which stages stop the process, not which code
+// runs. These helpers are the shared part, and they are the only place the CLI
+// reads its environment switches.
+
+// Appends the standard roots: ZL_EXTRA_ROOTS, then the stdlib root last, so a
+// project or dependency can shadow a stdlib package with its own file of the
+// same dotted path. Returns false - setting `exitCode` to 3 - when the stdlib is
+// present but was built for a different runtime version.
+bool appendStandardRoots(const char* argv0, std::vector<std::filesystem::path>& roots, int& exitCode,
+                        std::string* error = nullptr) {
+    if (const char* env = std::getenv("ZL_EXTRA_ROOTS")) {
+        if (*env != '\0') for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
+    }
+    const auto stdlibRoot = resolveStdlibRoot(argv0);
+    const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
+    if (!stdlibVersion.compatible) {
+        if (error != nullptr) *error = stdlibVersion.error;
+        else std::cerr << "error: " << stdlibVersion.error << "\n";
+        exitCode = 3;
+        return false;
+    }
+    roots.push_back(stdlibRoot);
+    return true;
+}
+
+// A boolean environment switch. Unset means "use the caller's default", so a
+// stage that is on by default can still be turned off with `=0`.
+bool environmentFlag(const char* name, bool fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') return fallback;
+    const std::string text(value);
+    if (text == "0" || text == "false" || text == "off" || text == "no") return false;
+    return true;
+}
+
+// The stage switches, read once so every command agrees about them:
+//
+//   ZL_MIR_OPT=0|1          the MIR optimisation stage
+//   ZL_MIR_OPT_CHECK=1      differential check after optimising
+//   ZL_MIR_OPT_PASSES=...   "default", "none", or a comma-separated pass list
+//   ZL_MIR_OPT_SNAPSHOT_DIR write a before/after snapshot per changed pass
+//   ZL_MIR_OPT_VERBOSE=1    per-pass trace
+//   ZL_MIR_PROMOTE=1        promote slots to block parameters before codegen
+//   ZL_MIR_SSA_VERBOSE=1    one line per declined promotion
+//   ZL_PIPELINE_VERBOSE=1   the stage ledger
+struct StageSwitches {
+    bool optimize{true};
+    bool checkOptimization{false};
+    bool promote{false};
+    bool verbose{false};        // the stage ledger
+    bool traceOptimization{false};  // one line per pass run
+    bool promotionSkips{false};     // one line per declined slot promotion
+    std::string passes;
+};
+
+StageSwitches stageSwitchesFromEnvironment(bool optimizeByDefault) {
+    StageSwitches switches;
+    switches.optimize = environmentFlag("ZL_MIR_OPT", optimizeByDefault);
+    switches.checkOptimization = environmentFlag("ZL_MIR_OPT_CHECK", false);
+    switches.promote = environmentFlag("ZL_MIR_PROMOTE", false);
+    switches.verbose = environmentFlag("ZL_PIPELINE_VERBOSE", false);
+    switches.traceOptimization = environmentFlag("ZL_MIR_OPT_VERBOSE", false);
+    switches.promotionSkips = environmentFlag("ZL_MIR_SSA_VERBOSE", false);
+    if (const char* spec = std::getenv("ZL_MIR_OPT_PASSES")) {
+        if (*spec != '\0' && environmentFlag("ZL_MIR_OPT", true)) switches.passes = spec;
+    }
+    return switches;
+}
+
+// The backend choice: an explicit `--backend <name>` beats ZL_BACKEND, which
+// beats the shipped default (the bytecode backend). An unrecognised name is a
+// usage error rather than a fallback, because silently compiling with a
+// different backend than the one asked for is exactly the class of surprise
+// this phase exists to remove.
+bool selectBackend(const std::string& explicitChoice, pipeline::Backend& backend, std::string& error) {
+    if (!explicitChoice.empty()) {
+        if (!pipeline::parseBackend(explicitChoice, backend)) {
+            error = "unknown backend '" + explicitChoice + "' (expected: bytecode, native)";
+            return false;
+        }
+        return true;
+    }
+    if (const char* env = std::getenv("ZL_BACKEND")) {
+        if (*env != '\0' && !pipeline::parseBackend(env, backend)) {
+            error = std::string("unknown ZL_BACKEND '") + env + "' (expected: bytecode, native)";
+            return false;
+        }
+    }
+    return true;
+}
+
+// Options for a command that will *run* the program: the full pipeline with the
+// optimiser on (it is a stage of the pipeline, not an aside), the requested
+// backend, and the VM as the execution driver.
+pipeline::Options optionsForRun(pipeline::Backend backend) {
+    const StageSwitches switches = stageSwitchesFromEnvironment(/*optimizeByDefault=*/true);
+    pipeline::Options options;
+    options.backend = backend;
+    options.execution = pipeline::Execution::Vm;
+    options.optimize = switches.optimize;
+    options.checkOptimization = switches.checkOptimization;
+    options.promoteSlots = switches.promote;
+    options.optimizerPipeline = switches.passes;
+    options.verbose = switches.verbose;
+    options.traceOptimization = switches.traceOptimization;
+    options.reportPromotionSkips = switches.promotionSkips;
+    // All-or-nothing native compilation: refuse to finish when the native
+    // backend left a function to the VM. Off by default because the tier is
+    // deliberately partial; on when a program is written to the subset and its
+    // author wants that to be enforced rather than reported.
+    options.strictNative = environmentFlag("ZL_NATIVE_STRICT", false);
+    if (const char* snapshots = std::getenv("ZL_MIR_OPT_SNAPSHOT_DIR")) {
+        if (*snapshots != '\0') options.optimization.snapshotDirectory = snapshots;
+    }
+    return options;
+}
+
+// Options for a command that only inspects or emits: generation stops after the
+// requested artifact, and optimisation is off unless the caller asked for it by
+// name (`--emit-mir-opt`, `--mir-opt-check`, or ZL_MIR_OPT=1).
+pipeline::Options optionsForEmit(pipeline::Backend backend, bool optimize, bool codeGeneration = true) {
+    const StageSwitches switches = stageSwitchesFromEnvironment(optimize);
+    pipeline::Options options;
+    options.backend = backend;
+    options.execution = pipeline::Execution::None;
+    options.requireMain = false;
+    options.codeGeneration = codeGeneration;
+    options.optimize = switches.optimize;
+    options.checkOptimization = switches.checkOptimization;
+    options.promoteSlots = switches.promote;
+    options.optimizerPipeline = switches.passes;
+    options.verbose = switches.verbose;
+    options.traceOptimization = switches.traceOptimization;
+    options.reportPromotionSkips = switches.promotionSkips;
+    options.strictNative = environmentFlag("ZL_NATIVE_STRICT", false);
+    if (const char* snapshots = std::getenv("ZL_MIR_OPT_SNAPSHOT_DIR")) {
+        if (*snapshots != '\0') options.optimization.snapshotDirectory = snapshots;
+    }
+    return options;
+}
+
+// One line for the optimiser, so a person can see it ran and what it did.
+// `always` is for the inspection commands; a plain run stays quiet unless the
+// stage ledger was asked for.
+void reportOptimization(const pipeline::Result& result, bool always = false) {
+    const auto* stage = result.stage(pipeline::Stage::MirOptimization);
+    if (stage == nullptr || !stage->ran) return;
+    if (always || result.options.verbose) std::cerr << "mir-opt: " << stage->detail << "\n";
+}
+
+// Refusals from the bytecode backend: a stubbed function is a deliberate
+// fail-closed refusal, and a refusal is only defensible if it names what it
+// refused.
+void reportStubs(const pipeline::Result& result) {
+    if (result.stubbedFunctions.empty()) return;
+    std::cerr << "MIR bytecode: " << result.stubbedFunctions.size()
+              << " function(s) not translatable (stubbed; reachable ones raise at runtime)\n";
+    for (std::size_t i = 0; i < result.stubbedFunctions.size() && i < 400; ++i) {
+        std::cerr << "  stub: " << result.stubbedFunctions[i];
+        if (i < result.stubbedReasons.size() && !result.stubbedReasons[i].empty())
+            std::cerr << " - " << result.stubbedReasons[i];
+        std::cerr << "\n";
+    }
+}
+
+// The native backend's per-function ledger, including the fallback note: the
+// program still runs, on MIR-derived bytecode, because the VM is the only
+// execution driver in this phase.
+void reportNativeLedger(const pipeline::Result& result, std::size_t refusalLines = 8) {
+    if (!result.native) return;
+    const auto& native = *result.native;
+    std::cerr << "native: " << native.nativeFunctions.size() << " function(s) compiled, "
+              << native.vmFunctions.size() << " left to the VM\n";
+    // The totals are about the whole module, and most of a module is stdlib the
+    // program never calls. Saying how much of it can run turns a number that
+    // reads as "my program is 95% interpreted" into the number that matters.
+    const auto reachable = zl::mir::reachableFunctions(result.module);
+    if (reachable.hasEntryPoint) {
+        std::cerr << "  reachable: " << reachable.describe(result.module) << "\n";
+    }
+    for (const auto& name : native.nativeFunctions) std::cerr << "  native  " << name << "\n";
+    for (std::size_t i = 0; i < native.vmFunctions.size() && i < refusalLines; ++i) {
+        std::cerr << "  vm      " << native.vmFunctions[i].function << " - "
+                  << native.vmFunctions[i].reason << " (line " << native.vmFunctions[i].line
+                  << ")\n";
+    }
+    if (native.vmFunctions.size() > refusalLines) {
+        std::cerr << "  vm      (+" << (native.vmFunctions.size() - refusalLines)
+                  << " more; see --emit-native-ir for the full ledger)\n";
+    }
+    if (result.options.execution == pipeline::Execution::Vm && !native.vmFunctions.empty()) {
+        std::cerr << "  execution: VM (the native tier is a code generator; mixed-mode native "
+                     "execution is not implemented yet)\n";
+    }
+}
+
+// Reports a pipeline failure the way this CLI always has: a labelled one-line
+// message, the detail behind it, and the failure's documented exit code.
+int reportPipelineFailure(const pipeline::Result& result) {
+    const auto& failure = result.failure;
+    const char* label = pipeline::errorKindLabel(failure.kind);
+    std::cerr << ((label != nullptr && *label != '\0') ? label : "error") << ": " << failure.message
+              << "\n";
+    if (!failure.detail.empty()) std::cerr << failure.detail << "\n";
+    return pipeline::exitCodeFor(failure.kind);
+}
+
+[[nodiscard]] int writeTextOutput(const char* path, const std::string& text) {
+    if (std::string(path) == "-") {
+        std::cout << text;
+        return std::cout.good() ? 0 : 5;
+    }
+    std::ofstream out(path, std::ios::binary);
+    if (!out) { std::cerr << "error: cannot open output '" << path << "'\n"; return 5; }
+    out << text;
+    return out.good() ? 0 : 5;
+}
+
 } // namespace
 
 
@@ -155,125 +374,73 @@ int safetyCheck(const char* file, const char* executable, const std::string& sto
                   << ",\"verification\":" << verification << "}\n";
         return code;
     };
-    try {
-        std::vector<std::filesystem::path> roots;
-        if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
-            for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
-        const auto stdlib = resolveStdlibRoot(executable);
-        const auto version = zl::common::checkStdlibVersion(stdlib, ZL_VERSION_STRING);
-        if (!version.compatible) return finish(3, "environment-error", version.error);
-        roots.push_back(stdlib);
-        stage = "parsing";
-        zl::ModuleLoader loader(file, roots);
-        auto program = loader.load();
-        parsing = "accepted";
-        if (stopAfter == "parsing") return finish(0, "accepted", "parsing completed");
-        stage = "semantic";
-        zl::TypeChecker checker;
-        checker.check(*program, /*requireMain=*/false);
-        semantic = "accepted";
-        if (stopAfter == "semantic") return finish(0, "accepted", "semantic checking completed");
-        stage = "lowering";
-        auto lowered = zl::mir::lowerProgram(*program, checker);
-        notes = array(lowered.diagnostics);
-        incomplete = array(lowered.incompleteFunctions);
-        if (!lowered.success) return finish(6, "unsupported", "lowering did not complete");
-        stage = "mir";
-        zl::mir::VerifierOptions options;
-        options.auditBoundaries = true;
-        const auto report = zl::mir::verifyModule(lowered.module, options);
-        verification = report.toJson();
-        mir = report.ok() ? (lowered.complete() ? "verified" : "partial") : "rejected";
-        if (!report.ok()) return finish(4, "rejected", "MIR contract violation (may be a compiler defect)");
-        if (!lowered.complete()) return finish(6, "unsupported", "partial MIR is not a safety certificate");
-        return finish(0, "verified", "static verification does not discharge runtime obligations");
-    } catch (const zl::ParseError& e) {
-        parsing = "rejected";
-        return finish(1, "rejected", e.what());
-    } catch (const zl::TypeCheckError& e) {
-        semantic = "rejected";
-        return finish(1, "rejected", e.what());
-    } catch (const zl::ModuleError& e) {
-        return finish(7, "module-error", e.what());
-    } catch (const std::exception& e) {
-        // Lexer currently throws std::runtime_error, not a lexical error type.
-        // Keep this an unclassified failure; never turn arbitrary exceptions
-        // (including compiler bugs) into credited safety detections.
-        return finish(7, "unclassified-error", e.what());
-    }
-}
 
-// ---------------------------------------------------------------------------
-// MIR optimiser, as the command line drives it
-// ---------------------------------------------------------------------------
-// Every MIR command that optimises does it the same way, so the behaviour is
-// configured in one place:
-//
-//   ZL_MIR_OPT_PASSES         pipeline spec: "default" (the curated order),
-//                             "none", or a comma-separated list of pass names.
-//   ZL_MIR_OPT_SNAPSHOT_DIR   directory to write one before/after snapshot per
-//                             changed pass into.
-//   ZL_MIR_OPT_VERBOSE        print the per-pass trace to stderr.
-//
-// Returns false when the optimised module must not be used: a pass broke the
-// MIR, or the final verification failed. Both are reported; neither is
-// recoverable by carrying on.
-
-// `pipelineUsed` is handed back so the differential check can build its
-// reference with the same passes; see DifferentialOptions::referencePipeline.
-[[nodiscard]] bool optimizeMIRForCommandLine(zl::mir::Module& module, std::string* pipelineUsed = nullptr) {
-    const char* spec = std::getenv("ZL_MIR_OPT_PASSES");
-    const char* snapshots = std::getenv("ZL_MIR_OPT_SNAPSHOT_DIR");
-    const bool verbose = std::getenv("ZL_MIR_OPT_VERBOSE") != nullptr;
-
-    zl::mir::OptimizationOptions options;
-    if (snapshots != nullptr && *snapshots != '\0') options.snapshotDirectory = snapshots;
-
-    std::string error;
-    zl::mir::PassManager manager = zl::mir::PassManager::namedPipeline(
-        (spec != nullptr && *spec != '\0') ? spec : "default", error);
-    if (!error.empty()) {
-        std::cerr << "error: " << error << "\n";
-        for (const auto& name : zl::mir::PassRegistry::instance().passNames())
-            std::cerr << "  available pass: " << name << "\n";
-        return false;
+    // The same six stages as every other command, stopped and reported
+    // differently. `execution = None` is what makes this observation-only: the
+    // pipeline never generates code, so a rejected program cannot execute
+    // anything by being checked.
+    std::vector<std::filesystem::path> roots;
+    int exitCode = 1;
+    std::string rootError;
+    if (!appendStandardRoots(executable, roots, exitCode, &rootError)) {
+        return finish(3, "environment-error", rootError);
     }
 
-    if (pipelineUsed) *pipelineUsed = (spec != nullptr && *spec != '\0') ? spec : "default";
+    pipeline::Options options;
+    options.requireMain = false;
+    options.execution = pipeline::Execution::None;
+    options.optimize = false;
+    options.verification.auditBoundaries = true;
+    pipeline::Pipeline compiler(options);
 
-    const zl::mir::OptimizationReport report = manager.run(module, options);
-    if (verbose) std::cerr << report.describeTrace();
-    std::cerr << report.describe() << "\n";
+    // An exit code is only ever charged to the layer that actually rejected the
+    // program: a parse failure never reports a MIR outcome, and a MIR failure
+    // never credits the front end with having accepted more than it did.
+    const auto failure = [&](const pipeline::Result& result) -> int {
+        switch (result.failure.kind) {
+            case pipeline::ErrorKind::Syntax:
+                parsing = "rejected";
+                return finish(1, "rejected", result.failure.message);
+            case pipeline::ErrorKind::Module:
+                return finish(7, "module-error", result.failure.message);
+            case pipeline::ErrorKind::TypeCheck:
+                semantic = "rejected";
+                return finish(1, "rejected", result.failure.message);
+            case pipeline::ErrorKind::Unsupported:
+                return finish(6, "unsupported", result.failure.message);
+            case pipeline::ErrorKind::Verification:
+                verification = result.verification.toJson();
+                mir = "rejected";
+                return finish(4, "rejected",
+                              "MIR contract violation (may be a compiler defect)");
+            default:
+                return finish(7, "unclassified-error", result.failure.message);
+        }
+    };
 
-    if (report.rollbacks != 0) {
-        std::cerr << "error: " << report.rollbacks
-                  << " MIR optimisation pass(es) produced invalid MIR and were rolled back; "
-                     "not using the optimised module\n";
-        return false;
+    stage = "parsing";
+    if (!compiler.load(file, roots)) return failure(compiler.result());
+    parsing = "accepted";
+    if (stopAfter == "parsing") return finish(0, "accepted", "parsing completed");
+
+    stage = "semantic";
+    if (!compiler.analyze()) return failure(compiler.result());
+    semantic = "accepted";
+    if (stopAfter == "semantic") return finish(0, "accepted", "semantic checking completed");
+
+    stage = "lowering";
+    if (!compiler.lowerToMir()) return failure(compiler.result());
+    notes = array(compiler.result().loweringDiagnostics);
+    incomplete = array(compiler.result().incompleteFunctions);
+
+    stage = "mir";
+    if (!compiler.verifyMir()) return failure(compiler.result());
+    verification = compiler.result().verification.toJson();
+    mir = compiler.result().complete() ? "verified" : "partial";
+    if (!compiler.result().complete()) {
+        return finish(6, "unsupported", "partial MIR is not a safety certificate");
     }
-    if (report.verifiedAtEnd && !report.finalVerification.ok()) {
-        std::cerr << "after optimisation:\n" << report.finalVerification.describe();
-        return false;
-    }
-    return true;
-}
-
-// The differential check: the optimised module must observe what the
-// unoptimised one observes. Runs on every command that optimises, because the
-// one thing worse than a slow optimiser is a wrong one that nobody ran.
-[[nodiscard]] bool checkMIRDifferential(const zl::mir::Module& before, const zl::mir::Module& after,
-                                       const std::string& pipeline = {}) {
-    // Judged against a reference built by the same pipeline. Measuring a module
-    // built by one pass against a reference built by all eight would report
-    // every event the other seven would have deleted as a divergence.
-    const zl::mir::DifferentialResult result = zl::mir::compareModules(
-        before, after, zl::mir::DifferentialOptions{}.withReferencePipeline(pipeline));
-    std::cerr << result.describe() << "\n";
-    for (const auto& note : result.notes) std::cerr << "  note: " << note << "\n";
-    if (result.equivalent) return true;
-    for (const auto& mismatch : result.mismatches) std::cerr << "  " << mismatch.describe() << "\n";
-    std::cerr << "error: the optimised module is not observationally equivalent\n";
-    return false;
+    return finish(0, "verified", "static verification does not discharge runtime obligations");
 }
 
 int main(int argc, char** argv) {
@@ -290,347 +457,261 @@ int main(int argc, char** argv) {
             return safetyCheck(argv[2], argv[0], stop);
         }
         if (command == "--emit-machine-code") {
+            // The x86-64 artifact, written from verified MIR: the native backend
+            // selects and emits, and this command only packages the bytes. The
+            // container is unchanged (magic, version, function table, blobs), so
+            // anything that read a .zlm before reads this one; what changed is
+            // that the code no longer comes from the legacy AST -> zl::ir tier.
             if (argc != 4) {
                 std::cerr << "usage: zl --emit-machine-code <output.zlm> <file.zl>\n";
                 return 2;
             }
-            try {
-                std::vector<std::filesystem::path> roots;
-                if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
-                    if (*env != '\0') for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
-                const auto stdlibRoot = resolveStdlibRoot(argv[0]);
-                const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
-                if (!stdlibVersion.compatible) { std::cerr << "error: " << stdlibVersion.error << "\n"; return 3; }
-                roots.push_back(stdlibRoot);
-                zl::ModuleLoader loader(argv[3], roots);
-                auto program = loader.load();
-                zl::TypeChecker typeChecker;
-                typeChecker.check(*program, /*requireMain=*/false);
-                auto lowered = zl::ir::lowerProgram(*program, /*nativeOnly=*/true);
-                if (!lowered.complete) {
-                    for (const auto& d : lowered.diagnostics) std::cerr << d << "\n";
-                    return 4;
-                }
-                auto optimized = zl::ir::optimize(lowered.module);
-                auto machine = zl::machine::emitX64(optimized);
-                if (!machine.success) { std::cerr << "machine compile error: " << machine.error << "\n"; return 4; }
-                std::ofstream out(argv[2], std::ios::binary);
-                if (!out) { std::cerr << "error: cannot open machine output '" << argv[2] << "'\n"; return 5; }
-                auto u32 = [&](std::uint32_t v) { out.write(reinterpret_cast<const char*>(&v), 4); };
-                auto u64 = [&](std::uint64_t v) { out.write(reinterpret_cast<const char*>(&v), 8); };
-                out.write("ZLM1", 4); u32(1); u32(static_cast<std::uint32_t>(machine.functions.size()));
-                std::uint64_t offset = 0;
-                for (const auto& fn : machine.functions) {
-                    u32(static_cast<std::uint32_t>(fn.name.size())); out.write(fn.name.data(), static_cast<std::streamsize>(fn.name.size()));
-                    u64(offset); u64(static_cast<std::uint64_t>(fn.bytes.size())); u64(static_cast<std::uint64_t>(fn.parameterCount));
-                    offset += fn.bytes.size();
-                }
-                for (const auto& fn : machine.functions) out.write(reinterpret_cast<const char*>(fn.bytes.data()), static_cast<std::streamsize>(fn.bytes.size()));
-                return out.good() ? 0 : 5;
-            } catch (const std::exception& e) {
-                std::cerr << "machine compile error: " << e.what() << "\n";
-                return 1;
+            std::vector<std::filesystem::path> roots;
+            int exitCode = 1;
+            if (!appendStandardRoots(argv[0], roots, exitCode)) return exitCode;
+            pipeline::Options options = optionsForEmit(pipeline::Backend::Native, /*optimize=*/true);
+            options.native.selectOnly = false;
+            pipeline::Pipeline compiler(std::move(options));
+            if (!compiler.run(argv[3], roots)) return reportPipelineFailure(compiler.result());
+            if (!compiler.result().native || compiler.result().native->code.empty()) {
+                std::cerr << "machine compile error: the native backend emitted no code\n";
+                return 4;
             }
+            const auto& functions = compiler.result().native->code;
+            std::ofstream out(argv[2], std::ios::binary);
+            if (!out) { std::cerr << "error: cannot open machine output '" << argv[2] << "'\n"; return 5; }
+            auto u32 = [&](std::uint32_t v) { out.write(reinterpret_cast<const char*>(&v), 4); };
+            auto u64 = [&](std::uint64_t v) { out.write(reinterpret_cast<const char*>(&v), 8); };
+            out.write("ZLM1", 4); u32(1); u32(static_cast<std::uint32_t>(functions.size()));
+            std::uint64_t offset = 0;
+            for (const auto& fn : functions) {
+                u32(static_cast<std::uint32_t>(fn.name.size())); out.write(fn.name.data(), static_cast<std::streamsize>(fn.name.size()));
+                u64(offset); u64(static_cast<std::uint64_t>(fn.code.size())); u64(static_cast<std::uint64_t>(fn.parameterCount));
+                offset += fn.code.size();
+            }
+            for (const auto& fn : functions) out.write(reinterpret_cast<const char*>(fn.code.data()), static_cast<std::streamsize>(fn.code.size()));
+            if (!out.good()) return 5;
+            std::cerr << "machine code: " << functions.size() << " function(s) from backend native\n";
+            return 0;
         }
         if (command == "--emit-mir") {
+            // The MIR the lowerer produced, before any optimisation: this is the
+            // command for "what did my program become", so it deliberately does
+            // not run the optimisation stage.
             if (argc != 4) {
                 std::cerr << "usage: zl --emit-mir <output|-> <file.zl>\n";
                 return 2;
             }
-            try {
-                std::vector<std::filesystem::path> roots;
-                if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
-                    if (*env != '\0') for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
-                const auto stdlibRoot = resolveStdlibRoot(argv[0]);
-                const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
-                if (!stdlibVersion.compatible) { std::cerr << "error: " << stdlibVersion.error << "\n"; return 3; }
-                roots.push_back(stdlibRoot);
-                zl::ModuleLoader loader(argv[3], roots);
-                auto program = loader.load();
-                // The MIR lowerer reads the checker's recorded expression types,
-                // so semantic analysis must run first and on the same program.
-                zl::TypeChecker typeChecker;
-                typeChecker.check(*program, /*requireMain=*/false);
-                const auto lowered = zl::mir::lowerProgram(*program, typeChecker);
-                for (const auto& diagnostic : lowered.diagnostics) std::cerr << "note: " << diagnostic << "\n";
-
-                const auto report = zl::mir::verifyModule(lowered.module);
-                if (!report.ok()) {
-                    std::cerr << report.describe();
-                    return 4;
-                }
-                const std::string text = zl::mir::printModule(lowered.module);
-                if (std::string(argv[2]) == "-") {
-                    std::cout << text;
-                    return std::cout.good() ? 0 : 5;
-                }
-                std::ofstream out(argv[2], std::ios::binary);
-                if (!out) { std::cerr << "error: cannot open MIR output '" << argv[2] << "'\n"; return 5; }
-                out << text;
-                return out.good() ? 0 : 5;
-            } catch (const std::exception& e) {
-                std::cerr << "MIR compile error: " << e.what() << "\n";
-                return 1;
-            }
+            std::vector<std::filesystem::path> roots;
+            int exitCode = 1;
+            if (!appendStandardRoots(argv[0], roots, exitCode)) return exitCode;
+            pipeline::Pipeline compiler(optionsForEmit(pipeline::Backend::Bytecode, /*optimize=*/false,
+                                                       /*codeGeneration=*/false));
+            if (!compiler.run(argv[3], roots)) return reportPipelineFailure(compiler.result());
+            const auto& result = compiler.result();
+            for (const auto& diagnostic : result.loweringDiagnostics)
+                std::cerr << "note: " << diagnostic << "\n";
+            return writeTextOutput(argv[2], zl::mir::printModule(result.module));
         }
         if (command == "--emit-ssa") {
-            // Like --emit-mir, but with mutable locals promoted to block
-            // parameters (the MIR's SSA form) where that is provably safe. This
-            // is the seam that makes explicit data flow visible: a value written
-            // on two branches and read after the join shows up as a block
-            // parameter with one argument per incoming edge, instead of as a
-            // store/load pair whose merge has to be inferred.
+            // Like --emit-mir, but asking the lowering stage for the MIR's SSA
+            // form (mutable locals promoted to block parameters) where that is
+            // provably safe. The promotion happens inside the pipeline, so the
+            // verification stage checks the promoted module - a promotion that
+            // produced invalid MIR is reported, not emitted.
             if (argc != 4) {
                 std::cerr << "usage: zl --emit-ssa <output|-> <file.zl>\n";
                 return 2;
             }
-            try {
-                std::vector<std::filesystem::path> roots;
-                if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
-                    if (*env != '\0') for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
-                const auto stdlibRoot = resolveStdlibRoot(argv[0]);
-                const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
-                if (!stdlibVersion.compatible) { std::cerr << "error: " << stdlibVersion.error << "\n"; return 3; }
-                roots.push_back(stdlibRoot);
-                zl::ModuleLoader loader(argv[3], roots);
-                auto program = loader.load();
-                zl::TypeChecker typeChecker;
-                typeChecker.check(*program, /*requireMain=*/false);
-                auto lowered = zl::mir::lowerProgram(*program, typeChecker);
-                for (const auto& diagnostic : lowered.diagnostics) std::cerr << "note: " << diagnostic << "\n";
-                auto report = zl::mir::verifyModule(lowered.module);
-                if (!report.ok()) { std::cerr << report.describe(); return 4; }
-
-                std::size_t promoted = 0, slots = 0, loads = 0, stores = 0;
-                bool verboseSsa = std::getenv("ZL_MIR_SSA_VERBOSE") != nullptr;
-                for (auto& function : lowered.module.functions) {
-                    const auto promotion = zl::mir::promoteSlotsToBlockParameters(function);
-                    promoted += promotion.promotedSlots;
-                    slots += promotion.parametersAdded;
-                    loads += promotion.loadsRemoved;
-                    stores += promotion.storesRemoved;
-                    if (verboseSsa && !promotion.skipped.empty()) {
-                        for (const auto& reason : promotion.skipped) {
-                            std::cerr << "  ssa: " << function.name << ": " << reason << "\n";
-                        }
-                    }
-                }
-                std::cerr << "ssa: promoted " << promoted << " slot(s) into " << slots
-                          << " block parameter(s); removed " << loads << " load(s), "
-                          << stores << " store(s)\n";
-
-                // The promotion must leave verifiable MIR behind; re-verify so a
-                // bug in the rewrite cannot be mistaken for a bug in the input.
-                report = zl::mir::verifyModule(lowered.module);
-                if (!report.ok()) { std::cerr << "after ssa promotion:\n" << report.describe(); return 4; }
-
-                const std::string text = zl::mir::printModule(lowered.module);
-                if (std::string(argv[2]) == "-") {
-                    std::cout << text;
-                    return std::cout.good() ? 0 : 5;
-                }
-                std::ofstream out(argv[2], std::ios::binary);
-                if (!out) { std::cerr << "error: cannot open MIR output '" << argv[2] << "'\n"; return 5; }
-                out << text;
-                return out.good() ? 0 : 5;
-            } catch (const std::exception& e) {
-                std::cerr << "MIR compile error: " << e.what() << "\n";
-                return 1;
-            }
+            std::vector<std::filesystem::path> roots;
+            int exitCode = 1;
+            if (!appendStandardRoots(argv[0], roots, exitCode)) return exitCode;
+            pipeline::Options options = optionsForEmit(pipeline::Backend::Bytecode, /*optimize=*/false,
+                                                       /*codeGeneration=*/false);
+            options.promoteSlots = true;
+            pipeline::Pipeline compiler(std::move(options));
+            if (!compiler.run(argv[3], roots)) return reportPipelineFailure(compiler.result());
+            const auto& result = compiler.result();
+            for (const auto& diagnostic : result.loweringDiagnostics)
+                std::cerr << "note: " << diagnostic << "\n";
+            for (const auto& note : result.promotion.notes) std::cerr << "  ssa: " << note << "\n";
+            std::cerr << "ssa: promoted " << result.promotion.promotedSlots << " slot(s) into "
+                      << result.promotion.blockParameters << " block parameter(s); removed "
+                      << result.promotion.loadsRemoved << " load(s), "
+                      << result.promotion.storesRemoved << " store(s)\n";
+            return writeTextOutput(argv[2], zl::mir::printModule(result.module));
         }
         if (command == "--emit-mir-opt") {
-            // Like --emit-mir, with the optimiser run first. This is how a
-            // person answers "what did the optimiser actually do to my
-            // program": the textual MIR on either side of it, and the
-            // differential check that says the two agree.
+            // Like --emit-mir, with the optimisation stage run first. This is how
+            // a person answers "what did the optimiser actually do to my
+            // program": the textual MIR after it, plus the stage's own report.
             if (argc != 4) {
                 std::cerr << "usage: zl --emit-mir-opt <output|-> <file.zl>\n";
                 return 2;
             }
-            try {
-                std::vector<std::filesystem::path> roots;
-                if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
-                    if (*env != '\0') for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
-                const auto stdlibRoot = resolveStdlibRoot(argv[0]);
-                const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
-                if (!stdlibVersion.compatible) { std::cerr << "error: " << stdlibVersion.error << "\n"; return 3; }
-                roots.push_back(stdlibRoot);
-                zl::ModuleLoader loader(argv[3], roots);
-                auto program = loader.load();
-                zl::TypeChecker typeChecker;
-                typeChecker.check(*program, /*requireMain=*/false);
-                auto lowered = zl::mir::lowerProgram(*program, typeChecker);
-                for (const auto& diagnostic : lowered.diagnostics) std::cerr << "note: " << diagnostic << "\n";
-                const auto report = zl::mir::verifyModule(lowered.module);
-                if (!report.ok()) { std::cerr << report.describe(); return 4; }
-
-                const zl::mir::Module unoptimized = lowered.module;
-                std::string optPipeline;
-                if (!optimizeMIRForCommandLine(lowered.module, &optPipeline)) return 4;
-                if (!checkMIRDifferential(unoptimized, lowered.module, optPipeline)) return 4;
-
-                const std::string text = zl::mir::printModule(lowered.module);
-                if (std::string(argv[2]) == "-") {
-                    std::cout << text;
-                    return std::cout.good() ? 0 : 5;
-                }
-                std::ofstream out(argv[2], std::ios::binary);
-                if (!out) { std::cerr << "error: cannot open MIR output '" << argv[2] << "'\n"; return 5; }
-                out << text;
-                return out.good() ? 0 : 5;
-            } catch (const std::exception& e) {
-                std::cerr << "MIR compile error: " << e.what() << "\n";
-                return 1;
-            }
+            std::vector<std::filesystem::path> roots;
+            int exitCode = 1;
+            if (!appendStandardRoots(argv[0], roots, exitCode)) return exitCode;
+            pipeline::Options options = optionsForEmit(pipeline::Backend::Bytecode, /*optimize=*/true);
+            options.verbose = true;
+            pipeline::Pipeline compiler(std::move(options));
+            if (!compiler.run(argv[3], roots)) return reportPipelineFailure(compiler.result());
+            const auto& result = compiler.result();
+            for (const auto& diagnostic : result.loweringDiagnostics)
+                std::cerr << "note: " << diagnostic << "\n";
+            reportOptimization(result, /*always=*/true);
+            return writeTextOutput(argv[2], zl::mir::printModule(result.module));
         }
         if (command == "--mir-opt-check") {
-            // The differential check on its own: optimise, compare against the
-            // unoptimised module, and say whether the two observe the same
-            // thing. Exits 4 when they do not, so a CI run can use it as a
-            // gate without having to parse the report.
+            // The differential check on its own: optimise, compare the result
+            // against the unoptimised module, and say whether the two observe the
+            // same thing. The comparison is a stage option, so this command is
+            // just "run the pipeline with the check on". Exits 4 when the modules
+            // disagree, so a CI run can use it as a gate without parsing output.
             if (argc != 3) {
                 std::cerr << "usage: zl --mir-opt-check <file.zl>\n";
                 return 2;
             }
-            try {
-                std::vector<std::filesystem::path> roots;
-                if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
-                    if (*env != '\0') for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
-                const auto stdlibRoot = resolveStdlibRoot(argv[0]);
-                const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
-                if (!stdlibVersion.compatible) { std::cerr << "error: " << stdlibVersion.error << "\n"; return 3; }
-                roots.push_back(stdlibRoot);
-                zl::ModuleLoader loader(argv[2], roots);
-                auto program = loader.load();
-                zl::TypeChecker typeChecker;
-                typeChecker.check(*program, /*requireMain=*/false);
-                auto lowered = zl::mir::lowerProgram(*program, typeChecker);
-                const auto report = zl::mir::verifyModule(lowered.module);
-                if (!report.ok()) { std::cerr << report.describe(); return 4; }
-
-                const zl::mir::Module unoptimized = lowered.module;
-                std::string optPipeline;
-                if (!optimizeMIRForCommandLine(lowered.module, &optPipeline)) return 4;
-                if (!checkMIRDifferential(unoptimized, lowered.module, optPipeline)) return 4;
-                std::cout << "mir-opt-check: equivalent\n";
-                return 0;
-            } catch (const std::exception& e) {
-                std::cerr << "MIR compile error: " << e.what() << "\n";
-                return 1;
+            std::vector<std::filesystem::path> roots;
+            int exitCode = 1;
+            if (!appendStandardRoots(argv[0], roots, exitCode)) return exitCode;
+            pipeline::Options options = optionsForEmit(pipeline::Backend::Bytecode, /*optimize=*/true,
+                                                       /*codeGeneration=*/false);
+            options.checkOptimization = true;
+            pipeline::Pipeline compiler(std::move(options));
+            if (!compiler.run(argv[2], roots)) return reportPipelineFailure(compiler.result());
+            std::cout << "mir-opt-check: equivalent\n";
+            return 0;
+        }
+        if (command == "--pipeline-report") {
+            // The pipeline made visible: one line per stage, the invariant each
+            // stage guarantees, and the MIR digest every backend is handed. It
+            // compiles the program twice - once per implemented backend - and
+            // fails if the two runs did not reach the *same* MIR, which is the
+            // mechanical form of "choosing a backend cannot change what a program
+            // means".
+            std::string backendChoice;
+            int reportArg = 2;
+            if (reportArg < argc && std::string(argv[reportArg]).rfind("--backend=", 0) == 0) {
+                backendChoice = std::string(argv[reportArg]).substr(10);
+                ++reportArg;
+            } else if (reportArg + 1 < argc && std::string(argv[reportArg]) == "--backend") {
+                backendChoice = argv[reportArg + 1];
+                reportArg += 2;
             }
+            if (reportArg + 1 != argc) {
+                std::cerr << "usage: zl --pipeline-report [--backend=<bytecode|native>] <file.zl>\n";
+                return 2;
+            }
+            const char* entry = argv[reportArg];
+            pipeline::Backend backend = pipeline::Backend::Bytecode;
+            std::string backendError;
+            if (!selectBackend(backendChoice, backend, backendError)) {
+                std::cerr << "error: " << backendError << "\n";
+                return 2;
+            }
+            std::vector<std::filesystem::path> roots;
+            int exitCode = 1;
+            if (!appendStandardRoots(argv[0], roots, exitCode)) return exitCode;
+
+            // The report covers the whole pipeline, code generation included,
+            // so this command answers for the same stages a run does. It also
+            // means the entry file must be a program: a library with no entry
+            // point has no code-generation stage to report.
+            pipeline::Pipeline compiler(optionsForEmit(backend, /*optimize=*/true));
+            if (!compiler.run(entry, roots)) return reportPipelineFailure(compiler.result());
+            std::cout << compiler.result().describe() << "\n";
+            std::cout << "stage invariants\n";
+            for (std::size_t i = 0; i < pipeline::kStageCount; ++i) {
+                const auto stage = static_cast<pipeline::Stage>(i);
+                std::cout << "  " << pipeline::stageName(stage) << ": "
+                          << pipeline::stageInvariant(stage) << "\n";
+            }
+
+            // The other backend, from the same source: same MIR, or the
+            // backend-independence claim in the header is false.
+            const pipeline::Backend other = backend == pipeline::Backend::Bytecode
+                ? pipeline::Backend::Native : pipeline::Backend::Bytecode;
+            pipeline::Pipeline sibling(optionsForEmit(other, /*optimize=*/true));
+            if (!sibling.run(entry, roots)) return reportPipelineFailure(sibling.result());
+            const std::string mine = compiler.result().mirDigest();
+            const std::string theirs = sibling.result().mirDigest();
+            std::cout << "backend parity\n"
+                      << "  " << pipeline::backendName(backend) << ": " << mine << "\n"
+                      << "  " << pipeline::backendName(other) << ": " << theirs << "\n";
+            if (mine != theirs) {
+                std::cerr << "error: the two backends were handed different MIR\n";
+                return 4;
+            }
+            std::cout << "  identical: the backend choice is a code-generation decision only\n"
+                      << "reachability\n"
+                      << "  " << zl::mir::reachableFunctions(compiler.result().module)
+                                    .describe(compiler.result().module) << "\n";
+            return 0;
         }
         if (command == "--mir-vm") {
-            // Run a program through the MIR -> bytecode backend path:
-            // source -> type analysis -> MIR -> verify -> bytecode -> VM.
-            // This is the differential sibling of the default AST -> bytecode
-            // path; both must produce identical observable behaviour.
+            // Run a program through the pipeline explicitly: source -> type
+            // analysis -> MIR -> verify -> optimise -> bytecode -> VM. Since the
+            // default run path is the same pipeline, this command is now the
+            // "show me the MIR ledger while you run it" spelling of it, and the
+            // differential sibling of the reference AST -> bytecode compiler
+            // (`ZL_COMPILER=ast`), which both must match observable behaviour for.
             if (argc < 3) {
                 std::cerr << "usage: zl --mir-vm <file.zl> [program args...]\n";
                 return 2;
             }
-            try {
-                std::vector<std::filesystem::path> roots;
-                if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
-                    if (*env != '\0') for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
-                const auto stdlibRoot = resolveStdlibRoot(argv[0]);
-                const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
-                if (!stdlibVersion.compatible) { std::cerr << "error: " << stdlibVersion.error << "\n"; return 3; }
-                roots.push_back(stdlibRoot);
-                zl::ModuleLoader loader(argv[2], roots);
-                auto program = loader.load();
-                zl::TypeChecker typeChecker;
-                typeChecker.check(*program, /*requireMain=*/true);
-                auto lowered = zl::mir::lowerProgram(*program, typeChecker);
-                auto report = zl::mir::verifyModule(lowered.module);
-                if (!report.ok()) { std::cerr << report.describe(); return 4; }
-                // Optional: run MIR in its SSA form (mutable locals promoted to
-                // block parameters) before translating. The bytecode backend
-                // must behave identically either way - block parameters and
-                // slots are interchangeable in meaning - so this doubles as a
-                // differential check of the promotion itself.
-                if (std::getenv("ZL_MIR_PROMOTE") != nullptr) {
-                    for (auto& function : lowered.module.functions)
-                        (void)zl::mir::promoteSlotsToBlockParameters(function);
-                    report = zl::mir::verifyModule(lowered.module);
-                    if (!report.ok()) {
-                        std::cerr << "after ssa promotion:\n" << report.describe();
-                        return 4;
-                    }
-                }
-                // Optional: run the optimiser before translating. Everything
-                // the optimiser does is supposed to be invisible, so this is
-                // the runtime half of the differential check -
-                // tools/mir_opt_diff.sh runs the corpus both ways and compares.
-                if (std::getenv("ZL_MIR_OPT") != nullptr) {
-                    const zl::mir::Module unoptimized = lowered.module;
-                    std::string optPipeline;
-                    if (!optimizeMIRForCommandLine(lowered.module, &optPipeline)) return 4;
-                    if (!checkMIRDifferential(unoptimized, lowered.module, optPipeline)) return 4;
-                }
-                const auto backend = zl::mir::compileModuleToBytecode(lowered.module);
-                if (!backend.ok()) {
-                    for (const auto& e : backend.errors) std::cerr << "MIR bytecode error: " << e << "\n";
-                    return 4;
-                }
-                if (backend.stubbed != 0) {
-                    std::cerr << "MIR bytecode: " << backend.stubbed
-                              << " function(s) not translatable (stubbed; reachable ones raise at runtime)\n";
-                }
-                for (std::size_t i = 0; i < backend.stubbedFunctions.size() && i < 400; ++i) {
-                    std::cerr << "  stub: " << backend.stubbedFunctions[i];
-                    if (i < backend.stubbedReasons.size() && !backend.stubbedReasons[i].empty())
-                        std::cerr << " - " << backend.stubbedReasons[i];
-                    std::cerr << "\n";
-                }
-                std::vector<std::string> programArgs;
-                for (int i = 3; i < argc; ++i) programArgs.emplace_back(argv[i]);
-                zl::VM vm;
-                return vm.run(backend.chunk, programArgs);
-            } catch (const zl::SystemExitException& ex) {
-                return ex.code;
-            } catch (const zl::ModuleError& e) {
-                std::cerr << "module error: " << e.what() << "\n";
-                return 1;
-            } catch (const zl::TypeCheckError& e) {
-                std::cerr << "compile error: " << e.what() << "\n";
-                return 1;
-            } catch (const zl::ZlThrownException& e) {
-                if (e.value()) {
-                    auto it = e.value()->fields.find("message");
-                    std::string msg = e.what();
-                    if (it != e.value()->fields.end() && std::holds_alternative<std::string>(it->second))
-                        msg = std::get<std::string>(it->second);
-                    std::cerr << "runtime error (" << e.value()->className << "): " << msg << "\n";
-                    return 1;
-                }
-                std::cerr << "runtime error: " << e.what() << "\n";
-                return 1;
-            } catch (const std::exception& e) {
-                std::cerr << "MIR bytecode error: " << e.what() << "\n";
-                return 1;
-            }
+            std::vector<std::filesystem::path> roots;
+            int exitCode = 1;
+            if (!appendStandardRoots(argv[0], roots, exitCode)) return exitCode;
+            pipeline::Options options = optionsForRun(pipeline::Backend::Bytecode);
+            options.verbose = true;           // the point of the command
+            options.traceOptimization = environmentFlag("ZL_MIR_OPT_VERBOSE", false);
+            pipeline::Pipeline compiler(std::move(options));
+            if (!compiler.run(argv[2], roots)) return reportPipelineFailure(compiler.result());
+            const auto& result = compiler.result();
+            for (const auto& diagnostic : result.loweringDiagnostics)
+                std::cerr << "note: " << diagnostic << "\n";
+            reportStubs(result);
+            std::vector<std::string> programArgs;
+            for (int i = 3; i < argc; ++i) programArgs.emplace_back(argv[i]);
+            zl::VM vm;
+            return vm.run(*result.chunk, programArgs);
         }
         if (command == "--emit-native") {
+            // Legacy tier, deliberately kept and deliberately not grown: this is
+            // the only remaining consumer of the untyped `zl::ir`, and it lowers
+            // the AST directly instead of going through MIR. The MIR-based
+            // native tiers (`--emit-native-ir`, `--emit-native-code`) supersede
+            // it for machine code; this one still exists because it emits
+            // portable C++ for the restricted `@native` subset, and that emitter
+            // has not been ported to consume MIR yet.
+            //
+            // Its *front end* is not legacy: stages 1-2 are the pipeline's, like
+            // every other command, so this path inherits the shared module roots,
+            // the stdlib-version check and the failure/exit-code mapping instead
+            // of growing its own copy of them. What is legacy is what happens
+            // after stage 2 - one emitter that reads the checked AST.
             if (argc != 4) {
                 std::cerr << "usage: zl --emit-native <output.cpp> <file.zl>\n";
                 return 2;
             }
+            std::cerr << "note: --emit-native uses the legacy AST -> zl::ir tier; "
+                         "use --emit-native-ir/--emit-native-code for the MIR-based native backend\n";
             const char* nativeOut = argv[2];
-            const char* nativeEntry = argv[3];
+            std::vector<std::filesystem::path> roots;
+            int rootExitCode = 1;
+            if (!appendStandardRoots(argv[0], roots, rootExitCode)) return rootExitCode;
             try {
-                std::vector<std::filesystem::path> roots;
-                if (const char* env = std::getenv("ZL_EXTRA_ROOTS")) {
-                    if (*env != '\0') for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
-                }
-                const auto stdlibRoot = resolveStdlibRoot(argv[0]);
-                const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
-                if (!stdlibVersion.compatible) { std::cerr << "error: " << stdlibVersion.error << "\n"; return 3; }
-                roots.push_back(stdlibRoot);
-                zl::ModuleLoader loader(nativeEntry, roots);
-                auto program = loader.load();
-                zl::TypeChecker typeChecker;
-                typeChecker.check(*program, /*requireMain=*/false);
-                const auto nativeResult = zl::native::emitMirCpp(*program);
+                // Stages 1-2 only: the emitter below consumes the checked AST, so
+                // lowering to MIR would be work thrown away. `codeGeneration` is
+                // off because nothing here reaches stage 6 either.
+                pipeline::Options options = optionsForEmit(pipeline::Backend::Bytecode,
+                                                           /*optimize=*/false,
+                                                           /*codeGeneration=*/false);
+                pipeline::Pipeline compiler(std::move(options));
+                if (!compiler.load(argv[3], roots)) return reportPipelineFailure(compiler.result());
+                if (!compiler.analyze()) return reportPipelineFailure(compiler.result());
+                const auto nativeResult = zl::native::emitMirCpp(*compiler.result().program);
                 if (!nativeResult.success) { std::cerr << "native compile error: " << nativeResult.error << "\n"; return 4; }
                 std::ofstream out(nativeOut, std::ios::binary);
                 if (!out) { std::cerr << "error: cannot open native output '" << nativeOut << "'\n"; return 5; }
@@ -651,58 +732,34 @@ int main(int argc, char** argv) {
                 std::cerr << "usage: zl " << command << " <output|-> <file.zl>\n";
                 return 2;
             }
-            try {
-                std::vector<std::filesystem::path> roots;
-                if (const char* env = std::getenv("ZL_EXTRA_ROOTS"))
-                    if (*env != '\0') for (auto& root : splitPathList(env)) roots.push_back(std::move(root));
-                const auto stdlibRoot = resolveStdlibRoot(argv[0]);
-                const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
-                if (!stdlibVersion.compatible) { std::cerr << "error: " << stdlibVersion.error << "\n"; return 3; }
-                roots.push_back(stdlibRoot);
-                zl::ModuleLoader loader(argv[3], roots);
-                auto program = loader.load();
-                zl::TypeChecker typeChecker;
-                typeChecker.check(*program, /*requireMain=*/false);
-                auto lowered = zl::mir::lowerProgram(*program, typeChecker);
-                const auto report = zl::mir::verifyModule(lowered.module);
-                if (!report.ok()) { std::cerr << report.describe(); return 4; }
+            std::vector<std::filesystem::path> roots;
+            int exitCode = 1;
+            if (!appendStandardRoots(argv[0], roots, exitCode)) return exitCode;
+            pipeline::Options options = optionsForEmit(pipeline::Backend::Native, /*optimize=*/false);
+            options.native.selectOnly = !emitCode;
+            pipeline::Pipeline compiler(std::move(options));
+            if (!compiler.run(argv[3], roots)) return reportPipelineFailure(compiler.result());
+            const auto& result = compiler.result();
+            const auto& native = *result.native;
 
-                zl::native::PipelineOptions options;
-                options.selectOnly = !emitCode;
-                const auto& target = zl::native::hostTarget();
-                auto native = zl::native::compileMirToNative(lowered.module, target, options);
-                if (!native.ok()) { std::cerr << native.describe(); return 4; }
-
-                std::ostringstream text;
-                text << "; target " << target.triple << " (" << target.cc.name << ")\n";
-                text << zl::native::printLirModule(native.lir);
-                if (emitCode) {
-                    text << "\n; machine code\n";
-                    for (const auto& fn : native.code) {
-                        text << "; " << fn.name << " frame=" << fn.frameSize
-                             << " bytes=" << fn.code.size() << "\n";
-                        for (std::size_t i = 0; i < fn.code.size(); ++i) {
-                            static const char* kHex = "0123456789abcdef";
-                            text << kHex[fn.code[i] >> 4] << kHex[fn.code[i] & 0xf]
-                                 << ((i + 1) % 16 == 0 ? '\n' : ' ');
-                        }
-                        if (!fn.code.empty() && fn.code.size() % 16 != 0) text << "\n";
+            std::ostringstream text;
+            text << "; target " << result.nativeTargetTriple << " (" << zl::native::hostTarget().cc.name << ")\n";
+            text << zl::native::printLirModule(native.lir);
+            if (emitCode) {
+                text << "\n; machine code\n";
+                for (const auto& fn : native.code) {
+                    text << "; " << fn.name << " frame=" << fn.frameSize
+                         << " bytes=" << fn.code.size() << "\n";
+                    for (std::size_t i = 0; i < fn.code.size(); ++i) {
+                        static const char* kHex = "0123456789abcdef";
+                        text << kHex[fn.code[i] >> 4] << kHex[fn.code[i] & 0xf]
+                             << ((i + 1) % 16 == 0 ? '\n' : ' ');
                     }
+                    if (!fn.code.empty() && fn.code.size() % 16 != 0) text << "\n";
                 }
-                std::cerr << native.describe();
-                const std::string out = text.str();
-                if (std::string(argv[2]) == "-") { std::cout << out; return 0; }
-                std::ofstream file(argv[2]);
-                if (!file) { std::cerr << "error: cannot open '" << argv[2] << "'\n"; return 5; }
-                file << out;
-                return file.good() ? 0 : 5;
-            } catch (const zl::TypeCheckError& e) {
-                std::cerr << "compile error: " << e.what() << "\n";
-                return 1;
-            } catch (const std::exception& e) {
-                std::cerr << "native backend error: " << e.what() << "\n";
-                return 1;
             }
+            std::cerr << native.describe();
+            return writeTextOutput(argv[2], text.str());
         }
         if (command == "--parse-only") {
             if (argc != 3) {
@@ -736,8 +793,9 @@ int main(int argc, char** argv) {
         }
         if (command == "--help" || command == "-h") {
             std::cout << "usage:\n"
-                         "  zl [--root <path>]... <file.zl> [program args...]\n"
+                         "  zl [--backend <bytecode|native>] [--reference-compiler] [--strict-native] [--root <path>]... <file.zl> [program args...]\n"
                          "  zl --check [--root <path>]... <file.zl>\n"
+                         "  zl --pipeline-report [--backend=<bytecode|native>] <file.zl>\n"
                          "  zl --parse-only <file.zl>\n"
                          "  zl --emit-native <output.cpp> <file.zl>\n"
                          "  zl --emit-machine-code <output.zlm> <file.zl>\n"
@@ -750,7 +808,22 @@ int main(int argc, char** argv) {
                          "  zl --mir-opt-check <file.zl>\n"
                          "  zl --safety-check <file.zl>   JSON safety report; never executes\n"
                          "  zl --version\n"
-                         "  zl --help\n";
+                         "  zl --help\n"
+                         "\n"
+                         "every command is the same pipeline (source -> semantic analysis -> MIR ->\n"
+                         "verify -> optimise -> backend) with different stages; see docs/pipeline.md\n"
+                         "\n"
+                         "environment:\n"
+                         "  ZL_BACKEND=<bytecode|native>  backend selection (same as --backend)\n"
+                         "  ZL_MIR_OPT=0|1                the MIR optimisation stage on the run path\n"
+                         "  ZL_MIR_OPT_PASSES=<spec>      optimiser pipeline: default, none, or a pass list\n"
+                         "  ZL_MIR_OPT_CHECK=1            differential check after optimising\n"
+                         "  ZL_MIR_PROMOTE=1              run the SSA form of MIR (block parameters)\n"
+                         "  ZL_COMPILER=ast|mir           reference AST compiler vs the MIR pipeline\n"
+                         "  ZL_NATIVE_STRICT=1            refuse unless every function compiled natively\n"
+                         "  ZL_PIPELINE_VERBOSE=1         print the stage ledger\n"
+                         "  ZL_EXTRA_ROOTS=<paths>        extra module search roots (before the stdlib)\n"
+                         "  ZL_STDLIB_ROOT=<path>         the standard library root\n";
             return 0;
         }
     }
@@ -780,6 +853,11 @@ int main(int argc, char** argv) {
         --argc;
     }
 
+    // Backend and pipeline switches, so they can be written before the entry
+    // file the same way --root can.
+    std::string backendChoice;
+    bool referenceCompiler = false;
+    bool strictNative = false;
     int argi = 1;
     for (; argi < argc; ++argi) {
         std::string arg = argv[argi];
@@ -791,16 +869,53 @@ int main(int argc, char** argv) {
             extraRoots.emplace_back(argv[++argi]);
         } else if (arg.rfind("--root=", 0) == 0) {
             extraRoots.emplace_back(arg.substr(7));
+        } else if (arg == "--backend") {
+            if (argi + 1 >= argc) {
+                std::cerr << "error: --backend requires a name (bytecode or native)\n";
+                return 2;
+            }
+            backendChoice = argv[++argi];
+        } else if (arg.rfind("--backend=", 0) == 0) {
+            backendChoice = arg.substr(10);
+        } else if (arg == "--reference-compiler") {
+            referenceCompiler = true;
+        } else if (arg == "--strict-native") {
+            strictNative = true;
+        } else if (arg.size() > 1 && arg[0] == '-') {
+            // A misspelled option used to be taken for the entry file, so
+            // `zl --emit-mirr out prog.zl` reported "could not open file:
+            // --emit-mirr" and exited 1 - a file-not-found for a file the user
+            // never named. Options are checked before paths, and an unknown one
+            // is a usage error.
+            std::cerr << "error: unknown option '" << arg << "' (try --help)\n";
+            return 2;
         } else {
             break; // first non-flag argument is the entry file
         }
     }
 
     if (argi >= argc) {
-        std::cerr << "usage: zl [--root <path>]... <file.zl> [program args...]\n";
+        std::cerr << "usage: zl [--backend <bytecode|native>] [--root <path>]... <file.zl> [program args...]\n";
         return 1;
     }
     const char* entryFile = argv[argi];
+
+    // The reference path is the escape hatch that keeps the differential check
+    // possible now that the pipeline is the shipped path: it is the old
+    // AST -> bytecode compiler, kept exactly as it was, so
+    // tools/mir_backend_diff.sh can compare it against the pipeline.
+    if (const char* env = std::getenv("ZL_COMPILER")) {
+        const std::string choice(env);
+        if (choice == "ast" || choice == "reference") referenceCompiler = true;
+        if (choice == "mir" || choice == "pipeline") referenceCompiler = false;
+    }
+
+    pipeline::Backend backend = pipeline::Backend::Bytecode;
+    std::string backendError;
+    if (!selectBackend(backendChoice, backend, backendError)) {
+        std::cerr << "error: " << backendError << "\n";
+        return 2;
+    }
 
     // Direct editor/--check invocations do not pass through zlpkg, so discover
     // local path dependencies from the nearest zlpkg.toml. Git dependencies
@@ -813,47 +928,61 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (const char* env = std::getenv("ZL_EXTRA_ROOTS")) {
-        if (*env != '\0') {
-            for (auto& root : splitPathList(env)) extraRoots.push_back(std::move(root));
-        }
-    }
-    const auto stdlibRoot = resolveStdlibRoot(argv[0]);
-    const auto stdlibVersion = zl::common::checkStdlibVersion(stdlibRoot, ZL_VERSION_STRING);
-    if (!stdlibVersion.compatible) {
-        std::cerr << "error: " << stdlibVersion.error << "\n";
-        return 3;
-    }
-    extraRoots.push_back(stdlibRoot);
+    int rootExitCode = 1;
+    if (!appendStandardRoots(argv[0], extraRoots, rootExitCode)) return rootExitCode;
 
     // Anything after the entry file is passed through to main(args: list<string>).
     std::vector<std::string> programArgs;
     for (int i = argi + 1; i < argc; ++i) programArgs.emplace_back(argv[i]);
 
     try {
-        // Parses the entry file plus everything it (transitively) imports -
-        // see module_loader.hpp for how `import a.b.C` resolves to a file
-        // path - and merges them into one Program. Enforces the "class name
-        // matches file name" rule per file (including the entry file
-        // itself), so this fully replaces what main() used to do by hand
-        // for just the single entry file.
-        zl::ModuleLoader loader(entryFile, extraRoots);
-        auto program = loader.load();
+        pipeline::Options options = optionsForRun(backend);
+        options.requireMain = !checkOnly;
+        if (strictNative) options.strictNative = true;
+        pipeline::Pipeline compiler(std::move(options));
 
-        // Semantic analysis: enforce static types before generating bytecode.
-        zl::TypeChecker typeChecker;
-        typeChecker.check(*program, /*requireMain=*/!checkOnly);
+        // Stages 1-2, shared by every command: parse the entry file plus
+        // everything it (transitively) imports and merge them into one Program,
+        // then run semantic analysis over it.
+        if (!compiler.load(entryFile, extraRoots)) return reportPipelineFailure(compiler.result());
+        if (!compiler.analyze()) return reportPipelineFailure(compiler.result());
 
         if (checkOnly) {
-            // Check mode is parse + type-check only. Never compile or execute.
+            // Check mode is parse + type-check only. The pipeline is stopped
+            // before lowering: nothing is generated and nothing executes.
+            if (compiler.result().options.verbose) std::cerr << compiler.result().describe() << "\n";
             return 0;
         }
 
-        zl::Compiler compiler;
-        zl::Chunk chunk = compiler.compile(*program);
+        if (referenceCompiler) {
+            // The reference path reuses the front end and then hands the checked
+            // program to the original AST -> bytecode compiler. It exists to be
+            // compared against, so it says so.
+            std::cerr << "reference compiler: AST -> bytecode (not the MIR pipeline)\n";
+            zl::Compiler astCompiler;
+            zl::Chunk chunk = astCompiler.compile(*compiler.result().program);
+            zl::VM vm;
+            return vm.run(chunk, programArgs);
+        }
+
+        // Stages 3-6: MIR, verification, optimisation, the selected backend.
+        if (!compiler.lowerToMir()) return reportPipelineFailure(compiler.result());
+        if (!compiler.verifyMir()) return reportPipelineFailure(compiler.result());
+        if (!compiler.optimizeMir()) return reportPipelineFailure(compiler.result());
+        if (!compiler.generate()) return reportPipelineFailure(compiler.result());
+
+        const auto& result = compiler.result();
+        for (const auto& diagnostic : result.loweringDiagnostics)
+            std::cerr << "note: " << diagnostic << "\n";
+        reportOptimization(result);
+        reportStubs(result);
+        reportNativeLedger(result);
 
         zl::VM vm;
-        return vm.run(chunk, programArgs);
+        // The executed artifact is bytecode translated from the same verified
+        // MIR whichever backend generated code, because the VM is the execution
+        // driver in this phase. See docs/pipeline.md.
+        return vm.run(*result.chunk, programArgs);
     } catch (const zl::SystemExitException& ex) {
         // System.exit(code) - deliberately NOT caught by zl's own try/catch
         // (it isn't a std::runtime_error), so it always terminates the program.

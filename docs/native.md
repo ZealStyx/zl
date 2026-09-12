@@ -22,11 +22,17 @@ storage primitives, cryptographic primitives, and low-level numeric operations.
 ## Native compilation (`@native`)
 
 Selected functions opt into the restricted native compiler with `@native`. The compiler
-preserves the normal VM path as a fallback and can emit MIR-native portable C++:
+preserves the normal VM path as a fallback and can emit portable C++:
 
 ```text
 zl --emit-native output.cpp source.zl
 ```
+
+> This is the one remaining path that lowers the AST directly into the legacy
+> untyped `zl::ir`, and it is frozen. Machine code is produced from verified MIR
+> instead: `zl --emit-native-code` / `zl --emit-machine-code`, or
+> `zl --backend native` to run with native code generation. See
+> [pipeline.md](pipeline.md) and [native-backend.md](native-backend.md).
 
 The current native tier supports:
 

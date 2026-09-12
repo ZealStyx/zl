@@ -153,6 +153,11 @@ const ClassLayout* Module::classLayout(const std::string& name) const {
     return it == classes.end() ? nullptr : &*it;
 }
 
+std::string Function::declaredName() const {
+    const auto open = simpleName.find('(');
+    return open == std::string::npos ? simpleName : simpleName.substr(0, open);
+}
+
 const InterfaceMethod* InterfaceInfo::method(const std::string& methodName) const {
     const auto it = std::find_if(methods.begin(), methods.end(),
                                  [&](const InterfaceMethod& m) { return m.name == methodName; });

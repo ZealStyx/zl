@@ -165,7 +165,9 @@ struct Function {
     std::string name;
     // Declaring class, empty for a free function or lambda.
     std::string ownerClass;
-    // Unqualified source name.
+    // Unqualified rendered name, signature included: "add(int,int)", "main()".
+    // Overloads share a `name` prefix and differ here, which is why the
+    // parameter list is kept; `declaredName()` is the name without it.
     std::string simpleName;
 
     std::vector<Parameter> parameters;
@@ -229,6 +231,12 @@ struct Function {
     // One past the largest block parameter id in use, which is where a pass
     // that adds parameters starts allocating.
     [[nodiscard]] BlockParamId nextBlockParameterId() const;
+    // The declared name of a function, without the rendered parameter list:
+    // "add(int,int)" becomes "add". Matching a call site's method name to a
+    // function needs this - `simpleName` keeps the signature, so two overloads
+    // stay distinguishable - and a caller slicing the string itself is how the
+    // two spellings of one name drift apart.
+    [[nodiscard]] std::string declaredName() const;
 
     // Recomputes `edges` from the terminators and exception handler chains.
     void rebuildEdges();

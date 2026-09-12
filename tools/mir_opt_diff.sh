@@ -82,7 +82,10 @@ broken=()
 for f in "${FILES[@]}"; do
     [[ -f "$f" ]] || continue
 
-    off_out="$("$ZL" --mir-vm "$f" 2>/dev/null)"; off_rc=$?
+    # ZL_MIR_OPT is pinned on both legs: the pipeline enables the optimiser on
+    # the run path by default, and "compare optimised with optimised" is the
+    # kind of green line this harness exists to avoid.
+    off_out="$(ZL_MIR_OPT=0 "$ZL" --mir-vm "$f" 2>/dev/null)"; off_rc=$?
     if [[ $off_rc -ne 0 ]]; then
         # The backend cannot run this program even unoptimised, so it cannot
         # tell us anything about the optimiser.
