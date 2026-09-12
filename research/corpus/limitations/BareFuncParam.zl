@@ -1,0 +1,14 @@
+// Limitation: a bare `func` parameter carries no signature, so the parameter
+// type is `unknown` in MIR (recorded, not invented). The program still runs;
+// MIR carries the unknown type rather than erasing it, and the higher-order
+// call happens through the runtime boundary.
+class BareFuncParam {
+    static func applyTwice(func f, int x): int {
+        return f(f(x))
+    }
+
+    func main(): void {
+        var inc = func(int x) => x + 1
+        log("result=" + BareFuncParam.applyTwice(inc, 5))
+    }
+}

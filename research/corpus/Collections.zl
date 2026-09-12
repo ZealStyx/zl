@@ -1,0 +1,44 @@
+// Corpus: collections.
+// List, Map, Set, fixed arrays, Queue and Stack.
+import zl.util.Queue
+import zl.util.Stack
+
+class Collections {
+    func main(): void {
+        var xs = new List<int>()
+        for i in 0..5000 {
+            xs.push(i)
+        }
+        var total = 0
+        for i in 0..xs.length() {
+            total = total + xs.get(i)
+        }
+        log("list=" + xs.length() + " sum=" + total)
+
+        var table = new Map<string, int>()
+        for i in 0..500 {
+            table.put("k" + i, i * 2)
+        }
+        log("map=" + table.length() + " probe=" + table.get("k250"))
+
+        var seen = new Set<int>()
+        for i in 0..500 {
+            seen.add(i % 100)
+        }
+        log("set=" + seen.length())
+
+        list<int> fixed = [1, 2, 3, 4, 5]
+        log("array=" + Collection.length(fixed) + " last=" + Collection.get(fixed, 4))
+
+        var q = new Queue<int>()
+        q.enqueue(1)
+        q.enqueue(2)
+        q.enqueue(3)
+        log("queue=" + q.dequeue() + " peek=" + q.peek())
+
+        var st = new Stack<int>()
+        st.push(10)
+        st.push(20)
+        log("stack=" + st.pop() + " top=" + st.peek())
+    }
+}

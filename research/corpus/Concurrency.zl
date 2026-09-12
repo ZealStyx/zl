@@ -1,0 +1,43 @@
+// Corpus: concurrency.
+// Threads, Shared<T> captures, atomics, mutex-protected state, channels.
+import zl.lang.Atomic
+import zl.lang.Channel
+import zl.lang.Mutex
+
+class Concurrency {
+    func main(): void {
+        var tally = new Atomic()
+        var bump = func() {
+            for i in 0..1000 {
+                Atomic.add(tally, 1)
+            }
+        }
+        var t1 = Thread.start(bump)
+        var t2 = Thread.start(bump)
+        Thread.join(t1)
+        Thread.join(t2)
+        log("atomic=" + Atomic.load(tally))
+
+        var cell = new Shared<int>(0)
+        var m = new Mutex()
+        var guarded = func() {
+            for i in 0..500 {
+                Mutex.withLock(m, func() { cell.setValue(cell.get() + 1) })
+            }
+        }
+        var g1 = Thread.start(guarded)
+        var g2 = Thread.start(guarded)
+        Thread.join(g1)
+        Thread.join(g2)
+        log("guarded=" + cell.get())
+
+        var pipe = Channel.create(4)
+        var producer = Thread.start(func() {
+            Channel.send(pipe, "ping")
+            Channel.send(pipe, "pong")
+        })
+        log("recv1=" + Channel.receive(pipe))
+        log("recv2=" + Channel.receive(pipe))
+        Thread.join(producer)
+    }
+}

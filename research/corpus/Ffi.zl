@@ -1,0 +1,20 @@
+// Corpus: FFI.
+// @ffi(library, symbol) / @ffi(symbol) bindings. The bindings are declared
+// (MIR records the FFI metadata) but not invoked: a real call would dlopen at
+// runtime, so `main` exercises the FFI-adjacent dynamic boundary instead.
+class Ffi {
+    @ffi("libc", "strlen")
+    static func cStrlen(string s): int { return 0 }
+
+    @ffi("sqrt")
+    static func cSqrt(double x): double { return 0.0 }
+
+    func main(): void {
+        log("ffi-declared=" + (Ffi.cStrlen != null))
+        var computed = 81.0
+        for i in 0..3 {
+            computed = (computed + 3.0) / 2.0
+        }
+        log("computed=" + computed)
+    }
+}

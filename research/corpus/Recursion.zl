@@ -1,0 +1,42 @@
+// Corpus: recursion.
+// Direct, mutual, and structural recursion over collections.
+class Recursion {
+    static func fib(int n): int {
+        if (n < 2) { return n }
+        return Recursion.fib(n - 1) + Recursion.fib(n - 2)
+    }
+
+    static func factorial(int n): int {
+        if (n <= 1) { return 1 }
+        return n * Recursion.factorial(n - 1)
+    }
+
+    static func isEven(int n): bool {
+        if (n == 0) { return true }
+        return Recursion.isOdd(n - 1)
+    }
+
+    static func isOdd(int n): bool {
+        if (n == 0) { return false }
+        return Recursion.isEven(n - 1)
+    }
+
+    static func listSum(List<int> xs, int i): int {
+        if (i >= xs.length()) { return 0 }
+        return xs.get(i) + Recursion.listSum(xs, i + 1)
+    }
+
+    func main(): void {
+        log("fib26=" + Recursion.fib(26))
+        log("fact10=" + Recursion.factorial(10))
+        log("even97=" + Recursion.isEven(97))
+        log("odd97=" + Recursion.isOdd(97))
+        var xs = new List<int>()
+        xs.push(1)
+        xs.push(2)
+        xs.push(3)
+        xs.push(4)
+        xs.push(5)
+        log("sum=" + Recursion.listSum(xs, 0))
+    }
+}

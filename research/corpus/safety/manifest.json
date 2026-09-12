@@ -1,0 +1,14 @@
+{
+  "programs": [
+    {"id": "static-type-mismatch",     "file": "StaticTypeMismatch.zl",  "role": "static-reject",  "expect": "semantic"},
+    {"id": "static-union-mismatch",    "file": "StaticUnionMismatch.zl", "role": "static-reject",  "expect": "semantic"},
+    {"id": "static-return-mismatch",   "file": "StaticReturnMismatch.zl","role": "static-reject",  "expect": "semantic"},
+    {"id": "static-move-violation",    "file": "StaticMoveViolation.zl", "role": "static-reject",  "expect": "semantic"},
+    {"id": "static-borrow-conflict",   "file": "StaticBorrowConflict.zl","role": "static-reject", "expect": "semantic"},
+    {"id": "static-thread-capture",    "file": "StaticThreadCapture.zl", "role": "static-reject",  "expect": "semantic"},
+    {"id": "runtime-bounds",           "file": "RuntimeBounds.zl",       "role": "runtime-check",  "expect": "verified"},
+    {"id": "runtime-divzero",          "file": "RuntimeDivZero.zl",      "role": "runtime-check",  "expect": "verified"},
+    {"id": "runtime-unwrap-none",      "file": "RuntimeUnwrapNone.zl",   "role": "runtime-check",  "expect": "verified"},
+    {"id": "runtime-dynamic-type",     "file": "RuntimeDynamicType.zl",  "role": "runtime-check",  "expect": "verified"}
+  ]
+}

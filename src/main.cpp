@@ -1,5 +1,6 @@
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <regex>
 #include <set>
 #include <cstdint>
@@ -583,6 +584,149 @@ int main(int argc, char** argv) {
             std::cout << "mir-opt-check: equivalent\n";
             return 0;
         }
+        if (command == "--artifact-stats") {
+            // Measurement hook for the research harness. Emits one JSON object
+            // describing the stage timings and the generated artifacts (MIR
+            // shape, bytecode chunk, native machine code). It is a measurement
+            // command, not a run path: it never executes the program, and it
+            // reports a failed compile as data (exit 0, "ok": false) so a
+            // harness can record it instead of treating it as a crash.
+            std::string backendChoice;
+            bool referenceCompiler = false;
+            int statArg = 2;
+            while (statArg < argc) {
+                const std::string arg = argv[statArg];
+                if (arg == "--reference-compiler") { referenceCompiler = true; ++statArg; continue; }
+                if (arg.rfind("--backend=", 0) == 0) { backendChoice = arg.substr(10); ++statArg; continue; }
+                if (arg == "--backend" && statArg + 1 < argc) { backendChoice = argv[statArg + 1]; statArg += 2; continue; }
+                break;
+            }
+            if (statArg + 1 != argc) {
+                std::cerr << "usage: zl --artifact-stats [--backend=<bytecode|native>] [--reference-compiler] <file.zl>\n";
+                return 2;
+            }
+            const char* entry = argv[statArg];
+            pipeline::Backend backend = pipeline::Backend::Bytecode;
+            std::string backendError;
+            if (!selectBackend(backendChoice, backend, backendError)) {
+                std::cerr << "error: " << backendError << "\n";
+                return 2;
+            }
+            std::vector<std::filesystem::path> roots;
+            int rootExitCode = 1;
+            if (!appendStandardRoots(argv[0], roots, rootExitCode)) return rootExitCode;
+
+            std::ostringstream out;
+            out << std::fixed << std::setprecision(4);
+            out << "{";
+            bool firstField = true;
+            auto kv = [&](const char* key, const std::string& value) {
+                if (!firstField) out << ",";
+                out << zl::common::jsonString(key) << ":" << value;
+                firstField = false;
+            };
+            const auto started = std::chrono::steady_clock::now();
+            kv("command", zl::common::jsonString("artifact-stats"));
+            kv("backend", zl::common::jsonString(pipeline::backendName(backend)));
+            kv("reference", referenceCompiler ? "true" : "false");
+
+            if (referenceCompiler) {
+                // The original AST -> bytecode compiler, kept unchanged behind
+                // ZL_COMPILER=ast. Front end (stages 1-2) is shared with the
+                // pipeline; only code generation differs.
+                pipeline::Pipeline compiler(optionsForEmit(pipeline::Backend::Bytecode, /*optimize=*/false,
+                                                           /*codeGeneration=*/false));
+                const bool loaded = compiler.load(entry, roots) && compiler.analyze();
+                const auto astStart = std::chrono::steady_clock::now();
+                zl::Chunk chunk;
+                bool ok = false;
+                std::string failure = "";
+                if (loaded) {
+                    try {
+                        zl::Compiler astCompiler;
+                        chunk = astCompiler.compile(*compiler.result().program);
+                        ok = true;
+                    } catch (const std::exception& e) {
+                        failure = e.what();
+                    }
+                } else {
+                    failure = compiler.result().failure.message;
+                }
+                const auto astEnd = std::chrono::steady_clock::now();
+                const auto stageMs = [&](pipeline::Stage s) {
+                    const pipeline::StageRecord* rec = compiler.result().stage(s);
+                    return rec ? rec->milliseconds : 0.0;
+                };
+                kv("ok", ok ? "true" : "false");
+                kv("failure_message", zl::common::jsonString(failure));
+                kv("ms_load", std::to_string(stageMs(pipeline::Stage::Load)));
+                kv("ms_semantic", std::to_string(stageMs(pipeline::Stage::SemanticAnalysis)));
+                kv("ms_codegen", std::to_string(std::chrono::duration<double, std::milli>(astEnd - astStart).count()));
+                kv("bytecode_instructions", std::to_string(chunk.code.size()));
+                kv("bytecode_bytes", std::to_string(chunk.code.size() * sizeof(zl::Instruction)));
+                kv("bytecode_constants", std::to_string(chunk.constants.size()));
+                kv("bytecode_names", std::to_string(chunk.names.size()));
+                kv("bytecode_functions", std::to_string(chunk.functions.size()));
+            } else {
+                pipeline::Pipeline compiler(optionsForEmit(backend, /*optimize=*/true));
+                const bool ok = compiler.run(entry, roots);
+                const auto& result = compiler.result();
+                const auto stageMs = [&](pipeline::Stage s) {
+                    const pipeline::StageRecord* rec = result.stage(s);
+                    return rec ? rec->milliseconds : 0.0;
+                };
+                std::size_t mirInstructions = 0;
+                std::size_t mirBlocks = 0;
+                for (const auto& fn : result.module.functions) {
+                    mirBlocks += fn.blocks.size();
+                    for (const auto& block : fn.blocks) mirInstructions += block.instructions.size();
+                }
+                kv("ok", ok ? "true" : "false");
+                kv("failure_kind", zl::common::jsonString(result.failure.ok()
+                                                              ? "" : pipeline::errorKindName(result.failure.kind)));
+                kv("failure_stage", zl::common::jsonString(result.failure.ok()
+                                                               ? "" : pipeline::stageName(result.failure.stage)));
+                kv("failure_message", zl::common::jsonString(result.failure.message));
+                kv("ms_total", std::to_string(stageMs(pipeline::Stage::Load) +
+                                              stageMs(pipeline::Stage::SemanticAnalysis) +
+                                              stageMs(pipeline::Stage::TypedLowering) +
+                                              stageMs(pipeline::Stage::MirVerification) +
+                                              stageMs(pipeline::Stage::MirOptimization) +
+                                              stageMs(pipeline::Stage::CodeGeneration)));
+                kv("ms_load", std::to_string(stageMs(pipeline::Stage::Load)));
+                kv("ms_semantic", std::to_string(stageMs(pipeline::Stage::SemanticAnalysis)));
+                kv("ms_lower", std::to_string(stageMs(pipeline::Stage::TypedLowering)));
+                kv("ms_verify", std::to_string(stageMs(pipeline::Stage::MirVerification)));
+                kv("ms_opt", std::to_string(stageMs(pipeline::Stage::MirOptimization)));
+                kv("ms_codegen", std::to_string(stageMs(pipeline::Stage::CodeGeneration)));
+                kv("mir_functions", std::to_string(result.module.functions.size()));
+                kv("mir_blocks", std::to_string(mirBlocks));
+                kv("mir_instructions", std::to_string(mirInstructions));
+                kv("incomplete_functions", std::to_string(result.incompleteFunctions.size()));
+                kv("verification_errors", std::to_string(result.verification.errorCount()));
+                kv("verification_warnings", std::to_string(result.verification.warningCount()));
+                if (result.chunk) {
+                    kv("bytecode_instructions", std::to_string(result.chunk->code.size()));
+                    kv("bytecode_bytes", std::to_string(result.chunk->code.size() * sizeof(zl::Instruction)));
+                    kv("bytecode_constants", std::to_string(result.chunk->constants.size()));
+                    kv("bytecode_names", std::to_string(result.chunk->names.size()));
+                    kv("bytecode_functions", std::to_string(result.chunk->functions.size()));
+                }
+                kv("stubbed_functions", std::to_string(result.stubbedFunctions.size()));
+                if (result.native) {
+                    std::size_t nativeBytes = 0;
+                    for (const auto& fn : result.native->code) nativeBytes += fn.code.size();
+                    kv("native_functions_compiled", std::to_string(result.native->nativeFunctions.size()));
+                    kv("native_functions_vm", std::to_string(result.native->vmFunctions.size()));
+                    kv("native_code_functions", std::to_string(result.native->code.size()));
+                    kv("native_code_bytes", std::to_string(nativeBytes));
+                }
+            }
+            out << ",\"ms_wall\":" << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+            out << "}\n";
+            std::cout << out.str();
+            return 0;
+        }
         if (command == "--pipeline-report") {
             // The pipeline made visible: one line per stage, the invariant each
             // stage guarantees, and the MIR digest every backend is handed. It
@@ -806,6 +950,7 @@ int main(int argc, char** argv) {
                          "  zl --emit-ssa <output|-> <file.zl>\n"
                          "  zl --emit-mir-opt <output|-> <file.zl>\n"
                          "  zl --mir-opt-check <file.zl>\n"
+                         "  zl --artifact-stats <file.zl>  JSON stage timings + artifact sizes; never executes\n"
                          "  zl --safety-check <file.zl>   JSON safety report; never executes\n"
                          "  zl --version\n"
                          "  zl --help\n"

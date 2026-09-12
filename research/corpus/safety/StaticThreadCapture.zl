@@ -1,0 +1,10 @@
+// Safety: capturing a plain local across a thread boundary must be rejected
+// statically (only Shared<T> captures may cross a thread boundary).
+class StaticThreadCapture {
+    func main(): void {
+        var n = 5
+        var worker = Thread.start(func() => n * 2)
+        Thread.join(worker)
+        log("done")
+    }
+}

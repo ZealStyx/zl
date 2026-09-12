@@ -1,0 +1,57 @@
+// Corpus: inheritance.
+// extends, constructor chaining via super(), @Override, virtual dispatch.
+class Shape {
+    protected string name
+
+    func Shape(string n): void {
+        this.name = n
+    }
+
+    public func area(): double {
+        return 0.0
+    }
+
+    public func describe(): string {
+        return this.name + " area=" + this.area()
+    }
+}
+
+class Square extends Shape {
+    private double side
+
+    func Square(string n, double s): void {
+        super(n)
+        this.side = s
+    }
+
+    @Override
+    public func area(): double {
+        return this.side * this.side
+    }
+}
+
+class Circle extends Shape {
+    private double radius
+
+    func Circle(string n, double r): void {
+        super(n)
+        this.radius = r
+    }
+
+    @Override
+    public func area(): double {
+        return 3.0 * this.radius * this.radius
+    }
+}
+
+class Inheritance {
+    func main(): void {
+        Shape generic = new Shape("generic")
+        Shape sq = new Square("sq", 4.0)
+        Shape ci = new Circle("ci", 2.0)
+        log(generic.describe())
+        log(sq.describe())
+        log(ci.describe())
+        log("dispatch=" + (sq.area() != generic.area() && ci.area() != sq.area()))
+    }
+}
