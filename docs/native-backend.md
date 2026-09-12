@@ -1,14 +1,15 @@
 # The native backend
 
-The native backend is the third consumer of MIR, alongside the bytecode backend
-and the optimiser. Its pipeline is
+The native backend is one of the two code generators the compiler pipeline can
+select (see [pipeline.md](pipeline.md)), alongside the shipped bytecode backend.
+Its pipeline is
 
     ZL source → parser → semantic/type analysis → MIR → verifyModule
               → selectModule  (native IR)
               → emitModule    (x86-64 machine code)
 
-and the first three arrows are shared, unchanged, with `--mir-vm`. **The native
-backend never reads the AST.** Every fact it acts on — the class of a value, the
+and the first three arrows are shared, unchanged, with `--mir-vm` and with the
+default run path. **The native backend never reads the AST.** Every fact it acts on — the class of a value, the
 operand order of a subtraction, which block a branch goes to, which function a
 call names — is read out of MIR that `verifyModule` accepted. If a fact the
 backend needs is not in the MIR, the fix is to put it in the MIR.
@@ -30,12 +31,28 @@ something checks them, and "the caller promised" is not something.
 
 ## Running it
 
+    zl --backend native   <file.zl>              # run with native code generation
     zl --emit-native-ir   <output|-> <file.zl>   # stop after selection
     zl --emit-native-code <output|-> <file.zl>   # also emit machine code
+    zl --emit-machine-code <output.zlm> <file.zl>  # the ZLM1 container, from MIR
 
-Both print, on stderr, a per-function ledger: which functions were compiled
+`--backend native` runs the *same* pipeline and then executes the program on the
+VM: the native tier is a code generator, and mixed-mode native execution is not
+implemented yet, so the executed artifact is bytecode translated from the same
+verified MIR (reported on stderr as `execution: VM`). `--emit-machine-code` used
+to consume the legacy `zl::ir`; it now writes the same `ZLM1` container from this
+backend's emitted functions, and it is the reason the legacy machine-code path has
+no CLI consumer left.
+
+The emit commands print, on stderr, a per-function ledger: which functions were compiled
 natively, and for every other function *by name and with a reason* why it was
 left to the VM. The two lists always account for every function in the module.
+`--backend native` also reports how much of the module the program can actually
+enter (`zl::mir::reachableFunctions`, `docs/pipeline.md`), because the ledger's
+totals cover a whole module and most of a module is stdlib the program never
+calls: a hello-world is `5 function(s) compiled, 283 left to the VM` *and*
+`1 of 288 function(s) can run`. `--strict-native` (`ZL_NATIVE_STRICT=1`) turns a
+partial ledger into a refusal for code written to the subset.
 
 ### A worked example
 

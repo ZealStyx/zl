@@ -298,4 +298,16 @@ struct NativeSignature {
 [[nodiscard]] const std::vector<NativeSignature>& nativeSignatureTable();
 [[nodiscard]] std::optional<const NativeSignature*> findNativeSignature(const std::string& qualifiedName);
 
+// True when calling this native can enter ZL code that the call site does not
+// name. Reflection's invoke family takes a `Method`/`Function`/`Constructor`
+// value and calls whatever it describes, so it is an edge to every function the
+// runtime can reach - which is a fact about the native, and therefore belongs
+// here rather than in a caller's hand-written list that can drift from the
+// catalog.
+//
+// A caller reasoning about "what can this program run" (the native tier's
+// reachability report, and any future dead-code elimination) must treat a
+// module that calls one of these as having no closed call graph.
+[[nodiscard]] bool nativeEntersCodeByName(NativeId id) noexcept;
+
 } // namespace zl

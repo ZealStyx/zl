@@ -2,41 +2,55 @@
 
 MIR is ZL's mid-level intermediate representation: a typed, SSA-shaped graph
 that sits between semantic analysis and any backend. It is the layer a native
-compiler, an optimiser, or a static analyser is meant to consume instead of
-re-deriving structure from the AST or from bytecode.
+compiler, an optimiser, or a static analyser consumes instead of re-deriving
+structure from the AST or from bytecode - and, since the pipeline phase, it is
+**the compiler boundary**: language semantics are decided above it and
+target-specific code generation happens below it.
 
 ```
 .zl → Lexer → Parser → ModuleLoader → TypeChecker
                                           │
+                                          ▼
+                                   typed lowering
+                                          │
+                                          ▼
+                                      MIR  ← the compiler boundary
+                                          │
+                                          ▼
+                                    verifyModule
+                                          │
+                                          ▼
+                                  optimiser (run paths: on)
+                                          │
                      ┌────────────────────┴────────────────────┐
                      ▼                                         ▼
-                 Compiler → Chunk → VM              zl::mir::lowerProgram
-                 (the shipped path)                            │
-                                                               ▼
-                                                    Module → verifyModule
-                                                               │
-                                                               ▼
-                                                    optimizeModule (opt-in)
-                                                               │
-                                                               ▼
-                                                        printModule / backend
+          bytecode backend → Chunk → VM            native backend → machine code
 ```
+
+That diagram is the whole compiler, not a side path: `zl file.zl` builds MIR,
+verifies it, and translates it with the bytecode backend. The reference
+AST → bytecode compiler still exists, unchanged, behind `ZL_COMPILER=ast`, so
+the two paths can be differentially tested against each other. The stages, their
+invariants and the backend contract are documented in
+[pipeline.md](pipeline.md).
 
 Headers live in `include/zl/mir/`, implementations in `src/mir/`.
 `include/zl/mir/mir.hpp` pulls the whole layer in, ordered by dependency.
 
-MIR is **opt-in and additive**. The bytecode compiler and the VM are untouched
-and remain the behavioural reference. Nothing in the language changed to
-accommodate it.
+The VM and its bytecode are untouched and remain the behavioural reference.
+Nothing in the language changed to accommodate MIR.
 
 ---
 
 ## Two IRs, and why
 
-ZL already had `zl::ir` (`include/zl/compiler/ir.hpp`). It is the input to the
-native-subset backends (`zl --emit-native`, `zl --emit-machine-code`) and it
-stays exactly as it is. MIR is a different layer with a different job, and the
-two coexist deliberately:
+ZL already had `zl::ir` (`include/zl/compiler/ir.hpp`). It is now a legacy layer
+with exactly one remaining consumer, the portable-C++ emitter behind
+`--emit-native` (the restricted `@native` subset). It is frozen, not grown, and
+it is not on any other path: `--emit-machine-code` produces the same `ZLM1`
+container from the MIR native backend, and the default compiler no longer lowers
+the program into it at all. MIR is a different layer with a different job, and
+the two coexist deliberately:
 
 | | `zl::ir` (legacy) | `zl::mir` |
 |---|---|---|
@@ -48,10 +62,10 @@ two coexist deliberately:
 | Exceptions | not representable | unwind edges and handler chains |
 | Fields, indexing, methods, allocation | absent | dedicated opcodes |
 
-`zl::ir` is not deprecated by this and has not been renamed — "MIR" already
-appears in its diagnostics, and renaming it would churn user-visible strings for
-no gain. When a construct only the native subset needs has to be added, add it
-to `zl::mir` and lower `zl::ir` onto it later; do not grow `zl::ir` further.
+`zl::ir` has not been renamed — "MIR" already appears in its diagnostics, and
+renaming it would churn user-visible strings for no gain. When a construct only
+the native subset needs has to be added, add it to `zl::mir` and lower `zl::ir`
+onto it later; do not grow `zl::ir` further.
 
 ---
 
@@ -196,6 +210,16 @@ The verifier enforces all of these. They are the contract a backend may rely on.
    Normal and unwind edges stay distinct throughout: an unwind target is
    reachable but is *not* dominated by the block that names it, so mixing them
    would make every catch block look like it dominates the code that catches.
+17aa. **Which functions can run is a query over the module, not a guess.**
+   `reachableFunctions` (`include/zl/mir/reachability.hpp`) walks the call graph
+   from the entry point and returns an over-approximation: every override in a
+   virtual receiver's hierarchy, every same-named function when a dispatch site
+   names a class this module does not have, and a referenced static's initializer.
+   It reports `complete() == false` when the program reaches reflection's invoke
+   family, because calling a `Method` value enters code the module never named -
+   so the answer is a lower bound there and says so. The approximation direction
+   is deliberate: a function it calls unreachable really is unreachable, which is
+   what a pass that deletes code needs, and nothing in this phase deletes code.
 17b. **Data flow is derived, never stored in the IR.** `include/zl/mir/dataflow.hpp`
    provides one definition of "a use" (`forEachValueUse`), def-use chains
    (`DefUseInfo`), liveness over slots and values (`LivenessAnalysis`), a
@@ -800,8 +824,9 @@ MIR can be optimised after lowering. That layer is described in
 of its constraints is a statement about MIR itself rather than about any pass.
 
 **The optimiser is a consumer of MIR, not a part of it.** It is reached from the
-command line (`--emit-mir-opt`, `--mir-opt-check`, `ZL_MIR_OPT=1 --mir-vm`),
-never implicitly, and nothing in MIR changed to accommodate it. `Module`,
+command line (`--emit-mir-opt`, `--mir-opt-check`), from the run paths
+(`--mir-vm`, `zl file.zl`, `ZL_MIR_OPT=0` turns it off), and nothing in MIR
+changed to accommodate it. `Module`,
 `Function` and `Instruction` are exactly what they were; the optimiser reads
 them, proves things about them, and hands back the same structures with fewer of
 them in.
@@ -896,14 +921,14 @@ zl --emit-ssa out.mir program.zl   # promote locals to block parameters first
 zl --emit-ssa - program.zl         # and check what came out
 ```
 
-`--emit-ssa` runs `promoteSlotsToBlockParameters` over every function, then
-re-verifies before printing: a promotion that produced invalid MIR is reported
-rather than emitted. `ZL_MIR_SSA_VERBOSE=1` adds one line per declined slot
-saying why. `--mir-vm` runs the same pass when `ZL_MIR_PROMOTE=1` is set, which
-is how the backend is checked to behave identically on both forms - see
-`tools/mir_promotion_diff.sh`, which does exactly that comparison across the
-example corpus (27 identical, 0 differing; the programs the bytecode backend
-cannot run yet are skipped as uninformative).
+`--emit-ssa` asks the lowering stage for the MIR's SSA form
+(`promoteSlotsToBlockParameters` over every function) and then verifies before
+printing: a promotion that produced invalid MIR is reported rather than emitted.
+`ZL_MIR_SSA_VERBOSE=1` adds one line per declined slot saying why. `--mir-vm`
+runs the same pass when `ZL_MIR_PROMOTE=1` is set, which is how the backend is
+checked to behave identically on both forms - see `tools/mir_promotion_diff.sh`,
+which does exactly that comparison across the example corpus (50 identical, 0
+differing, none skipped).
 
 The optimiser has its own commands:
 
@@ -911,7 +936,8 @@ The optimiser has its own commands:
 zl --emit-mir-opt out.mir program.zl   # lower, optimise, write the result
 zl --emit-mir-opt - program.zl         # print it
 zl --mir-opt-check program.zl          # optimise and diff; exit 4 on divergence
-ZL_MIR_OPT=1 zl --mir-vm program.zl    # run the optimised MIR
+zl --mir-vm program.zl                 # run the optimised MIR (the run path)
+ZL_MIR_OPT=0 zl --mir-vm program.zl    # ... and run it unoptimised
 ```
 
 `ZL_MIR_OPT_PASSES` selects the pipeline (`default`, `none`, or a comma-separated
@@ -921,8 +947,10 @@ changed pass, and `ZL_MIR_OPT_VERBOSE=1` prints the per-pass trace to stderr.
 half, and currently reports 50 of 50 example programs identical.
 
 Exit codes: `0` verified, `2` bad usage, `3` stdlib version mismatch, `4`
-verification failed (the module is not written), `5` the output could not be
-written, `1` a front-end failure. Lowering notes go to stderr; they are not
+verification failed, the optimiser did not trust its result, or the selected
+backend refused, `5` the output could not be written, `6` unsupported lowering,
+`1` a front-end, environment or compiler-invariant failure. The full table is in
+[pipeline.md](pipeline.md#exit-codes). Lowering notes go to stderr; they are not
 errors, and a module with notes can still verify.
 
 ---
