@@ -1,0 +1,46 @@
+// Corpus: unions.
+// int|string unions, match narrowing, Option and Result sum types.
+class Unions {
+    static func describe(int|string value): string {
+        return match value {
+            int n => "number " + n
+            string text => "text " + text
+            null => "null"
+        }
+    }
+
+    static func findEven(List<int> xs): Option<int> {
+        for i in 0..xs.length() {
+            var v = xs.get(i)
+            if (v % 2 == 0) { return new Some<int>(v) }
+        }
+        return new None<int>()
+    }
+
+    static func divide(int a, int b): Result<int, string> {
+        if (b == 0) { return new Err<int, string>("division by zero") }
+        return new Ok<int, string>(a / b)
+    }
+
+    func main(): void {
+        int|string u = 42
+        log(Unions.describe(u))
+        u = "hello"
+        log(Unions.describe(u))
+        u = null
+        log(Unions.describe(u))
+
+        var xs = new List<int>()
+        xs.push(1)
+        xs.push(3)
+        xs.push(6)
+        var found = Unions.findEven(xs)
+        log(found.isSome())
+        log(found.unwrap())
+
+        var ok = Unions.divide(8, 2)
+        var err = Unions.divide(8, 0)
+        log(ok.unwrap())
+        log(err.unwrapErr())
+    }
+}

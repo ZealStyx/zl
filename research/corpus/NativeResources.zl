@@ -1,0 +1,17 @@
+// Corpus: native resources.
+// OS file resources through the runtime boundary: create, read, append, delete.
+import zl.fs.FileSystem
+
+class NativeResources {
+    func main(): void {
+        var path = "research_corpus_native.tmp"
+        FileSystem.writeFile(path, "alpha")
+        FileSystem.appendFile(path, "|beta")
+        log("exists=" + FileSystem.exists(path))
+        log("content=" + FileSystem.readFile(path))
+        log("len=" + String.length(FileSystem.readFile(path)))
+        FileSystem.deleteFile(path)
+        log("deleted=" + !FileSystem.exists(path))
+        log("fallback=" + FileSystem.readOr(path, "<missing>"))
+    }
+}

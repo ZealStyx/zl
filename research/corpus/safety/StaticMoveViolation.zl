@@ -1,0 +1,14 @@
+// Safety: using a value after it was moved must be rejected statically.
+class Token {
+    public func id(): string { return "token" }
+}
+
+class StaticMoveViolation {
+    static func consume(owned Token t): void {}
+
+    func main(): void {
+        owned Token a = new Token()
+        StaticMoveViolation.consume(move a)
+        log(a.id())
+    }
+}

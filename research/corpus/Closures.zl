@@ -1,0 +1,38 @@
+// Corpus: closures.
+// Lambdas, by-value capture, closure state, higher-order application.
+class Closures {
+    static func makeCounter(int start): func {
+        var count = start
+        var inc = func() {
+            count = count + 1
+            return count
+        }
+        return inc
+    }
+
+    static func makeAdder(int base): func {
+        return func(int x) => base + x
+    }
+
+    static func twice(func f, int x): int {
+        return f(f(x))
+    }
+
+    func main(): void {
+        var c = Closures.makeCounter(10)
+        log(c())
+        log(c())
+        log(c())
+
+        var add10 = Closures.makeAdder(10)
+        log("add=" + add10(5))
+
+        var inc = func(int x) => x + 1
+        log("twice=" + Closures.twice(inc, 40))
+
+        var captured = 100
+        var read = func() => captured
+        captured = 999
+        log("snapshot=" + read())
+    }
+}

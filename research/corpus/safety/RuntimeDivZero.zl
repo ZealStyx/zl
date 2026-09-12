@@ -1,0 +1,13 @@
+// Safety: integer division by zero raises at runtime (ZL arithmetic raises on
+// overflow and division by zero). Statically accepted; caught at runtime.
+class RuntimeDivZero {
+    func main(): void {
+        log("normal=" + (10 / 2))
+        try {
+            log(1 / 0)
+        } catch Exception e {
+            log("caught-divzero")
+        }
+        log("continued")
+    }
+}

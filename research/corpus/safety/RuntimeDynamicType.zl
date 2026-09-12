@@ -1,0 +1,18 @@
+// Safety: a value crossing the dynamic boundary into a statically typed slot is
+// guarded by a runtime refine assertion. Statically accepted; the mismatch is
+// caught when the assertion executes.
+class RuntimeDynamicType {
+    static func dynamic(unknown value): unknown {
+        return value
+    }
+
+    func main(): void {
+        int number = 7
+        try {
+            number = RuntimeDynamicType.dynamic("wrong type")
+        } catch Exception e {
+            log("caught-refine")
+        }
+        log("preserved=" + number)
+    }
+}

@@ -1039,3 +1039,8 @@ The verifier also exposes stable property categories and JSON diagnostics throug
 explicit native resource identities, and boundary audits are described in
 [MIR safety analysis](mir-safety.md), together with a corpus protocol that keeps
 source rejection layers separate from malformed-MIR compiler-contract tests.
+
+The measured, end-to-end evaluation of MIR as a compiler boundary — compile-time
+stage costs, generated code size, runtime and memory behaviour, static vs runtime
+safety, and the reference-vs-MIR and optimised-vs-unoptimised comparisons — lives
+in [`research/`](../research/report.md), with the re-runnable corpus and harness.

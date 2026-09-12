@@ -1,0 +1,54 @@
+// Corpus: generics.
+// A user-defined generic class plus the compiled generic collections.
+class Pair<A, B> {
+    private A first
+    private B second
+
+    func Pair(A f, B s): void {
+        this.first = f
+        this.second = s
+    }
+
+    public func firstValue(): A {
+        return this.first
+    }
+
+    public func secondValue(): B {
+        return this.second
+    }
+
+    public func swapped(): Pair<B, A> {
+        return new Pair<B, A>(this.second, this.first)
+    }
+}
+
+class Generics {
+    func main(): void {
+        var p = new Pair<int, string>(7, "seven")
+        log(p.firstValue())
+        log(p.secondValue())
+        var q = p.swapped()
+        log(q.firstValue())
+        log(q.secondValue())
+
+        var nums = new List<int>()
+        nums.push(10)
+        nums.push(20)
+        nums.push(30)
+        log(nums.length())
+        log(nums.get(1))
+
+        var table = new Map<string, List<int>>()
+        var inner = new List<int>()
+        inner.push(1)
+        inner.push(2)
+        table.put("a", inner)
+        log(table.get("a").length())
+
+        var seen = new Set<string>()
+        seen.add("x")
+        seen.add("x")
+        seen.add("y")
+        log(seen.length())
+    }
+}

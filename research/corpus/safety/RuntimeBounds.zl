@@ -1,0 +1,16 @@
+// Safety: an out-of-bounds collection access is a runtime obligation. The
+// program is statically accepted; the violation is caught by a runtime check.
+class RuntimeBounds {
+    func main(): void {
+        list<int> xs = [1, 2, 3]
+        var ok = Collection.get(xs, 1)
+        log("in-bounds=" + ok)
+        try {
+            var bad = Collection.get(xs, 99)
+            log(bad)
+        } catch Exception e {
+            log("caught-bounds")
+        }
+        log("continued")
+    }
+}

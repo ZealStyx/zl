@@ -1,0 +1,20 @@
+// Corpus: tasks.
+// async func, await, Task<T>, and blocking on tasks from a sync main.
+class Tasks {
+    public async func fetch(int id): string {
+        await Time.sleepAsync(0.01)
+        return "item-" + id
+    }
+
+    public async func compute(int n): int {
+        await Time.sleepAsync(0.01)
+        return n * n
+    }
+
+    func main(): void {
+        var svc = new Tasks()
+        log(svc.fetch(1).block())
+        log(svc.fetch(2).block())
+        log("square=" + svc.compute(9).block())
+    }
+}

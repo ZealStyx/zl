@@ -1,0 +1,16 @@
+// Safety: unwrapping a None is a runtime obligation (Option is a sum type, but
+// unwrap() asserts the payload at runtime). Statically accepted; caught.
+class RuntimeUnwrapNone {
+    func main(): void {
+        var present = new Some<int>(42)
+        log("some=" + present.unwrap())
+        var absent = new None<int>()
+        log("none=" + absent.unwrapOr(-1))
+        try {
+            log(absent.unwrap())
+        } catch Exception e {
+            log("caught-unwrap")
+        }
+        log("continued")
+    }
+}
