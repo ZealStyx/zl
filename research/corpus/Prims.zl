@@ -1,0 +1,20 @@
+// Corpus: primitive computations.
+// int/double/bool/string arithmetic, bitwise ops, comparisons, conversions.
+class Prims {
+    func main(): void {
+        var acc = 0
+        var f = 0.0
+        for i in 0..200000 {
+            acc = acc + (i * 3 - 1) % 7
+            f = f + (i % 11) * 0.5
+            if (i % 2 == 0) { acc = acc + 1 } else { acc = acc - 1 }
+        }
+        var s = "a" + "b" + "c"
+        var bits = (acc & 15) | (acc << 2) ^ (acc >> 3)
+        log("int=" + acc)
+        log("double=" + f)
+        log("bits=" + bits)
+        log("str=" + s)
+        log("cmp=" + (acc > 0 && f > 0.0 && !(acc < 0)))
+    }
+}

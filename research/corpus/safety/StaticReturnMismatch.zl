@@ -1,0 +1,10 @@
+// Safety: returning a string from an int function must be rejected statically.
+class StaticReturnMismatch {
+    static func answer(): int {
+        return "forty-two"
+    }
+
+    func main(): void {
+        log(StaticReturnMismatch.answer())
+    }
+}

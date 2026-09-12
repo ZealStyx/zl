@@ -20,3 +20,6 @@ Makefile
 # Python bytecode from the zl-lsp / zl-test tooling
 __pycache__/
 *.pyc
+
+# Raw measurement artifacts from the research harness (large, regenerable)
+/research/results/

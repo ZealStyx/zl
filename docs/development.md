@@ -55,18 +55,29 @@ program, and `zlpkg run` verifies that the adjacent runtime reports a matching v
 ## Source organization
 
 - A standard CMake executable target defined in `CMakeLists.txt`.
-- The main executable loads a `.zl` file, tokenizes it, parses it, type-checks it,
-  compiles bytecode, and runs it in the VM.
+- The main executable runs one pipeline: load (`ModuleLoader`), semantic analysis
+  (`TypeChecker`), typed lowering to MIR, MIR verification, MIR optimisation, and
+  the selected backend. `zl file.zl` is that pipeline with the bytecode backend,
+  whose chunk the VM executes; `zl --backend native file.zl` is the same pipeline
+  with the native backend generating machine code. Every command in `main.cpp` is
+  a set of stage options over `zl::pipeline::Pipeline`
+  (`include/zl/compiler/pipeline.hpp`), not a pipeline of its own. See
+  [`pipeline.md`](pipeline.md) for the stages, their invariants, the backend
+  contract and the exit codes.
 - Errors are reported in three categories: `syntax error`, `compile error`, and
-  `runtime error`.
+  `runtime error` (plus `module error` for import/package problems).
 - `stdlib/` is copied next to the built binary so a development build can find it.
-- `src/mir/` and `include/zl/mir/` hold MIR, the mid-level IR. It is a side
-  pipeline off the type checker, reached with `zl --emit-mir`; the bytecode
-  compiler and the VM do not depend on it. See [`mir.md`](mir.md) for its
-  invariants and design decisions. The optimiser that sits on top of it
-  (`--emit-mir-opt`) is described in [`mir-optimizer.md`](mir-optimizer.md).
-- `src/compiler/ir.cpp` is the older, untyped `zl::ir` that feeds the native
-  subset backends. It is separate from `zl::mir` and is not being grown further.
+- `src/mir/` and `include/zl/mir/` hold MIR, the mid-level IR and the compiler
+  boundary. Backends consume only MIR; the lowerer is the only place that knows
+  the AST exists. See [`mir.md`](mir.md) for its invariants and design decisions,
+  and [`mir-optimizer.md`](mir-optimizer.md) for stage 5.
+- `src/compiler/compiler.cpp` is the reference AST → bytecode compiler, kept
+  unchanged so the MIR pipeline can be differentially tested against it
+  (`ZL_COMPILER=ast`, `tools/mir_backend_diff.sh`). It is no longer the default
+  path.
+- `src/compiler/ir.cpp` is the older, untyped `zl::ir`. It has one remaining
+  consumer - the portable-C++ emitter behind `--emit-native` - and is frozen:
+  new constructs go into `zl::mir`.`
 
 ## Testing
 
@@ -75,17 +86,25 @@ scheduler, native compiler, and FFI layers; they are declared as separate
 executables in `CMakeLists.txt`. If you extend the language, add tests for the
 affected layer.
 
-MIR has five targets, split by what they link:
+MIR has six targets, split by what they link:
 
 ```bash
+cmake --build build --target zl-pipeline-tests       # the pipeline contract
 cmake --build build --target zl-mir-tests            # verifier regressions
 cmake --build build --target zl-mir-ssa-tests        # CFG, data flow, promotion
 cmake --build build --target zl-mir-lowering-tests   # end-to-end lowering
 cmake --build build --target zl-mir-opt-tests        # optimiser, hand-built MIR
 cmake --build build --target zl-mir-opt-pipeline-tests   # optimiser, real programs
-./build/zl-mir-tests && ./build/zl-mir-ssa-tests && ./build/zl-mir-lowering-tests
-./build/zl-mir-opt-tests && ./build/zl-mir-opt-pipeline-tests
+./build/zl-pipeline-tests && ./build/zl-mir-tests && ./build/zl-mir-ssa-tests
+./build/zl-mir-lowering-tests && ./build/zl-mir-opt-tests && ./build/zl-mir-opt-pipeline-tests
 ```
+
+`zl-pipeline-tests` owns the composition: stage order and the ledger, the
+invariant that no backend is handed unverified MIR (including a module mutated
+after the verification stage), backend selection leaving the MIR boundary
+byte-identical and the program's behaviour unchanged, and the failure-kind to
+exit-code mapping. It links the whole compiler minus `main()`, because a pipeline
+assembled out of mocks would prove nothing about the one that ships.
 
 `zl-mir-tests` builds MIR by hand and checks the verifier rejects each class of
 malformed module; it links only the MIR sources. `zl-mir-ssa-tests` does the same
@@ -137,25 +156,51 @@ Use `scripts/run_regressions.sh` / `scripts/run_regressions.bat` for the full pe
 regression corpus, including package-manager cases, and `scripts/native_gate.sh` /
 `scripts/native_gate.ps1` for the native compiler gate.
 
-Four differential harnesses cover the MIR pipeline on `examples/`:
+Five differential harnesses cover the pipeline on `examples/`:
 
 ```bash
-tools/mir_backend_diff.sh ./build/zl_language     # backend vs reference path
-tools/mir_promotion_diff.sh ./build/zl_language   # block params vs store/load
+tools/backend_diff.sh ./build/zl_language         # reference | bytecode | native
+tools/mir_backend_diff.sh ./build/zl_language     # reference vs the MIR pipeline
 tools/mir_opt_diff.sh ./build/zl_language         # optimised vs unoptimised
+tools/mir_promotion_diff.sh ./build/zl_language   # block params vs store/load
 tools/mir_opt_check_all.sh ./build/zl_language    # the same, statically, wider
 ```
 
-The first must stay at 22 matching with the 9 documented fail-closed gaps. The
-second compares `--mir-vm` with and without `ZL_MIR_PROMOTE=1`; it must report 0
-differing (27 compared, 32 not yet runnable by the backend). The third compares
-`--mir-vm` with and without `ZL_MIR_OPT=1` - run both, compare the output - and
-must report 0 differing; it is currently 50 of 50, none skipped. The fourth does
-not need the backend at all: it runs `zl --mir-opt-check` over every `.zl` in
-`examples/` *and* `stdlib/`, which is how the optimiser gets checked against the
-generics, async, task, lock and FFI code the backend cannot execute yet; it is
-currently 76 of 76 equivalent. All four are the check that a change to the IR,
-the promotion pass, the optimiser, or the backend did not alter behaviour.
+The first is the backend-selection gate: every program is compiled and run three
+times - the reference AST → bytecode compiler (`ZL_COMPILER=ast`), the bytecode
+backend, and the native backend - and all three must print the same bytes and
+exit the same way, with `--pipeline-report` confirming per program that both
+backends were handed the same MIR. It is currently 50 of 50. The second compares
+the reference path against the MIR pipeline (`--mir-vm`) and must stay at 50
+matching with 0 documented fail-closed gaps. The third compares `--mir-vm` with
+and without the optimiser (`ZL_MIR_OPT=0` / `=1`) and must report 0 differing; it
+is currently 50 of 50, none skipped. The fourth compares the memory and value
+forms of the same MIR (`ZL_MIR_PROMOTE=0` / `=1`, optimiser pinned off); it is
+currently 50 of 50. The fifth does not need a backend at all: it runs
+`zl --mir-opt-check` over every `.zl` in `examples/` *and* `stdlib/`, which is how
+the optimiser gets checked against the generics, async, task, lock and FFI code
+the bytecode backend cannot execute yet; it is currently 76 of 76 equivalent.
+All five are the check that a change to the IR, the promotion pass, the
+optimiser, or a backend did not alter behaviour.
+
+The boundary itself is checked without running anything:
+
+```bash
+tools/boundary_lint.sh                            # rules 1-4, source-level
+```
+
+It fails when a backend includes the AST, the parser, the type checker, the
+module loader, the pipeline or the legacy IR; when the typed lowerer touches the
+checker except through `expressionType`; when anything outside the pipeline
+constructs a `ModuleLoader` or a `TypeChecker`; or when the legacy `zl::ir` gains
+a second consumer. It is registered with CTest as `boundary-lint`, so the rules
+in [pipeline.md](pipeline.md) are enforced rather than remembered.
+
+The first two set their legs up explicitly (`ZL_COMPILER=ast`, `--mir-vm`,
+`--backend ...`) and verify each leg really is the path it claims to be before
+comparing anything: now that the default path is the MIR pipeline, a harness that
+compared "the default" against "the pipeline" would be a green line measuring
+nothing.
 
 Both discover the `_lib` module roots themselves and set `ZL_EXTRA_ROOTS`, so a
 program that imports a sibling module is genuinely compared instead of failing to

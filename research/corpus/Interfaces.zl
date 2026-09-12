@@ -1,0 +1,41 @@
+// Corpus: interfaces.
+// interface declares signatures (no `func` keyword), class implements, interface
+// extends interface, and virtual dispatch through interface-typed variables.
+interface Named {
+    name(): string
+}
+
+interface Area extends Named {
+    area(): double
+}
+
+class Rect implements Area {
+    private double w
+    private double h
+
+    func Rect(double w, double h): void {
+        this.w = w
+        this.h = h
+    }
+
+    @Override
+    public func name(): string {
+        return "rect"
+    }
+
+    @Override
+    public func area(): double {
+        return this.w * this.h
+    }
+}
+
+class Interfaces {
+    func main(): void {
+        var r = new Rect(3.0, 4.0)
+        Area a = r
+        Named n = a
+        log(a.name() + "=" + a.area())
+        log("named=" + n.name())
+        log("direct=" + r.area())
+    }
+}

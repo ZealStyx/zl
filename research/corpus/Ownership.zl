@@ -1,0 +1,37 @@
+// Corpus: ownership.
+// owned parameters, move, borrow views; deterministic resource-style lifetime.
+class Token {
+    private string id
+
+    func Token(string id): void {
+        this.id = id
+    }
+
+    public func id(): string {
+        return this.id
+    }
+}
+
+class Ownership {
+    static func read(borrow Token t): string {
+        return t.id()
+    }
+
+    static func consume(owned Token t): string {
+        var id = t.id()
+        return id + ":consumed"
+    }
+
+    func main(): void {
+        owned Token a = new Token("alpha")
+        log(Ownership.read(a))
+        log(Ownership.consume(move a))
+
+        owned Token b = new Token("beta")
+        {
+            borrow Token view = b
+            log("borrowed=" + Ownership.read(view))
+        }
+        log(Ownership.consume(move b))
+    }
+}

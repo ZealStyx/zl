@@ -1,0 +1,12 @@
+// Limitation: passing a fixed array through the native Collection.* primitives
+// loses the element type (list<unknown>), which the MIR verifier rejects as a
+// type-flow violation. The reference AST compiler accepts the same program.
+// See the known "list<unknown> stored in an array[2]<int> slot" gap recorded in
+// docs/status/mir-safety-evaluation.md.
+class FixedArrayNative {
+    func main(): void {
+        array[5]<int> fixed = [1, 2, 3, 4, 5]
+        log("len=" + Collection.length(fixed))
+        log("last=" + Collection.get(fixed, 4))
+    }
+}

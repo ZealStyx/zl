@@ -13,10 +13,18 @@ everywhere:
 > declined as well as what it changed. A skipped optimisation is a correct
 > program; a wrong one is a miscompile.
 
+The optimiser is stage 5 of the compiler pipeline (see
+[pipeline.md](pipeline.md)), directly after MIR verification and directly before
+the selected backend: language semantics are already frozen by the time it runs,
+so its only job is to make the module cheaper without changing what it observes.
+The run paths turn it on (`ZL_MIR_OPT=0` turns it off); the inspection commands
+leave it off unless asked for it by name.
+
 ```bash
 zl --emit-mir-opt out.mir program.zl   # emit the optimised MIR
 zl --mir-opt-check program.zl          # optimise and check it is equivalent
-ZL_MIR_OPT=1 zl --mir-vm program.zl    # run the optimised MIR
+zl --mir-vm program.zl                 # run the optimised MIR (the run path)
+ZL_MIR_OPT=0 zl --mir-vm program.zl    # ... and run it unoptimised
 tools/mir_opt_diff.sh                  # run the corpus both ways, compare
 tools/mir_opt_check_all.sh             # check every example and stdlib module
 ```
@@ -342,7 +350,7 @@ divergent, 0 skipped.
 zl --emit-mir-opt out.mir program.zl   # write the optimised MIR
 zl --emit-mir-opt - program.zl         # print it
 zl --mir-opt-check program.zl          # optimise and diff; exit 4 on divergence
-ZL_MIR_OPT=1 zl --mir-vm program.zl    # run the optimised MIR
+ZL_MIR_OPT=0 zl --mir-vm program.zl    # ... and run it unoptimised
 ```
 
 Environment:
@@ -352,7 +360,7 @@ Environment:
 | `ZL_MIR_OPT_PASSES` | pipeline spec: `default`, `none`, or a comma-separated list of pass names |
 | `ZL_MIR_OPT_SNAPSHOT_DIR` | write one before/after snapshot per changed pass into this directory |
 | `ZL_MIR_OPT_VERBOSE` | print the per-pass trace to stderr |
-| `ZL_MIR_OPT` | with `--mir-vm`, optimise before translating (and run the differential check) |
+| `ZL_MIR_OPT` | the optimisation stage: on for the run paths, off for the inspection commands; `=0`/`=1` override either way |
 
 Exit codes follow the other MIR commands: `0` success, `2` bad usage, `3`
 stdlib version mismatch, `4` verification failed or the module was not

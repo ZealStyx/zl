@@ -1,0 +1,8 @@
+// Safety: assigning a string to an int slot must be rejected statically.
+class StaticTypeMismatch {
+    func main(): void {
+        int number = 7
+        number = "not a number"
+        log(number)
+    }
+}

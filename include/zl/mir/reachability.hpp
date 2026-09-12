@@ -1,0 +1,72 @@
+#pragma once
+
+#include <cstddef>
+#include <string>
+#include <unordered_set>
+#include <vector>
+
+#include "zl/mir/function.hpp"
+
+// ---------------------------------------------------------------------------
+// Which functions a program can enter
+// ---------------------------------------------------------------------------
+//
+// MIR knows every call a program makes, so "which functions can run" is a
+// question the IR can answer without guessing - with one deliberate exception.
+// Reflection's invoke family takes a `Method`/`Function`/`Constructor` value and
+// calls whatever it describes, so a module that calls one of those has no closed
+// call graph, and this analysis says so instead of returning a plausible subset.
+//
+// Everything here is an *over*-approximation, and the direction matters:
+//
+//   * virtual dispatch is resolved over the class hierarchy in `ClassLayout`, so
+//     every override in every subtype is kept, not only the ones a whole-program
+//     type derivation could prove reachable;
+//   * a call whose class name is not in the module keeps every function with
+//     that method name;
+//   * a static field's initializer is kept when the field is referenced, because
+//     "lazily initialised" means the initializer runs at first access, not at
+//     load time.
+//
+// Over-approximating is what makes the result usable for anything that would
+// *remove* code: a function this analysis calls unreachable really is
+// unreachable. Under-approximating would be a miscompile, so there is no case
+// where the analysis answers "definitely not reachable" from an absence of
+// evidence - only from the absence of an edge.
+//
+// The analysis is a question, not a transform: nothing here rewrites the module.
+// `ReachabilityReport::complete()` is what a caller must check before acting on
+// `functions`, and a module with reflection in it reports incomplete.
+
+namespace zl::mir {
+
+struct ReachabilityReport {
+    // Every function the program can enter, including the entry point.
+    std::unordered_set<FunctionId> functions;
+    // False when the module has no entry point at all (a library): `functions`
+    // is then empty and says nothing about the module.
+    bool hasEntryPoint{false};
+    // Set when a function that can run calls a native that enters code by name.
+    // `functions` is a lower bound in that case, so a caller that would delete
+    // anything must refuse.
+    bool dynamicEntry{false};
+    std::string dynamicEntryReason;
+    // Human-readable notes about the approximation: how many functions were kept
+    // by hierarchy-wide dispatch resolution, and why.
+    std::vector<std::string> notes;
+
+    // True when the answer is exact enough to act on: every path into a function
+    // is either an edge in the call graph or an entry point.
+    [[nodiscard]] bool complete() const noexcept { return hasEntryPoint && !dynamicEntry; }
+    [[nodiscard]] std::size_t size() const noexcept { return functions.size(); }
+    [[nodiscard]] bool contains(FunctionId id) const { return functions.count(id) != 0; }
+
+    // One line for a report: how many of the module's functions can run, which
+    // entry point they start from, and the caveat that applies.
+    [[nodiscard]] std::string describe(const Module& module) const;
+};
+
+// Computes the over-approximation described above.
+[[nodiscard]] ReachabilityReport reachableFunctions(const Module& module);
+
+} // namespace zl::mir

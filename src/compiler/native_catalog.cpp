@@ -305,6 +305,17 @@ findNativeSignature(const std::string& qualifiedName) {
 }
 
 
+bool nativeEntersCodeByName(NativeId id) noexcept {
+    switch (id) {
+        case NativeId::REFLECTION_FUNCTION_INVOKE:
+        case NativeId::REFLECTION_METHOD_INVOKE:
+        case NativeId::REFLECTION_CONSTRUCTOR_INVOKE:
+            return true;
+        default:
+            return false;
+    }
+}
+
 std::unordered_map<std::string, std::string> nativeTypeBindings(const NativeSignature& signature,
                                                                const std::string& firstArgumentType) {
     std::unordered_map<std::string, std::string> bindings;

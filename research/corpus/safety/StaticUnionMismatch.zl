@@ -1,0 +1,8 @@
+// Safety: a union assignment must check every alternative statically.
+class StaticUnionMismatch {
+    func main(): void {
+        int|bool source = true
+        int|string target = source
+        log(target)
+    }
+}

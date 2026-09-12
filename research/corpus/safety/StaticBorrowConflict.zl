@@ -1,0 +1,15 @@
+// Safety: moving an owner while a borrow of it is still live must be rejected.
+class Token {
+    public func id(): string { return "token" }
+}
+
+class StaticBorrowConflict {
+    static func consume(owned Token t): void {}
+
+    func main(): void {
+        owned Token b = new Token()
+        borrow Token view = b
+        log(view.id())
+        StaticBorrowConflict.consume(move b)
+    }
+}

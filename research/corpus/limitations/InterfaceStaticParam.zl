@@ -1,0 +1,25 @@
+// Limitation: passing an interface-typed value as an argument to a static
+// function does not lower (the call is recorded as unsupported and the function
+// is left incomplete). Direct virtual dispatch through an interface-typed
+// variable works; only the static-parameter spelling is unlowered.
+interface Named {
+    name(): string
+}
+
+class Widget implements Named {
+    @Override
+    public func name(): string {
+        return "widget"
+    }
+}
+
+class InterfaceStaticParam {
+    static func report(Named n): string {
+        return n.name()
+    }
+
+    func main(): void {
+        var w = new Widget()
+        log(InterfaceStaticParam.report(w))
+    }
+}

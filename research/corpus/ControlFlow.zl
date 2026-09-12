@@ -1,0 +1,32 @@
+// Corpus: control flow.
+// if/elif/else, for/while/repeat, break/continue, match.
+class ControlFlow {
+    static func classify(int n): string {
+        return match n {
+            v when v < 0 => "neg"
+            0 => "zero"
+            1 => "one"
+            _ => "many"
+        }
+    }
+
+    func main(): void {
+        var sum = 0
+        for i in 0..100000 {
+            if (i % 2 == 0) { continue }
+            if (i > 50000) { break }
+            sum = sum + i
+        }
+        var k = 0
+        while (k < 1000) { k = k + 1 }
+        var r = 0
+        repeat { r = r + 1 } while (r < 1000)
+        log("sum=" + sum)
+        log("while=" + k)
+        log("repeat=" + r)
+        log(ControlFlow.classify(-5))
+        log(ControlFlow.classify(0))
+        log(ControlFlow.classify(1))
+        log(ControlFlow.classify(42))
+    }
+}

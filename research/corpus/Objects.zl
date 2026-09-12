@@ -1,0 +1,43 @@
+// Corpus: objects.
+// Fields, constructors, methods, encapsulation (private state), statics.
+class Counter {
+    private int count
+    private string label
+
+    func Counter(string name): void {
+        this.label = name
+        this.count = 0
+    }
+
+    public func increment(): void {
+        this.count = this.count + 1
+    }
+
+    public func add(int n): void {
+        this.count = this.count + n
+    }
+
+    public func value(): int {
+        return this.count
+    }
+
+    public func name(): string {
+        return this.label
+    }
+}
+
+class Objects {
+    func main(): void {
+        var c = new Counter("ticks")
+        for i in 0..1000 {
+            c.increment()
+        }
+        c.add(25)
+        log(c.name() + "=" + c.value())
+
+        var other = new Counter("other")
+        other.add(7)
+        log(other.name() + "=" + other.value())
+        log("independent=" + (c.value() != other.value()))
+    }
+}

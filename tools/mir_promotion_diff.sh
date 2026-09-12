@@ -80,14 +80,16 @@ failed=()
 
 for f in "${FILES[@]}"; do
     [[ -f "$f" ]] || continue
-    off_out="$("$ZL" --mir-vm "$f" 2>/dev/null)"; off_rc=$?
+    # The optimiser is pinned off on both legs so the only thing that differs
+    # between them is the IR form being compared.
+    off_out="$(ZL_MIR_OPT=0 "$ZL" --mir-vm "$f" 2>/dev/null)"; off_rc=$?
     if [[ $off_rc -ne 0 ]]; then
         # The backend cannot run this program even without promotion, so it
         # cannot tell us anything about promotion.
         skipped=$((skipped + 1))
         continue
     fi
-    on_out="$(ZL_MIR_PROMOTE=1 "$ZL" --mir-vm "$f" 2>/dev/null)"; on_rc=$?
+    on_out="$(ZL_MIR_OPT=0 ZL_MIR_PROMOTE=1 "$ZL" --mir-vm "$f" 2>/dev/null)"; on_rc=$?
     if [[ "$off_out" == "$on_out" && $off_rc -eq 0 ]]; then
         pass=$((pass + 1))
     else

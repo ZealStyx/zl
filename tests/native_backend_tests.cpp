@@ -1,0 +1,621 @@
+// Native backend regressions: MIR -> native IR -> machine code -> *executed*.
+//
+// The whole pipeline is exercised end to end, and the last step is the point:
+// the emitted bytes are mapped executable and called through a function
+// pointer, then compared against the value ZL's own semantics say the program
+// computes. A backend test that only inspects the IR proves the backend agrees
+// with itself; running the code is what proves it agrees with the language.
+//
+// MIR is built through ModuleBuilder here rather than by lowering ZL source,
+// for the same reason mir_tests.cpp does: it pins the backend's contract with
+// *MIR* independently of whatever the front end currently produces. The
+// end-to-end direction (real ZL through the real lowerer) is covered by the
+// last group of cases.
+
+#include "zl/mir/builder.hpp"
+#include "zl/mir/lowering.hpp"
+#include "zl/mir/verifier.hpp"
+#include "zl/compiler/module_loader.hpp"
+#include "zl/compiler/type_checker.hpp"
+#include "zl/native/pipeline.hpp"
+
+#include <cmath>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/mman.h>
+#define ZL_NATIVE_CAN_EXECUTE 1
+#else
+#define ZL_NATIVE_CAN_EXECUTE 0
+#endif
+
+namespace {
+
+int failures = 0;
+
+void require(bool condition, const std::string& message) {
+    if (condition) return;
+    std::cerr << "native backend regression: " << message << '\n';
+    ++failures;
+}
+
+using namespace zl::mir;
+using namespace zl::native;
+
+// --- executable memory -----------------------------------------------------
+//
+// One page per function is wasteful and exactly right for a test: it keeps
+// every entry point at a known address so the relocation of a direct call is
+// a real rel32 patch rather than an accident of layout.
+#if ZL_NATIVE_CAN_EXECUTE
+class ExecutableBuffer {
+public:
+    explicit ExecutableBuffer(const std::vector<EmittedFunction>& functions) {
+        std::size_t total = 0;
+        for (const auto& fn : functions) total += (fn.code.size() + 4095) / 4096 * 4096;
+        if (total == 0) total = 4096;
+        base_ = static_cast<std::uint8_t*>(
+            ::mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+        size_ = total;
+        if (base_ == MAP_FAILED) { base_ = nullptr; return; }
+
+        std::size_t offset = 0;
+        for (const auto& fn : functions) {
+            std::memcpy(base_ + offset, fn.code.data(), fn.code.size());
+            entries_.push_back({fn.name, base_ + offset});
+            offset += (fn.code.size() + 4095) / 4096 * 4096;
+        }
+        // Bind direct calls now that every entry point has an address.
+        offset = 0;
+        for (const auto& fn : functions) {
+            for (const auto& reloc : fn.relocations) {
+                std::uint8_t* target = entry(reloc.symbol);
+                if (target == nullptr) { ok_ = false; continue; }
+                std::uint8_t* site = base_ + offset + reloc.offset;
+                const std::int32_t delta = static_cast<std::int32_t>(target - (site + 4));
+                std::memcpy(site, &delta, 4);
+            }
+            offset += (fn.code.size() + 4095) / 4096 * 4096;
+        }
+        ok_ = ok_ && ::mprotect(base_, size_, PROT_READ | PROT_EXEC) == 0;
+    }
+
+    ~ExecutableBuffer() { if (base_ != nullptr) ::munmap(base_, size_); }
+    ExecutableBuffer(const ExecutableBuffer&) = delete;
+    ExecutableBuffer& operator=(const ExecutableBuffer&) = delete;
+
+    [[nodiscard]] bool ok() const { return ok_ && base_ != nullptr; }
+
+    [[nodiscard]] std::uint8_t* entry(const std::string& name) const {
+        for (const auto& e : entries_)
+            if (e.first == name) return e.second;
+        return nullptr;
+    }
+
+private:
+    std::uint8_t* base_{nullptr};
+    std::size_t size_{0};
+    bool ok_{true};
+    std::vector<std::pair<std::string, std::uint8_t*>> entries_;
+};
+#endif
+
+// --- MIR fixtures ----------------------------------------------------------
+
+struct Built {
+    Module module;
+};
+
+// Compiles a module and returns the pipeline result, asserting it verified.
+PipelineResult compile(const Module& module) {
+    const auto report = verifyModule(module);
+    require(report.ok(), "fixture MIR must verify:\n" + report.describe());
+    return compileMirToNative(module, hostTarget());
+}
+
+bool rejected(const PipelineResult& result, const std::string& function) {
+    for (const auto& r : result.vmFunctions)
+        if (r.function == function) return true;
+    return false;
+}
+
+bool lowered(const PipelineResult& result, const std::string& function) {
+    for (const auto& n : result.nativeFunctions)
+        if (n == function) return true;
+    return false;
+}
+
+// --- the cases -------------------------------------------------------------
+
+// Target description. The calling convention is data, and the tests read it as
+// data: nothing here spells a register number.
+void testTargetDescription() {
+    const auto& sysv = x64SysVTarget();
+    require(sysv.cc.intArgRegs.size() == 6, "System V passes six integer arguments in registers");
+    require(sysv.cc.floatArgRegs.size() == 8, "System V passes eight float arguments in registers");
+    require(sysv.cc.shadowSpace == 0, "System V has no shadow space");
+    require(sysv.cc.stackAlignment == 16, "System V requires 16-byte stack alignment at a call");
+    require(sysv.encoderAvailable(), "the System V encoder exists");
+
+    const auto& win = x64WindowsTarget();
+    require(win.cc.intArgRegs.size() == 4, "Win64 passes four arguments in registers");
+    require(win.cc.shadowSpace == 32, "Win64 mandates 32 bytes of shadow space");
+    require(!win.encoderAvailable(),
+            "Win64 has no encoder yet and must say so rather than emitting SysV bytes");
+
+    // A caller-saved register must never also be callee-saved: the whole
+    // point of the split is that exactly one side is responsible.
+    for (const auto& caller : sysv.cc.callerSaved)
+        for (const auto& callee : sysv.cc.calleeSaved)
+            require(!(caller == callee), std::string("register ") + caller.name +
+                                             " cannot be both caller- and callee-saved");
+    // The allocator must never be handed a register the encoder uses as
+    // scratch, or a computation would clobber a live value.
+    for (const auto& alloc : sysv.allocatableInt)
+        for (const auto& scratch : sysv.cc.intScratch)
+            require(!(alloc == scratch),
+                    std::string("allocatable register ") + alloc.name + " overlaps encoder scratch");
+}
+
+void testValueClasses() {
+    ModuleBuilder builder("classes");
+    const auto& types = builder.types();
+    Module& m = builder.mutableModule();
+    require(classifyType(m, types.intType()) == ValueClass::Integer, "int is an integer class value");
+    require(classifyType(m, types.boolType()) == ValueClass::Integer, "bool is an integer class value");
+    require(classifyType(m, types.doubleType()) == ValueClass::Float, "double is a float class value");
+    require(classifyType(m, types.voidType()) == ValueClass::Void, "void has no value class");
+    require(classifyType(m, types.stringType()) == ValueClass::Reference, "string is a reference");
+    require(classifyType(m, types.listType(types.intType())) == ValueClass::Reference,
+            "collections are references");
+    require(classifyType(m, types.objectType("Point")) == ValueClass::Reference, "objects are references");
+    // Fails closed: a type the mapping does not understand must not become an
+    // integer, because an untracked reference in a register is undiagnosable.
+    require(classifyType(m, types.unknownType()) == ValueClass::Reference,
+            "unknown types classify conservatively as references");
+}
+
+// int add(int a, int b) { return a + b }
+Module buildIntArith() {
+    ModuleBuilder builder("arith");
+    const auto intType = builder.types().intType();
+    auto fn = builder.addFunction("add");
+    const auto a = fn.addParameter("a", intType);
+    const auto b = fn.addParameter("b", intType);
+    fn.setReturnType(intType);
+    const auto entry = fn.addBlock();
+    fn.setCurrentBlock(entry);
+    const auto sum = fn.emitBinary(Opcode::Add, fn.parameterOperand(a), fn.parameterOperand(b), intType);
+    fn.emitReturn(Operand::temp(sum, intType));
+    return builder.take();
+}
+
+// double scale(double x) { return x * 2.5 - 1.0 }
+Module buildFloatArith() {
+    ModuleBuilder builder("farith");
+    const auto d = builder.types().doubleType();
+    const auto k25 = builder.constantDouble(2.5);
+    const auto k1 = builder.constantDouble(1.0);
+    auto fn = builder.addFunction("scale");
+    const auto x = fn.addParameter("x", d);
+    fn.setReturnType(d);
+    const auto entry = fn.addBlock();
+    fn.setCurrentBlock(entry);
+    const auto product = fn.emitBinary(Opcode::Mul, fn.parameterOperand(x), Operand::constant(k25, d), d);
+    const auto diff = fn.emitBinary(Opcode::Sub, Operand::temp(product, d), Operand::constant(k1, d), d);
+    fn.emitReturn(Operand::temp(diff, d));
+    return builder.take();
+}
+
+// int classify(int n) { if (n < 0) return -1 else return 1 }
+Module buildBranch() {
+    ModuleBuilder builder("branch");
+    const auto intType = builder.types().intType();
+    const auto boolType = builder.types().boolType();
+    const auto zero = builder.constantInt(0);
+    const auto minusOne = builder.constantInt(-1);
+    const auto one = builder.constantInt(1);
+    auto fn = builder.addFunction("classify");
+    const auto n = fn.addParameter("n", intType);
+    fn.setReturnType(intType);
+    const auto entry = fn.addBlock();
+    const auto negative = fn.addBlock();
+    const auto positive = fn.addBlock();
+    fn.setCurrentBlock(entry);
+    const auto cmp = fn.emitBinary(Opcode::Lt, fn.parameterOperand(n), Operand::constant(zero, intType), boolType);
+    fn.emitBranch(Operand::temp(cmp, boolType), negative, positive);
+    fn.setCurrentBlock(negative);
+    fn.emitReturn(Operand::constant(minusOne, intType));
+    fn.setCurrentBlock(positive);
+    fn.emitReturn(Operand::constant(one, intType));
+    fn.finish();
+    return builder.take();
+}
+
+// int sumTo(int n) { var acc = 0; var i = 1; while (i <= n) { acc = acc + i; i = i + 1 }; return acc }
+// A loop through mutable slots: the memory form of SSA the backend must handle.
+Module buildLoop() {
+    ModuleBuilder builder("loop");
+    const auto intType = builder.types().intType();
+    const auto boolType = builder.types().boolType();
+    const auto zero = builder.constantInt(0);
+    const auto one = builder.constantInt(1);
+    auto fn = builder.addFunction("sumTo");
+    const auto n = fn.addParameter("n", intType);
+    fn.setReturnType(intType);
+    const auto acc = fn.addSlot("acc", intType);
+    const auto i = fn.addSlot("i", intType);
+
+    const auto entry = fn.addBlock();
+    const auto header = fn.addBlock();
+    const auto body = fn.addBlock();
+    const auto exit = fn.addBlock();
+
+    fn.setCurrentBlock(entry);
+    fn.emitStore(acc, Operand::constant(zero, intType));
+    fn.emitStore(i, Operand::constant(one, intType));
+    fn.emitJump(header);
+
+    fn.setCurrentBlock(header);
+    const auto iv = fn.emitLoad(i);
+    const auto cond = fn.emitBinary(Opcode::Le, Operand::temp(iv, intType), fn.parameterOperand(n), boolType);
+    fn.emitBranch(Operand::temp(cond, boolType), body, exit);
+
+    fn.setCurrentBlock(body);
+    const auto accv = fn.emitLoad(acc);
+    const auto iv2 = fn.emitLoad(i);
+    const auto next = fn.emitBinary(Opcode::Add, Operand::temp(accv, intType), Operand::temp(iv2, intType), intType);
+    fn.emitStore(acc, Operand::temp(next, intType));
+    const auto inc = fn.emitBinary(Opcode::Add, Operand::temp(iv2, intType), Operand::constant(one, intType), intType);
+    fn.emitStore(i, Operand::temp(inc, intType));
+    fn.emitJump(header);
+
+    fn.setCurrentBlock(exit);
+    const auto out = fn.emitLoad(acc);
+    fn.emitReturn(Operand::temp(out, intType));
+    fn.finish();
+    return builder.take();
+}
+
+// int callee(int x) { return x * 3 }
+// int caller(int x) { return callee(x) + 1 }
+Module buildCall() {
+    ModuleBuilder builder("call");
+    const auto intType = builder.types().intType();
+    const auto three = builder.constantInt(3);
+    const auto one = builder.constantInt(1);
+
+    const FunctionId calleeId = [&] {
+        auto fn = builder.addFunction("callee");
+        const auto x = fn.addParameter("x", intType);
+        fn.setReturnType(intType);
+        const auto entry = fn.addBlock();
+        fn.setCurrentBlock(entry);
+        const auto product = fn.emitBinary(Opcode::Mul, fn.parameterOperand(x), Operand::constant(three, intType), intType);
+        fn.emitReturn(Operand::temp(product, intType));
+        return fn.function().id;
+    }();
+
+    auto caller = builder.addFunction("caller");
+    const auto x = caller.addParameter("x", intType);
+    caller.setReturnType(intType);
+    const auto entry = caller.addBlock();
+    caller.setCurrentBlock(entry);
+    const auto call = caller.emitCall(calleeId, {caller.parameterOperand(x)}, intType);
+    const auto sum = caller.emitBinary(Opcode::Add, Operand::temp(call, intType), Operand::constant(one, intType), intType);
+    caller.emitReturn(Operand::temp(sum, intType));
+    return builder.take();
+}
+
+// string greet() { return "hi" } - outside the subset, must be refused by name.
+Module buildStringFunction() {
+    ModuleBuilder builder("strings");
+    const auto stringType = builder.types().stringType();
+    const auto hi = builder.constantString("hi");
+    auto fn = builder.addFunction("greet");
+    fn.setReturnType(stringType);
+    const auto entry = fn.addBlock();
+    fn.setCurrentBlock(entry);
+    fn.emitReturn(Operand::constant(hi, stringType));
+    return builder.take();
+}
+
+void testSelectionSubset() {
+    {
+        auto result = compile(buildIntArith());
+        require(result.ok(), "integer arithmetic compiles: " + result.error);
+        require(lowered(result, "add"), "add is in the native subset");
+        require(result.lir.functions.size() == 1, "one native function");
+        const auto& fn = result.lir.functions.front();
+        require(fn.returnClass == ValueClass::Integer, "add returns an integer-class value");
+        require(fn.parameterClasses.size() == 2, "add takes two parameters");
+        require(fn.vregs[fn.parameters[0]].fixed.has_value(),
+                "a parameter is constrained to its ABI register at selection time");
+    }
+    {
+        auto result = compile(buildStringFunction());
+        require(result.ok(), "a module with an unsupported function is not an error");
+        require(rejected(result, "greet"), "a string-returning function is refused, not guessed at");
+        require(result.lir.functions.empty(), "nothing was lowered for it");
+        require(!result.vmFunctions.front().reason.empty(), "the refusal states a reason");
+    }
+    {
+        // A caller of a refused function must itself be refused: there is no
+        // native body to call.
+        ModuleBuilder builder("mixed");
+        const auto intType = builder.types().intType();
+        const auto stringType = builder.types().stringType();
+        const FunctionId refusedId = [&] {
+            auto fn = builder.addFunction("stringy");
+            fn.setReturnType(stringType);
+            const auto entry = fn.addBlock();
+            fn.setCurrentBlock(entry);
+            fn.emitReturn(Operand::constant(builder.constantString("x"), stringType));
+            return fn.function().id;
+        }();
+        (void)refusedId;
+        const FunctionId ok = [&] {
+            auto fn = builder.addFunction("plain");
+            fn.setReturnType(intType);
+            const auto entry = fn.addBlock();
+            fn.setCurrentBlock(entry);
+            fn.emitReturn(Operand::constant(builder.constantInt(7), intType));
+            return fn.function().id;
+        }();
+        auto caller = builder.addFunction("usesPlain");
+        caller.setReturnType(intType);
+        const auto entry = caller.addBlock();
+        caller.setCurrentBlock(entry);
+        const auto call = caller.emitCall(ok, {}, intType);
+        caller.emitReturn(Operand::temp(call, intType));
+
+        auto result = compile(builder.take());
+        require(lowered(result, "plain") && lowered(result, "usesPlain"),
+                "a call to a natively-compiled function stays native");
+        require(rejected(result, "stringy"), "the unsupported function is still refused");
+    }
+}
+
+void testUnverifiedMirIsRefused() {
+    // A module the verifier rejects must not be compiled: the backend's
+    // licence to assume the invariants is only sound if something checks.
+    Module broken = buildIntArith();
+    broken.functions[0].blocks[0].terminator.kind = TerminatorKind::None;
+    auto result = compileMirToNative(broken, hostTarget());
+    require(!result.ok(), "the native backend refuses MIR that does not verify");
+    require(result.error.find("did not verify") != std::string::npos,
+            "the refusal says the MIR did not verify");
+}
+
+#if ZL_NATIVE_CAN_EXECUTE
+template <typename Fn>
+Fn* entryPoint(const ExecutableBuffer& buffer, const std::string& name) {
+    return reinterpret_cast<Fn*>(buffer.entry(name));
+}
+
+void testExecution() {
+    if (!hostTarget().encoderAvailable()) {
+        std::cerr << "note: host has no native encoder; execution cases skipped\n";
+        return;
+    }
+    {
+        auto result = compile(buildIntArith());
+        require(result.ok() && !result.code.empty(), "integer arithmetic emitted code");
+        ExecutableBuffer buffer(result.code);
+        require(buffer.ok(), "executable mapping succeeded");
+        if (buffer.ok()) {
+            auto* add = entryPoint<std::int64_t(std::int64_t, std::int64_t)>(buffer, "add");
+            require(add != nullptr && add(2, 40) == 42, "add(2, 40) == 42");
+            require(add(-5, 5) == 0, "add(-5, 5) == 0");
+        }
+    }
+    {
+        auto result = compile(buildFloatArith());
+        require(result.ok() && !result.code.empty(), "float arithmetic emitted code: " + result.error);
+        ExecutableBuffer buffer(result.code);
+        if (buffer.ok()) {
+            auto* scale = entryPoint<double(double)>(buffer, "scale");
+            require(scale != nullptr && std::fabs(scale(4.0) - 9.0) < 1e-12, "scale(4.0) == 9.0");
+            require(std::fabs(scale(0.0) + 1.0) < 1e-12, "scale(0.0) == -1.0");
+        }
+    }
+    {
+        auto result = compile(buildBranch());
+        require(result.ok() && !result.code.empty(), "branching emitted code: " + result.error);
+        ExecutableBuffer buffer(result.code);
+        if (buffer.ok()) {
+            auto* classify = entryPoint<std::int64_t(std::int64_t)>(buffer, "classify");
+            require(classify != nullptr && classify(-9) == -1, "classify(-9) == -1");
+            require(classify(0) == 1, "classify(0) == 1");
+            require(classify(17) == 1, "classify(17) == 1");
+        }
+    }
+    {
+        auto result = compile(buildLoop());
+        require(result.ok() && !result.code.empty(), "the loop emitted code: " + result.error);
+        ExecutableBuffer buffer(result.code);
+        if (buffer.ok()) {
+            auto* sumTo = entryPoint<std::int64_t(std::int64_t)>(buffer, "sumTo");
+            require(sumTo != nullptr && sumTo(10) == 55, "sumTo(10) == 55");
+            require(sumTo(0) == 0, "sumTo(0) == 0 (loop body never runs)");
+            require(sumTo(100) == 5050, "sumTo(100) == 5050");
+        }
+    }
+    {
+        auto result = compile(buildCall());
+        require(result.ok() && result.code.size() == 2, "both functions emitted code: " + result.error);
+        ExecutableBuffer buffer(result.code);
+        if (buffer.ok()) {
+            auto* caller = entryPoint<std::int64_t(std::int64_t)>(buffer, "caller");
+            require(caller != nullptr && caller(5) == 16, "caller(5) == callee(5) + 1 == 16");
+        }
+    }
+}
+
+// Comparisons and division, each checked against the value the language means
+// rather than against the encoding the backend happened to pick.
+void testArithmeticEdges() {
+    if (!hostTarget().encoderAvailable()) return;
+
+    ModuleBuilder builder("edges");
+    const auto intType = builder.types().intType();
+    const auto boolType = builder.types().boolType();
+    const auto d = builder.types().doubleType();
+
+    auto addBinary = [&](const std::string& name, Opcode op, std::uint32_t operandType,
+                         std::uint32_t resultType) {
+        auto fn = builder.addFunction(name);
+        const auto a = fn.addParameter("a", operandType);
+        const auto b = fn.addParameter("b", operandType);
+        fn.setReturnType(resultType);
+        const auto entry = fn.addBlock();
+        fn.setCurrentBlock(entry);
+        const auto r = fn.emitBinary(op, fn.parameterOperand(a), fn.parameterOperand(b), resultType);
+        fn.emitReturn(Operand::temp(r, resultType));
+    };
+    addBinary("idiv", Opcode::Div, intType, intType);
+    addBinary("imod", Opcode::Mod, intType, intType);
+    addBinary("ilt", Opcode::Lt, intType, boolType);
+    addBinary("ige", Opcode::Ge, intType, boolType);
+    addBinary("flt", Opcode::Lt, d, boolType);
+    addBinary("feq", Opcode::Eq, d, boolType);
+    addBinary("fne", Opcode::Ne, d, boolType);
+
+    auto result = compile(builder.take());
+    require(result.ok() && result.code.size() == 7, "the arithmetic edge module compiled: " + result.error);
+    ExecutableBuffer buffer(result.code);
+    if (!buffer.ok()) return;
+
+    auto* idiv = entryPoint<std::int64_t(std::int64_t, std::int64_t)>(buffer, "idiv");
+    auto* imod = entryPoint<std::int64_t(std::int64_t, std::int64_t)>(buffer, "imod");
+    require(idiv(17, 5) == 3, "17 / 5 == 3 (truncating)");
+    require(idiv(-17, 5) == -3, "-17 / 5 == -3 (truncates toward zero)");
+    require(imod(17, 5) == 2, "17 % 5 == 2");
+    require(imod(-17, 5) == -2, "-17 % 5 == -2 (sign follows the dividend)");
+
+    auto* ilt = entryPoint<std::int64_t(std::int64_t, std::int64_t)>(buffer, "ilt");
+    auto* ige = entryPoint<std::int64_t(std::int64_t, std::int64_t)>(buffer, "ige");
+    require(ilt(1, 2) == 1 && ilt(2, 1) == 0 && ilt(2, 2) == 0, "signed < is correct");
+    require(ige(2, 2) == 1 && ige(1, 2) == 0, "signed >= is correct");
+    require(ilt(-1, 1) == 1, "signed < treats negatives as less than positives");
+
+    // NaN is the case an unsigned-flag comparison gets wrong, which is why it
+    // is tested rather than assumed.
+    auto* flt = entryPoint<std::int64_t(double, double)>(buffer, "flt");
+    auto* feq = entryPoint<std::int64_t(double, double)>(buffer, "feq");
+    auto* fne = entryPoint<std::int64_t(double, double)>(buffer, "fne");
+    const double nan = std::nan("");
+    require(flt(1.0, 2.0) == 1 && flt(2.0, 1.0) == 0, "double < is correct");
+    require(flt(nan, 1.0) == 0 && flt(1.0, nan) == 0, "an unordered comparison is false");
+    require(feq(1.0, 1.0) == 1 && feq(nan, nan) == 0, "NaN is not equal to itself");
+    require(fne(nan, nan) == 1, "NaN is unequal to itself");
+    require(feq(0.0, -0.0) == 1, "positive and negative zero compare equal");
+}
+#endif
+
+// --- the real front end ----------------------------------------------------
+//
+// The pipeline test that matters: real ZL source, the real lowerer, the real
+// verifier, then the native backend. It proves the backend consumes what the
+// language actually produces, and that unsupported programs degrade to a
+// refusal instead of a crash.
+Module lowerSource(const std::string& name, const std::string& source, bool& ok) {
+    namespace fs = std::filesystem;
+    const fs::path directory = fs::temp_directory_path() / ("zl_native_" + name);
+    fs::create_directories(directory);
+    const fs::path file = directory / (name + ".zl");
+    {
+        std::ofstream out(file);
+        out << source;
+    }
+    zl::ModuleLoader loader(file, std::vector<fs::path>{});
+    auto program = loader.load();
+    zl::TypeChecker checker;
+    checker.check(*program, /*requireMain=*/false);
+    auto lowered = lowerProgram(*program, checker);
+    const auto report = verifyModule(lowered.module);
+    ok = report.ok();
+    if (!ok) std::cerr << "lowering did not verify:\n" << report.describe();
+    return std::move(lowered.module);
+}
+
+void testEndToEnd() {
+    bool ok = false;
+    Module module = lowerSource("Calc", R"(
+class Calc {
+    static func triple(int n): int {
+        return n * 3
+    }
+    static func mix(double a, double b): double {
+        return a * b + 1.5
+    }
+    static func biggest(int a, int b): int {
+        if (a > b) {
+            return a
+        }
+        return b
+    }
+}
+)", ok);
+    require(ok, "the ZL fixture lowers to verified MIR");
+    if (!ok) return;
+
+    auto result = compileMirToNative(module, hostTarget());
+    require(result.ok(), "the native backend ran over real lowered MIR: " + result.error);
+    require(!result.nativeFunctions.empty(),
+            "at least one real ZL function reached the native tier; got:\n" + result.describe());
+    // Whatever it could not take must be named, never silently dropped.
+    require(result.nativeFunctions.size() + result.vmFunctions.size() == module.functions.size(),
+            "every function is accounted for as either native or VM");
+}
+
+void testUnsupportedProgramDegrades() {
+    bool ok = false;
+    Module module = lowerSource("Greeter", R"(
+class Greeter {
+    string name = "world"
+    func greet(): string {
+        return "hello " + this.name
+    }
+}
+)", ok);
+    require(ok, "the object fixture lowers to verified MIR");
+    if (!ok) return;
+
+    auto result = compileMirToNative(module, hostTarget());
+    require(result.ok(), "an unsupported program is a partial result, not an error");
+    require(result.nativeFunctions.empty() || !result.vmFunctions.empty(),
+            "string/object work is left to the VM");
+    for (const auto& rejection : result.vmFunctions)
+        require(!rejection.reason.empty(),
+                "every refusal names its reason (" + rejection.function + ")");
+}
+
+} // namespace
+
+int main() {
+    testTargetDescription();
+    testValueClasses();
+    testSelectionSubset();
+    testUnverifiedMirIsRefused();
+#if ZL_NATIVE_CAN_EXECUTE
+    testExecution();
+    testArithmeticEdges();
+#else
+    std::cerr << "note: executable memory unavailable on this platform; execution cases skipped\n";
+#endif
+    testEndToEnd();
+    testUnsupportedProgramDegrades();
+
+    if (failures != 0) {
+        std::cerr << failures << " native backend regression(s)\n";
+        return 1;
+    }
+    std::cout << "native backend tests passed\n";
+    return 0;
+}
