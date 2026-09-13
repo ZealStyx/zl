@@ -59,8 +59,11 @@ The portable path is plain CMake, on every platform:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
+cmake --build build --config Release --target zl-core
 ```
+
+`zl-core` is the default developer build: the toolchain only. Tests, benchmarks
+and examples are behind the `zl-tests` / `zl-full` aggregate targets.
 
 That produces both binaries: `zl_language` (the runtime) and `zlpkg` (the dependency manager).
 
@@ -68,14 +71,21 @@ Convenience wrappers are also provided:
 
 | Task | Linux / macOS | Windows |
 | --- | --- | --- |
-| Build | `cmake --build build` | `scripts\build.bat` |
+| Build (core toolchain) | `scripts/build.sh` | `scripts\build.bat` |
+| Build tests | `scripts/build.sh test` | `scripts\build.bat test` |
+| Build everything | `scripts/build.sh full` | `scripts\build.bat full` |
+| Clean | `scripts/build.sh clean` | `scripts\build.bat clean` |
 | Run a file | `scripts/zl <file.zl>` | `scripts\run.bat <file.zl>` |
 | Run examples | `scripts/run_examples.sh` | `scripts\run_examples.bat` |
 | Run + verify examples | `examples/run_all.sh` | `examples\run_all.bat` |
 | Run regressions | `scripts/run_regressions.sh` | `scripts\run_regressions.bat` |
 | Native compiler gate | `scripts/native_gate.sh` | `scripts\native_gate.ps1` |
 
-`scripts/build.bat` accepts `--debug`, `--clean`, `--target <name>`, and `--jobs <n>`.
+`scripts/build.sh` and `scripts\build.bat` are the same driver for their platform.
+Both take a mode - `core` (default), `test`, `full`, `clean`, `help` - plus
+`--debug`, `--target <name>`, `--jobs <n>`, `--ctest` and `--run [file]`.
+The default mode builds only the toolchain (3 binaries); it never pulls in
+tests, benchmarks or examples.
 
 ## Run a program
 

@@ -2130,9 +2130,9 @@ Module buildClosureValueModule() {
         const BlockId entry = fb.addBlock();
         fb.setCurrentBlock(entry);
         const TempId closure = fb.emitMakeClosure(runId, {}, closureType);
-        fb.emitTaskSpawn(Operand::temp(closure, closureType), types.taskType(types.intType()));
-        fb.emitSharedWithLock(fb.parameterOperand(cell), Operand::temp(closure, closureType), 0);
-        fb.emitThreadStart(Operand::temp(closure, closureType), types.objectType("Thread"));
+        (void)fb.emitTaskSpawn(Operand::temp(closure, closureType), types.taskType(types.intType()));
+        (void)fb.emitSharedWithLock(fb.parameterOperand(cell), Operand::temp(closure, closureType), 0);
+        (void)fb.emitThreadStart(Operand::temp(closure, closureType), types.objectType("Thread"));
         fb.emitReturn();
         fb.finish();
         mainId = fb.function().id;
@@ -2172,15 +2172,15 @@ Module buildUnprovenClosureValueModule() {
         const ParamId cell = fb.addParameter("cell", types.objectType("Shared"));
         const BlockId entry = fb.addBlock();
         fb.setCurrentBlock(entry);
-        fb.emitTaskSpawn(fb.parameterOperand(f), types.taskType(types.intType()));
-        fb.emitThreadStart(fb.parameterOperand(f), types.objectType("Thread"));
-        fb.emitMutexWithLock(fb.parameterOperand(cell), fb.parameterOperand(f), 0);
+        (void)fb.emitTaskSpawn(fb.parameterOperand(f), types.taskType(types.intType()));
+        (void)fb.emitThreadStart(fb.parameterOperand(f), types.objectType("Thread"));
+        (void)fb.emitMutexWithLock(fb.parameterOperand(cell), fb.parameterOperand(f), 0);
         // A multi-store slot: the value can be either parameter.
         const SlotId slot = fb.addSlot("s", closureType);
         fb.emitStore(slot, fb.parameterOperand(f));
         fb.emitStore(slot, fb.parameterOperand(g));
         const TempId loaded = fb.emitLoad(slot);
-        fb.emitCallIndirect(Operand::temp(loaded, closureType), {}, types.intType());
+        (void)fb.emitCallIndirect(Operand::temp(loaded, closureType), {}, types.intType());
         fb.emitReturn();
         fb.finish();
     }
@@ -2223,7 +2223,7 @@ void testReachabilitySlotWithoutStoresStaysOpen() {
         fb.setCurrentBlock(entry);
         const SlotId slot = fb.addSlot("s", closureType);
         const TempId loaded = fb.emitLoad(slot);
-        fb.emitCallIndirect(Operand::temp(loaded, closureType), {}, types.intType());
+        (void)fb.emitCallIndirect(Operand::temp(loaded, closureType), {}, types.intType());
         fb.emitReturn();
         fb.finish();
     }
@@ -2279,10 +2279,10 @@ Module buildLargeHierarchyModule() {
         layout.parent = (i == 0) ? "Base" : "C" + std::to_string(i);
         addMethod(name, "m");
     }
-    builder.addClassLayout("Base");
+    (void)builder.addClassLayout("Base");
     addMethod("Base", "m");
 
-    builder.addInterface("I0");
+    (void)builder.addInterface("I0");
     InterfaceInfo& i1 = builder.addInterface("I1");
     i1.bases = {"I0"};
     InterfaceInfo& i2 = builder.addInterface("I2");
@@ -2304,9 +2304,9 @@ Module buildLargeHierarchyModule() {
         const BlockId entry = fb.addBlock();
         fb.setCurrentBlock(entry);
         for (std::size_t s = 0; s < kSitesPerDispatcher; ++s) {
-            fb.emitInvokeMethod(fb.parameterOperand(receiver), "Base", "m", {}, types.stringType());
+            (void)fb.emitInvokeMethod(fb.parameterOperand(receiver), "Base", "m", {}, types.stringType());
         }
-        fb.emitInvokeMethod(fb.parameterOperand(receiver), "I0", "m2", {}, types.stringType());
+        (void)fb.emitInvokeMethod(fb.parameterOperand(receiver), "I0", "m2", {}, types.stringType());
         fb.emitReturn();
         fb.finish();
         if (d == 0) mainId = fb.function().id; // not the entry; main calls all of them
@@ -2320,7 +2320,7 @@ Module buildLargeHierarchyModule() {
         for (std::size_t d = 0; d < kDispatchers; ++d) {
             const FunctionId dispatcher =
                 builder.findFunction("Dispatcher" + std::to_string(d) + ".dispatch()");
-            fb.emitCall(dispatcher, {}, 0);
+            (void)fb.emitCall(dispatcher, {}, 0);
         }
         fb.emitReturn();
         fb.finish();
