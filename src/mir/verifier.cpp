@@ -69,29 +69,33 @@ zl::ZlType toZlType(const Type* type) {
     return zl::ZlType::UNKNOWN;
 }
 
-zl::TokenType binaryToken(Opcode opcode) {
+// MIR opcodes onto the shared operator names: the table the verifier consults
+// is the same table the type checker uses, keyed by Operator rather than by a
+// lexer token so the verifier (a backend-visible MIR component) never needs
+// the lexer.
+zl::Operator binaryOperator(Opcode opcode) {
     switch (opcode) {
-        case Opcode::Add: return zl::TokenType::PLUS;
-        case Opcode::Sub: return zl::TokenType::MINUS;
-        case Opcode::Mul: return zl::TokenType::STAR;
-        case Opcode::Div: return zl::TokenType::SLASH;
-        case Opcode::Mod: return zl::TokenType::PERCENT;
-        case Opcode::Pow: return zl::TokenType::POW;
-        case Opcode::BitAnd: return zl::TokenType::BIT_AND;
-        case Opcode::BitOr: return zl::TokenType::BIT_OR;
-        case Opcode::BitXor: return zl::TokenType::BIT_XOR;
-        case Opcode::Shl: return zl::TokenType::SHL;
-        case Opcode::Shr: return zl::TokenType::SHR;
-        case Opcode::Ushr: return zl::TokenType::USHR;
-        case Opcode::Eq: return zl::TokenType::EQ;
-        case Opcode::Ne: return zl::TokenType::NEQ;
-        case Opcode::Lt: return zl::TokenType::LT;
-        case Opcode::Le: return zl::TokenType::LTE;
-        case Opcode::Gt: return zl::TokenType::GT;
-        case Opcode::Ge: return zl::TokenType::GTE;
-        case Opcode::And: return zl::TokenType::AND;
-        case Opcode::Or: return zl::TokenType::OR;
-        default: return zl::TokenType::UNKNOWN;
+        case Opcode::Add: return zl::Operator::Plus;
+        case Opcode::Sub: return zl::Operator::Minus;
+        case Opcode::Mul: return zl::Operator::Multiply;
+        case Opcode::Div: return zl::Operator::Divide;
+        case Opcode::Mod: return zl::Operator::Modulo;
+        case Opcode::Pow: return zl::Operator::Power;
+        case Opcode::BitAnd: return zl::Operator::BitAnd;
+        case Opcode::BitOr: return zl::Operator::BitOr;
+        case Opcode::BitXor: return zl::Operator::BitXor;
+        case Opcode::Shl: return zl::Operator::ShiftLeft;
+        case Opcode::Shr: return zl::Operator::ShiftRight;
+        case Opcode::Ushr: return zl::Operator::ShiftRightZero;
+        case Opcode::Eq: return zl::Operator::Equal;
+        case Opcode::Ne: return zl::Operator::NotEqual;
+        case Opcode::Lt: return zl::Operator::Less;
+        case Opcode::Le: return zl::Operator::LessEqual;
+        case Opcode::Gt: return zl::Operator::Greater;
+        case Opcode::Ge: return zl::Operator::GreaterEqual;
+        case Opcode::And: return zl::Operator::LogicalAnd;
+        case Opcode::Or: return zl::Operator::LogicalOr;
+        default: return zl::Operator::Unknown;
     }
 }
 
@@ -347,16 +351,24 @@ private:
         // arena can see through a union to its members.
         if (from->kind == TypeKind::Nil) return module_.types.isNullable(toId);
         if (from->kind == TypeKind::Int && to->kind == TypeKind::Double) return true;
+        // Mirror TypeChecker::isAssignable's union order exactly: a from-union
+        // is a *set* of values, so every member must land in `to` (which, when
+        // `to` is itself a union, means any member of it - `int|string`
+        // satisfies `bool|int|string` because `int` satisfies `int` and
+        // `string` satisfies `string`); a non-union `from` needs only one
+        // member of a union `to` to satisfy. Checking the to-union arm first
+        // would demand the whole from-union fit inside a single to-member and
+        // reject that legal widening.
+        if (from->kind == TypeKind::Union) {
+            return std::all_of(from->arguments.begin(), from->arguments.end(),
+                               [&](std::uint32_t member) { return assignable(member, toId); });
+        }
         if (to->kind == TypeKind::Union) {
             // A member of the union, by identity or by assignability to one -
             // `Some<int>` satisfies `Option<int>|nil` because it satisfies the
             // `Option<int>` member.
             return std::any_of(to->arguments.begin(), to->arguments.end(),
                                [&](std::uint32_t member) { return assignable(fromId, member); });
-        }
-        if (from->kind == TypeKind::Union) {
-            return std::all_of(from->arguments.begin(), from->arguments.end(),
-                               [&](std::uint32_t member) { return assignable(member, toId); });
         }
         // The builtin sums relate across their spellings: `Some<int>` is
         // assignable to `Option<int>`, `Ok<int,string>` to `Result<int,string>`,
@@ -478,8 +490,16 @@ private:
     // silent disappearance this layer exists to prevent. Unknown and TypeParam
     // destinations stay permissive (nothing was assumed), and so do
     // unresolvable shapes the verifier cannot name.
+    //
+    // Call arguments are the one boundary the caller does not refine: the
+    // callee's call frame asserts every argument against the declared
+    // parameter types in one transaction (committing the contracts the
+    // successful checks pin only when the whole batch passes, so a failed
+    // batch leaves its arguments unbound), and that frame runs on every ZL
+    // call path - direct, method, super, constructor, and closure.
     void requireRefined(const Operand& value, std::uint32_t targetId, const std::string& what,
-                        BlockId block, long index, SourceLocation loc) {
+                        BlockId block, long index, SourceLocation loc, bool calleeFrameChecks = false) {
+        if (calleeFrameChecks) return;
         if (value.isNone()) return;
         const Type* from = typeOf(value.type);
         const Type* to = typeOf(targetId);
@@ -1281,8 +1301,9 @@ private:
                 if (instruction.operands.empty()) break;
                 const Operand& value = instruction.operands[0];
                 if (value.isNone()) break;
-                if (!assignable(value.type, slot.type)) {
-                    error("store of " + render(value.type) + " into " + slotName + " of type " +
+                const std::uint32_t valueType = refinedTypeAt(id, value);
+                if (!assignable(valueType, slot.type)) {
+                    error("store of " + render(valueType) + " into " + slotName + " of type " +
                           render(slot.type), id, index, loc);
                 }
                 requireRefined(value, slot.type, "store into " + slotName, id, index, loc);
@@ -1324,6 +1345,85 @@ private:
             default:
                 break;
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Type refinement at a match-arm entry
+    // -----------------------------------------------------------------------
+    //
+    // A `type_test as T, x` followed by `branch` splits the value space: on
+    // the yes side `x` is known to be a member assignable to `T`, on the no
+    // side it is known not to be one. The lowerer expresses match arms in
+    // exactly this shape - test, branch, and (for arms whose pattern does not
+    // bind the subject to a refined temp, like a bare variable or a data
+    // pattern's subject) an arm body that still uses the original subject,
+    // sometimes behind a jump chain. The subject's operand carries its
+    // *declared* type, so without this pass the verifier would reject the
+    // very narrowing the type checker applied to the arm body.
+    //
+    // The rule below is deliberately the weakest one that covers that shape:
+    // follow the queried block's single-predecessor chain back to the test's
+    // branch. Any merge point (two or more normal predecessors), any non-jump
+    // block short of a test branch, or a branch whose condition is not a
+    // `type_test` of exactly this operand in that block yields the declared
+    // type. The refinement can only ever narrow a union to one of its own
+    // members - it never invents a type - so it can only recover a check the
+    // front end already ran, never hide an invalid module.
+    std::uint32_t refinedTypeAt(BlockId block, const Operand& operand) const {
+        const TypeId declared = operand.type;
+        if (operand.kind != OperandKind::Temp && operand.kind != OperandKind::Param &&
+            operand.kind != OperandKind::BlockParam) {
+            return declared;
+        }
+        const Type* declaredType = typeOf(declared);
+        if (!declaredType || declaredType->kind != TypeKind::Union) return declared;
+
+        BlockId current = block;
+        for (int steps = 0; steps < 128; ++steps) {
+            const std::vector<BlockId>& preds = cfg_.predecessors(current);
+            if (preds.size() != 1) return declared;
+            const BlockId pred = preds.front();
+            if (!cfg_.isValid(pred)) return declared;
+            const BasicBlock& predBlock = function_.blocks[cfg_.indexOf(pred)];
+            const Terminator& term = predBlock.terminator;
+            if (term.kind == TerminatorKind::Jump) {
+                current = pred;
+                continue;
+            }
+            if (term.kind != TerminatorKind::Branch) return declared;
+            // A branch to the same block on both sides carries no information
+            // about which way this edge came from.
+            if (term.target == term.elseBlock) return declared;
+            const bool isYes = term.target == current;
+            if (!isYes && term.elseBlock != current) return declared;
+            if (term.value.kind != OperandKind::Temp || term.value.isNone()) return declared;
+            const auto def = definitions_.find(term.value.index);
+            if (def == definitions_.end() || def->second.block != pred) return declared;
+            const Instruction& test = predBlock.instructions[static_cast<std::size_t>(def->second.index)];
+            if (test.opcode != Opcode::TypeTest || test.operands.empty()) return declared;
+            const Operand& subject = test.operands[0];
+            if (subject.kind != operand.kind || subject.index != operand.index) return declared;
+            return refineUnionToTestedMember(declared, test.testedType, isYes);
+        }
+        return declared;
+    }
+
+    // The members a test outcome leaves: the yes arm keeps the declared
+    // members assignable to the tested type, the no arm the rest. Only a
+    // single-member remainder is a refinement; anything else - including an
+    // impossible outcome, whose arm is dead code - keeps the declared type.
+    std::uint32_t refineUnionToTestedMember(TypeId declaredId, TypeId testedId, bool isYes) const {
+        const Type* declared = typeOf(declaredId);
+        const Type* tested = typeOf(testedId);
+        if (!declared || declared->kind != TypeKind::Union || !tested) return declaredId;
+        std::uint32_t kept = 0;
+        for (const TypeId member : declared->arguments) {
+            if (assignable(member, testedId) == isYes) {
+                if (kept != 0) return declaredId;
+                kept = member;
+            }
+        }
+        return kept;
     }
 
     void checkValueRules(const BasicBlock& block, const Instruction& instruction, long index) {
@@ -1368,7 +1468,15 @@ private:
                           render(instruction.resultType), id, index, loc);
                 }
                 if (instruction.resultType == operandType(0)) {
-                    warn("refine to the same type is a no-op", id, index, loc);
+                    // A same-type refine on a raw collection is not a no-op: it
+                    // pins the container's storage contract (the assert
+                    // descends into the elements and commits their contracts),
+                    // which is how a literal's declared element type is
+                    // enforced on later writes. Non-collection values have no
+                    // storage contract, so there the same-type assert is inert.
+                    const Type* refined = typeOf(instruction.resultType);
+                    if (!refined || !isCollectionType(*refined))
+                        warn("refine to the same type is a no-op", id, index, loc);
                 }
                 break;
             }
@@ -1586,7 +1694,7 @@ private:
             case Opcode::NewCollection: {
                 const Type* result = typeOf(instruction.resultType);
                 if (!result || !isCollectionType(*result)) {
-                    error("new_collection must produce list/set/map but produces " +
+                    error("new_collection must produce list/set/map/array but produces " +
                           render(instruction.resultType), id, index, loc);
                 }
                 break;
@@ -1641,8 +1749,8 @@ private:
         const Opcode opcode = instruction.opcode;
         const char* name = opcodeName(opcode);
         const SourceLocation& loc = instruction.location;
-        const std::uint32_t leftId = instruction.operands[0].type;
-        const std::uint32_t rightId = instruction.operands[1].type;
+        const std::uint32_t leftId = refinedTypeAt(id, instruction.operands[0]);
+        const std::uint32_t rightId = refinedTypeAt(id, instruction.operands[1]);
         const Type* left = typeOf(leftId);
         const Type* right = typeOf(rightId);
         if (!left || !right) return;
@@ -1661,10 +1769,10 @@ private:
         if (dynamic(leftId) || dynamic(rightId)) {
             return;
         }
-        const auto result = zl::OperatorRules::binaryResult(binaryToken(opcode), toZlType(left), toZlType(right));
+        const auto result = zl::OperatorRules::binaryResult(binaryOperator(opcode), toZlType(left), toZlType(right));
         if (!result) {
             error(std::string(name) + " on " + render(leftId) + " and " + render(rightId) + ": " +
-                  zl::OperatorRules::binaryError(binaryToken(opcode)), id, index, loc);
+                  zl::OperatorRules::binaryError(binaryOperator(opcode)), id, index, loc);
             return;
         }
         if (opcode == Opcode::And || opcode == Opcode::Or) {
@@ -1686,16 +1794,16 @@ private:
         const Opcode opcode = instruction.opcode;
         const char* name = opcodeName(opcode);
         const SourceLocation& loc = instruction.location;
-        const std::uint32_t operandId = instruction.operands[0].type;
+        const std::uint32_t operandId = refinedTypeAt(id, instruction.operands[0]);
         const Type* operand = typeOf(operandId);
         if (!operand) return;
 
-        const zl::TokenType token = opcode == Opcode::Neg    ? zl::TokenType::MINUS
-                                    : opcode == Opcode::BitNot ? zl::TokenType::BIT_NOT
-                                                               : zl::TokenType::NOT;
-        const auto result = zl::OperatorRules::unaryResult(token, toZlType(operand));
+        const zl::Operator op = opcode == Opcode::Neg    ? zl::Operator::Minus
+                                 : opcode == Opcode::BitNot ? zl::Operator::BitNot
+                                                            : zl::Operator::Not;
+        const auto result = zl::OperatorRules::unaryResult(op, toZlType(operand));
         if (!result) {
-            error(std::string(name) + " on " + render(operandId) + ": " + zl::OperatorRules::unaryError(token),
+            error(std::string(name) + " on " + render(operandId) + ": " + zl::OperatorRules::unaryError(op),
                   id, index, loc);
             return;
         }
@@ -1712,8 +1820,8 @@ private:
         const Opcode opcode = instruction.opcode;
         const char* name = opcodeName(opcode);
         const SourceLocation& loc = instruction.location;
-        const std::uint32_t leftId = instruction.operands[0].type;
-        const std::uint32_t rightId = instruction.operands[1].type;
+        const std::uint32_t leftId = refinedTypeAt(id, instruction.operands[0]);
+        const std::uint32_t rightId = refinedTypeAt(id, instruction.operands[1]);
         const Type* left = typeOf(leftId);
         const Type* right = typeOf(rightId);
         if (!left || !right) return;
@@ -1750,10 +1858,10 @@ private:
                 return; // dynamic boundary: see checkBinaryOperator
             }
         }
-        const auto result = zl::OperatorRules::binaryResult(binaryToken(opcode), toZlType(left), toZlType(right));
+        const auto result = zl::OperatorRules::binaryResult(binaryOperator(opcode), toZlType(left), toZlType(right));
         if (!result) {
             error(std::string(name) + " on " + render(leftId) + " and " + render(rightId) + ": " +
-                  zl::OperatorRules::binaryError(binaryToken(opcode)), id, index, loc);
+                  zl::OperatorRules::binaryError(binaryOperator(opcode)), id, index, loc);
         }
     }
 
@@ -1782,7 +1890,10 @@ private:
         const char* name = opcodeName(opcode);
         const SourceLocation& loc = instruction.location;
         const Operand& base = instruction.operands[0];
-        const Type* baseType = typeOf(base.type);
+        // A data-pattern arm (`Packet { code: n }`) has already proven the
+        // subject is `Packet`; the field exists on that member even though
+        // the subject's declared type is the union.
+        const Type* baseType = typeOf(refinedTypeAt(id, base));
 
         if (instruction.name.empty()) {
             error(std::string(name) + " has no field name", id, index, loc);
@@ -2097,16 +2208,20 @@ private:
                 }
                 for (std::size_t i = 0; i < callee->parameters.size(); ++i) {
                     const Operand& argument = operands[i + receiverCount];
+                    // A match arm knows more about its subject than the
+                    // subject's declared type says; check the value as it is
+                    // here, not as it is everywhere.
+                    const std::uint32_t argumentType = refinedTypeAt(id, argument);
                     const std::uint32_t parameterType = instantiate(callee->parameters[i].type, *callee, instruction);
-                    if (!assignable(argument.type, parameterType)) {
+                    if (!assignable(argumentType, parameterType)) {
                         error(std::string(name) + " of '" + callee->name + "' argument " + std::to_string(i) +
-                              " ('" + callee->parameters[i].name + "') passes " + render(argument.type) +
+                              " ('" + callee->parameters[i].name + "') passes " + render(argumentType) +
                               " but the parameter is " + render(parameterType), id, index, loc);
                     }
                     requireRefined(argument, parameterType,
                                    std::string(name) + " of '" + callee->name + "' argument " +
                                        std::to_string(i) + " ('" + callee->parameters[i].name + "')",
-                                   id, index, loc);
+                                   id, index, loc, /*calleeFrameChecks=*/true);
                 }
                 // Calling an async function hands back the Task, not the payload.
                 expectedResult = callee->isAsync ? module_.types.taskType(callee->returnType) : callee->returnType;
@@ -2146,7 +2261,9 @@ private:
             }
             case Opcode::CallIndirect: {
                 const Operand& callee = operands[0];
-                const Type* calleeType = typeOf(callee.type);
+                // A function-union match arm has already selected the func
+                // member; the call is through that member, not the union.
+                const Type* calleeType = typeOf(refinedTypeAt(id, callee));
                 if (!calleeType) return;
                 if (calleeType->kind != TypeKind::Function) {
                     error("call_indirect through " + render(callee.type) + ", which is not callable",
@@ -2173,13 +2290,15 @@ private:
                 }
                 for (std::size_t i = 0; i < signature.parameterTypes.size(); ++i) {
                     const Operand& argument = operands[i + 1];
-                    if (!assignable(argument.type, signature.parameterTypes[i])) {
-                        error("call_indirect argument " + std::to_string(i) + " passes " + render(argument.type) +
+                    const std::uint32_t argumentType = refinedTypeAt(id, argument);
+                    if (!assignable(argumentType, signature.parameterTypes[i])) {
+                        error("call_indirect argument " + std::to_string(i) + " passes " + render(argumentType) +
                               " but the callable expects " + render(signature.parameterTypes[i]),
                               id, index, loc);
                     }
                     requireRefined(argument, signature.parameterTypes[i],
-                                   "call_indirect argument " + std::to_string(i), id, index, loc);
+                                   "call_indirect argument " + std::to_string(i), id, index, loc,
+                                   /*calleeFrameChecks=*/true);
                 }
                 expectedResult = signature.isAsync ? module_.types.taskType(signature.returnType)
                                                    : signature.returnType;

@@ -2,7 +2,7 @@
 #include "zl/compiler/operator_rules.hpp"
 #include "zl/compiler/generic_instantiation.hpp"
 #include "zl/compiler/thread_capture.hpp"
-#include "zl/common/type_annotation.hpp"
+#include "zl/parser/type_annotation.hpp"
 
 #include <functional>
 #include <algorithm>
@@ -3494,6 +3494,39 @@ TypeChecker::InferredType TypeChecker::inferAwait(const AwaitExpr* node) {
     return result;
 }
 
+
+// The front end's view of the shared operator table: its tokens are lexer
+// concerns, and this mapping is the single point where they become the
+// Operator names `zl::OperatorRules` is keyed by. Keeping the table itself
+// free of lexer types is what lets a backend (the MIR verifier) consult it.
+[[nodiscard]] zl::Operator operatorFromToken(TokenType token) {
+    switch (token) {
+        case TokenType::PLUS: return zl::Operator::Plus;
+        case TokenType::MINUS: return zl::Operator::Minus;
+        case TokenType::STAR: return zl::Operator::Multiply;
+        case TokenType::SLASH: return zl::Operator::Divide;
+        case TokenType::PERCENT: return zl::Operator::Modulo;
+        case TokenType::POW: return zl::Operator::Power;
+        case TokenType::BIT_AND: return zl::Operator::BitAnd;
+        case TokenType::BIT_OR: return zl::Operator::BitOr;
+        case TokenType::BIT_XOR: return zl::Operator::BitXor;
+        case TokenType::SHL: return zl::Operator::ShiftLeft;
+        case TokenType::SHR: return zl::Operator::ShiftRight;
+        case TokenType::USHR: return zl::Operator::ShiftRightZero;
+        case TokenType::EQ: return zl::Operator::Equal;
+        case TokenType::NEQ: return zl::Operator::NotEqual;
+        case TokenType::LT: return zl::Operator::Less;
+        case TokenType::GT: return zl::Operator::Greater;
+        case TokenType::LTE: return zl::Operator::LessEqual;
+        case TokenType::GTE: return zl::Operator::GreaterEqual;
+        case TokenType::NOT: return zl::Operator::Not;
+        case TokenType::BIT_NOT: return zl::Operator::BitNot;
+        case TokenType::AND: return zl::Operator::LogicalAnd;
+        case TokenType::OR: return zl::Operator::LogicalOr;
+        default: return zl::Operator::Unknown;
+    }
+}
+
 TypeChecker::InferredType TypeChecker::inferUnary(const UnaryExpr* node) {
     const auto operand = inferExpr(node->operand.get());
     ZlType operandType = operand.type;
@@ -3510,7 +3543,7 @@ TypeChecker::InferredType TypeChecker::inferUnary(const UnaryExpr* node) {
 
     // User-defined unary operators are dispatched on object receivers.
     if (operandType == ZlType::OBJECT && !operandClass.empty()) {
-        const std::string methodName = OperatorRules::methodName(node->op);
+        const std::string methodName = OperatorRules::methodName(operatorFromToken(node->op));
         std::vector<std::pair<std::string, ClassMethodInfo>> candidates;
         if (semanticModel_.hasInterface(operandClass)) {
             semanticModel_.resolveInterfaceMethods(operandClass);
@@ -3529,12 +3562,12 @@ TypeChecker::InferredType TypeChecker::inferUnary(const UnaryExpr* node) {
             node->resolvedOperatorDispatch = dispatchSignature(methodName, *method);
             return InferredType(method->returnType, method->returnClassName);
         }
-        typeError("class '" + operandClass + "' has no unary operator '" + OperatorRules::methodName(node->op) + "'", node->line);
+        typeError("class '" + operandClass + "' has no unary operator '" + OperatorRules::methodName(operatorFromToken(node->op)) + "'", node->line);
     }
 
-    if (const auto result = OperatorRules::unaryResult(node->op, operandType)) return *result;
+    if (const auto result = OperatorRules::unaryResult(operatorFromToken(node->op), operandType)) return *result;
     if (node->op == TokenType::NOT) return ZlType::BOOL;
-    typeError(OperatorRules::unaryError(node->op), node->line);
+    typeError(OperatorRules::unaryError(operatorFromToken(node->op)), node->line);
 
 }
 
@@ -3579,7 +3612,7 @@ TypeChecker::InferredType TypeChecker::inferBinary(const BinaryExpr* node) {
         if (current != nullptr) {
             auto constraintIt = current->typeParamInterfaceConstraints.find(leftClass);
             if (constraintIt != current->typeParamInterfaceConstraints.end()) {
-                const std::string methodName = OperatorRules::methodName(node->op);
+                const std::string methodName = OperatorRules::methodName(operatorFromToken(node->op));
                 std::vector<std::pair<std::string, ClassMethodInfo>> candidates;
                 for (const auto& ifaceName : constraintIt->second) {
                     semanticModel_.resolveInterfaceMethods(ifaceName);
@@ -3621,7 +3654,7 @@ TypeChecker::InferredType TypeChecker::inferBinary(const BinaryExpr* node) {
 
     // User-defined binary operators dispatch on the left-hand operand.
     if (left == ZlType::OBJECT && !leftClass.empty()) {
-        const std::string methodName = OperatorRules::methodName(node->op);
+        const std::string methodName = OperatorRules::methodName(operatorFromToken(node->op));
         std::vector<std::pair<std::string, ClassMethodInfo>> candidates;
         if (semanticModel_.hasInterface(leftClass)) {
             semanticModel_.resolveInterfaceMethods(leftClass);
@@ -3643,12 +3676,12 @@ TypeChecker::InferredType TypeChecker::inferBinary(const BinaryExpr* node) {
         // Preserve the existing structural equality behavior for objects, but
         // all other operators on objects must be explicitly declared.
         if (node->op != TokenType::EQ && node->op != TokenType::NEQ) {
-            typeError("class '" + leftClass + "' has no operator '" + OperatorRules::methodName(node->op) + "'", node->line);
+            typeError("class '" + leftClass + "' has no operator '" + OperatorRules::methodName(operatorFromToken(node->op)) + "'", node->line);
         }
     }
 
-    if (const auto result = OperatorRules::binaryResult(node->op, left, right)) return *result;
-    typeError(OperatorRules::binaryError(node->op), node->line);
+    if (const auto result = OperatorRules::binaryResult(operatorFromToken(node->op), left, right)) return *result;
+    typeError(OperatorRules::binaryError(operatorFromToken(node->op)), node->line);
 
 }
 

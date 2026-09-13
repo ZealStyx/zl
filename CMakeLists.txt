@@ -184,10 +184,12 @@ zl_add_optional_test(zl-mir-tests tests/mir_tests.cpp
     src/mir/function.cpp
     src/mir/instruction.cpp
     src/mir/printer.cpp
+    src/mir/reachability.cpp
     src/mir/type.cpp
     src/mir/verifier.cpp
     src/mir/safety.cpp
     src/compiler/operator_rules.cpp
+    src/compiler/native_catalog.cpp
     src/compiler/semantic_types.cpp
     src/common/type_name.cpp)
 
@@ -442,6 +444,10 @@ if(BUILD_TESTING)
     if(ZL_BASH)
         add_test(NAME boundary-lint COMMAND ${ZL_BASH}
             ${CMAKE_SOURCE_DIR}/tools/boundary_lint.sh ${CMAKE_SOURCE_DIR})
+        # The lint's own regressions: the rules must fail on the broken trees
+        # they exist for, with a diagnostic that names the file and line.
+        add_test(NAME boundary-lint-regressions COMMAND ${ZL_BASH}
+            ${CMAKE_SOURCE_DIR}/tests/boundary_lint_tests.sh ${CMAKE_SOURCE_DIR})
     endif()
 endif()
 if(BUILD_TESTING AND TARGET zl-mir-safety-tests)
@@ -451,5 +457,15 @@ if(BUILD_TESTING AND TARGET zl-mir-safety-tests)
         add_test(NAME safety-pipeline COMMAND ${ZL_SAFETY_PYTHON}
             ${CMAKE_SOURCE_DIR}/tests/safety_pipeline.py $<TARGET_FILE:zl_language>)
         set_tests_properties(safety-pipeline PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endif()
+endif()
+# The --pipeline-report CLI contract: a runnable program's pipeline, or a
+# precise refusal (library without an entry point, invalid entry point).
+if(BUILD_TESTING)
+    find_program(ZL_REPORT_PYTHON NAMES python3)
+    if(ZL_REPORT_PYTHON)
+        add_test(NAME pipeline-report COMMAND ${ZL_REPORT_PYTHON}
+            ${CMAKE_SOURCE_DIR}/tests/pipeline_report_cli.py $<TARGET_FILE:zl_language>)
+        set_tests_properties(pipeline-report PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endif()
 endif()
