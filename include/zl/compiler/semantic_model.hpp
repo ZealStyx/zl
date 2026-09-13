@@ -112,6 +112,7 @@ public:
     const InterfaceShapeInfo* resolveInterfaceMethods(const std::string& name);
 
     const ClassShapeInfo* findClass(const std::string& name) const;
+    ClassShapeInfo* findClass(const std::string& name);
     const InterfaceShapeInfo* findInterface(const std::string& name) const;
 
     void defineClass(ClassShapeInfo shape);

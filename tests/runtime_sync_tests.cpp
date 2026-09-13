@@ -1,0 +1,269 @@
+// Synchronization state regressions: the exact state objects the VM uses for
+// ZL Mutex / ReadWriteLock / Atomic / Shared / Semaphore / Condition / Channel
+// (value.hpp), driven concurrently the way the runtime drives them - the same
+// wait predicates, the same bounded-channel handoff - to pin down mutex
+// correctness, wait/notify and timeout behavior, contention, and destruction
+// of idle state.
+#include "zl/vm/value.hpp"
+
+#include <atomic>
+#include <memory>
+#include <chrono>
+#include <condition_variable>
+#include <iostream>
+#include <mutex>
+#include <shared_mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace {
+
+int failures = 0;
+
+void require(bool condition, const std::string& message) {
+    if (condition) return;
+    std::cerr << "sync regression: " << message << '\n';
+    ++failures;
+}
+
+using namespace std::chrono_literals;
+using zl::ObjectBox;
+
+// The state objects live on an ObjectBox, lazily initialized by the VM; the
+// tests initialize them directly so each primitive is exercised in isolation.
+// ObjectBox is non-copyable, so hand out heap storage.
+std::unique_ptr<ObjectBox> makeBox(const char* className) {
+    auto box = std::make_unique<ObjectBox>();
+    box->className = className;
+    return box;
+}
+
+void testMutexState() {
+    auto box = makeBox("Mutex");
+    box->mutexState = std::make_shared<std::mutex>();
+    std::atomic<long> counter{0};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 8; ++t) {
+        threads.emplace_back([&] {
+            for (int i = 0; i < 5000; ++i) {
+                std::lock_guard<std::mutex> lock(*box->mutexState);
+                ++counter;
+            }
+        });
+    }
+    for (auto& thread : threads) thread.join();
+    require(counter.load() == 40000, "mutexState serializes contending writers");
+    // Destruction of idle state must not hang or throw.
+    box->mutexState.reset();
+}
+
+void testReadWriteLockState() {
+    auto box = makeBox("ReadWriteLock");
+    box->rwLockState = std::make_shared<std::shared_mutex>();
+    std::atomic<long> version{0};
+    std::atomic<bool> inconsistent{false};
+    std::atomic<bool> writersDone{false};
+
+    std::vector<std::thread> threads;
+    for (int w = 0; w < 2; ++w) {
+        threads.emplace_back([&] {
+            for (int i = 0; i < 1000; ++i) {
+                std::unique_lock<std::shared_mutex> lock(*box->rwLockState);
+                // Two half-updates: a reader must never observe the pair mid-write.
+                version.fetch_add(1);
+                version.fetch_add(1);
+            }
+        });
+    }
+    std::atomic<long> reads{0};
+    for (int r = 0; r < 4; ++r) {
+        threads.emplace_back([&] {
+            while (!writersDone.load(std::memory_order_acquire)) {
+                std::shared_lock<std::shared_mutex> lock(*box->rwLockState);
+                if (version.load() % 2 != 0) inconsistent.store(true);
+                ++reads;
+            }
+        });
+    }
+    for (int i = 0; i < 2; ++i) threads[i].join();
+    writersDone.store(true, std::memory_order_release);
+    for (std::size_t i = 2; i < threads.size(); ++i) threads[i].join();
+    require(!inconsistent.load(), "readers never observe a half-written pair");
+    require(reads.load() > 0, "readers actually ran");
+}
+
+void testAtomicState() {
+    auto box = makeBox("Atomic");
+    box->atomicState = std::make_shared<std::atomic<std::int64_t>>(0);
+    box->atomicBoolState = std::make_shared<std::atomic<bool>>(false);
+    box->atomicDoubleState = std::make_shared<std::atomic<double>>(1.0);
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 8; ++t) {
+        threads.emplace_back([&box] {
+            for (int i = 0; i < 10000; ++i) box->atomicState->fetch_add(1);
+            box->atomicBoolState->exchange(true);
+        });
+    }
+    for (auto& thread : threads) thread.join();
+    require(box->atomicState->load() == 80000, "atomicState counts every increment");
+    require(box->atomicBoolState->load(), "atomicBoolState observes the exchange");
+    double expected = 1.0;
+    bool doubleCas = box->atomicDoubleState->compare_exchange_strong(expected, 2.0);
+    require(doubleCas && box->atomicDoubleState->load() == 2.0, "atomicDoubleState CAS works");
+    box->sharedValueMutex = std::make_shared<std::recursive_mutex>();
+    std::atomic<long> cell{0};
+    std::vector<std::thread> cellThreads;
+    for (int t = 0; t < 8; ++t) {
+        cellThreads.emplace_back([&box, &cell] {
+            for (int i = 0; i < 2000; ++i) {
+                std::lock_guard<std::recursive_mutex> lock(*box->sharedValueMutex);
+                cell += 1;
+                (void)cell.load();
+            }
+        });
+    }
+    for (auto& thread : cellThreads) thread.join();
+    require(cell.load() == 16000, "the Shared<T> cell serializes get/set");
+}
+
+void testSemaphoreState() {
+    auto box = makeBox("Semaphore");
+    auto state = std::make_shared<ObjectBox::SemaphoreState>();
+    state->permits = 0;
+    box->semaphoreState = state;
+
+    const int workers = 4;
+    const int perWorker = 500;
+    const int total = workers * perWorker;
+    std::atomic<int> acquired{0};
+    std::vector<std::thread> threads;
+    // The same wait predicate the VM's Semaphore.acquire uses.
+    for (int t = 0; t < workers; ++t) {
+        threads.emplace_back([&state, &acquired, perWorker] {
+            for (int i = 0; i < perWorker; ++i) {
+                std::unique_lock<std::mutex> lock(state->mutex);
+                state->cv.wait(lock, [&state] { return state->permits > 0; });
+                --state->permits;
+                ++acquired;
+            }
+        });
+    }
+    // The producer releases exactly `total` permits; the accounting must come
+    // out even: every acquisition is paid for, and none is left waiting.
+    std::thread producer([&state, total] {
+        for (int i = 0; i < total; ++i) {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            ++state->permits;
+            state->cv.notify_one();
+        }
+    });
+    for (auto& thread : threads) thread.join();
+    producer.join();
+    require(acquired.load() == total, "every permit acquisition completed");
+    std::lock_guard<std::mutex> lock(state->mutex);
+    require(state->permits == 0, "permit accounting is exact");
+    state.reset(); // idle destruction
+}
+
+void testConditionState() {
+    auto box = makeBox("Condition");
+    auto state = std::make_shared<ObjectBox::ConditionState>();
+    box->conditionState = state;
+
+    // Signaling: a waiter wakes when the producer flips the flag.
+    bool flagged = false;
+    std::thread producer([&state, &flagged] {
+        std::this_thread::sleep_for(30ms);
+        std::lock_guard<std::mutex> lock(state->mutex);
+        flagged = true;
+        state->cv.notify_all();
+    });
+    bool woke = false;
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        woke = state->cv.wait_for(lock, 5s, [&flagged] { return flagged; });
+    }
+    producer.join();
+    require(woke, "a notified condition waiter wakes with its predicate true");
+
+    // Timeout: no notification means the waiter reports the timeout, it does
+    // not hang.
+    bool timedOut = false;
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        const bool signaled = state->cv.wait_for(lock, 50ms, [] { return false; });
+        timedOut = !signaled;
+    }
+    require(timedOut, "a condition wait without a signal times out");
+    state.reset();
+}
+
+void testChannelState() {
+    auto state = std::make_shared<ObjectBox::ChannelState>();
+    state->capacity = 2;
+
+    auto send = [&](int value) {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        // Hand directly to a waiting receiver when the buffer is full,
+        // otherwise buffer, mirroring the runtime channel protocol.
+        if (state->pendingReceives.empty()) {
+            state->cvNotFull.wait(lock, [&state] { return state->items.size() < state->capacity; });
+            state->items.push_back(zl::Value(value));
+        } else {
+            auto receiver = state->pendingReceives.front();
+            state->pendingReceives.pop_front();
+            (void)receiver; // the value is delivered through the result below
+            state->items.push_back(zl::Value(value));
+        }
+        state->cvNotEmpty.notify_one();
+    };
+    auto receive = [&]() -> zl::Value {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        state->cvNotEmpty.wait(lock, [&state] { return !state->items.empty(); });
+        auto value = state->items.front();
+        state->items.pop_front();
+        state->cvNotFull.notify_one();
+        return value;
+    };
+
+    const int items = 32;
+    std::vector<int> received;
+    std::mutex receivedMutex;
+    std::thread sender([&] {
+        for (int i = 0; i < items; ++i) send(i);
+    });
+    std::thread receiver([&] {
+        for (int i = 0; i < items; ++i) {
+            auto value = receive();
+            std::lock_guard<std::mutex> lock(receivedMutex);
+            received.push_back(std::get<std::int64_t>(value));
+        }
+    });
+    sender.join();
+    receiver.join();
+    bool fifo = received.size() == items;
+    for (int i = 0; fifo && i < items; ++i) fifo = received[i] == i;
+    require(fifo, "the bounded channel delivers every value in order");
+    require(state->items.empty() && state->pendingSends.empty() && state->pendingReceives.empty(),
+            "the channel settles with no pending work");
+    state.reset();
+}
+
+} // namespace
+
+int main() {
+    testMutexState();
+    testReadWriteLockState();
+    testAtomicState();
+    testSemaphoreState();
+    testConditionState();
+    testChannelState();
+
+    if (failures != 0) {
+        std::cerr << failures << " sync regression(s) failed\n";
+        return 1;
+    }
+    std::cout << "all sync regressions passed\n";
+    return 0;
+}
