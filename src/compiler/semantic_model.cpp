@@ -248,6 +248,12 @@ const InterfaceShapeInfo* SemanticModel::resolveInterfaceMethods(const std::stri
     return &info;
 }
 
+ClassShapeInfo* SemanticModel::findClass(const std::string& name) {
+    auto it = classes_.find(name);
+    if (it == classes_.end()) return nullptr;
+    return &it->second;
+}
+
 void SemanticModel::defineClass(ClassShapeInfo shape) {
     classes_[shape.name] = std::move(shape);
 }

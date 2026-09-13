@@ -66,93 +66,119 @@ file(GLOB ZLBIND_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tools/zl-bind/*.c
 add_executable(zl-bind ${ZLBIND_SOURCES})
 target_include_directories(zl-bind PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
-# --- Optional focused C++ regression targets ---------------------------------
-# Some lightweight/source-only checkouts do not include the full C++ regression
-# corpus. Keep ordinary runtime/tool builds configurable by registering each
-# regression target only when its primary fixture source is present.
+# --- C++ regression targets --------------------------------------------------
+# A test target is either REQUIRED - part of the suite, a missing source is a
+# configuration error - or explicitly OPTIONAL - genuinely unavailable on some
+# platforms/configurations, and the skip message must say why. A silently
+# skipped required target is not a passing test, so the required path fails
+# configuration instead of skipping; that is also the completeness guard
+# (Objective 6.9): the (target, source) pairs below are the single source of
+# truth, checked as configuration runs, with no duplicated filename list.
 find_package(Threads REQUIRED)
 
-function(zl_add_optional_test target primary_source)
+macro(zl_add_required_test target primary_source)
     if(NOT EXISTS "${CMAKE_SOURCE_DIR}/${primary_source}")
-        message(STATUS "Skipping ${target}: missing ${primary_source}")
+        message(FATAL_ERROR
+            "Required test source for ${target} is missing: ${primary_source}. "
+            "Restore the source, or delete the target if the subsystem is gone - "
+            "a missing required test must fail configuration, not be skipped.")
+    endif()
+    add_executable(${target} ${primary_source} ${ARGN})
+    target_include_directories(${target} PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    list(APPEND ZL_CTEST_TARGETS ${target})
+endmacro()
+
+macro(zl_add_optional_test target primary_source)
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/${primary_source}")
+        message(STATUS "Skipping ${target}: optional ${primary_source} missing (platform-specific target, documented at its registration)")
         return()
     endif()
     add_executable(${target} ${primary_source} ${ARGN})
     target_include_directories(${target} PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endfunction()
+    list(APPEND ZL_CTEST_TARGETS ${target})
+endmacro()
 
-zl_add_optional_test(zl-runtime-type-tests tests/runtime_type_tests.cpp
+zl_add_required_test(zl-runtime-type-tests tests/runtime_type_tests.cpp
     src/vm/value.cpp
     src/vm/gc.cpp
     src/vm/runtime_exception.cpp
-    src/vm/runtime_task.cpp)
+    src/vm/runtime_task.cpp
+    src/common/type_name.cpp
+    src/vm/runtime_type_checks.cpp
+    src/vm/type_contracts.cpp)
 
 # Controlled collector seam: exercises GC parking/reactivation and collector
 # election without depending on allocation volume or thread scheduling luck.
-zl_add_optional_test(zl-gc-safepoint-tests tests/gc_safepoint_tests.cpp src/vm/gc_safepoint.cpp)
-if(TARGET zl-gc-safepoint-tests)
+zl_add_required_test(zl-gc-safepoint-tests tests/gc_safepoint_tests.cpp src/vm/gc_safepoint.cpp)
     target_link_libraries(zl-gc-safepoint-tests PRIVATE Threads::Threads)
-endif()
 
 # Program graph roots and blocking reclamation across consecutive collections.
-zl_add_optional_test(zl-gc-lifetime-tests tests/gc_lifetime_tests.cpp
+zl_add_required_test(zl-gc-lifetime-tests tests/gc_lifetime_tests.cpp
     src/vm/gc.cpp src/vm/gc_safepoint.cpp src/vm/value.cpp
     src/vm/runtime_task.cpp src/vm/runtime_exception.cpp src/vm/runtime_thread.cpp)
-if(TARGET zl-gc-lifetime-tests)
     target_link_libraries(zl-gc-lifetime-tests PRIVATE Threads::Threads)
-endif()
 
-zl_add_optional_test(zl-gc-tests tests/gc_tests.cpp
+zl_add_required_test(zl-gc-tests tests/gc_tests.cpp
     src/vm/value.cpp
     src/vm/gc.cpp
     src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
 
-zl_add_optional_test(zl-runtime-task-executor-tests tests/runtime_task_executor_tests.cpp
+zl_add_required_test(zl-runtime-task-executor-tests tests/runtime_task_executor_tests.cpp
     src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp
     src/vm/runtime_task_executor.cpp
     src/vm/runtime_thread.cpp
     src/vm/value.cpp
     src/vm/gc.cpp)
+target_link_libraries(zl-runtime-task-executor-tests PRIVATE Threads::Threads)
 
-zl_add_optional_test(zl-runtime-sync-tests tests/runtime_sync_tests.cpp)
+zl_add_required_test(zl-runtime-sync-tests tests/runtime_sync_tests.cpp)
+target_link_libraries(zl-runtime-sync-tests PRIVATE Threads::Threads)
 
-zl_add_optional_test(zl-ir-tests tests/ir_tests.cpp src/compiler/ir.cpp src/compiler/ir_optimizer.cpp)
-zl_add_optional_test(zl-machine-code-tests tests/machine_code_tests.cpp src/compiler/machine_code.cpp src/compiler/ir.cpp)
+zl_add_required_test(zl-ir-tests tests/ir_tests.cpp src/compiler/ir.cpp src/compiler/ir_optimizer.cpp)
+zl_add_required_test(zl-machine-code-tests tests/machine_code_tests.cpp src/compiler/machine_code.cpp src/compiler/ir.cpp)
 
-zl_add_optional_test(zl-regex-engine-tests tests/regex_engine_tests.cpp src/regex/regex.cpp)
-zl_add_optional_test(zl-regex-unicode-tests tests/regex_unicode_tests.cpp src/regex/regex.cpp)
+zl_add_required_test(zl-regex-engine-tests tests/regex_engine_tests.cpp src/regex/regex.cpp)
+zl_add_required_test(zl-regex-unicode-tests tests/regex_unicode_tests.cpp src/regex/regex.cpp)
 
-zl_add_optional_test(zl-runtime-scheduler-tests tests/runtime_scheduler_tests.cpp
+zl_add_required_test(zl-runtime-scheduler-tests tests/runtime_scheduler_tests.cpp
     src/vm/runtime_scheduler.cpp
     src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp
     src/vm/runtime_task_executor.cpp
     src/vm/value.cpp
     src/vm/gc.cpp)
+target_link_libraries(zl-runtime-scheduler-tests PRIVATE Threads::Threads)
 
 # VM boundary-hardening regression target. It links the interpreter sources
 # directly so malformed reflection handles can be exercised without a ZL
 # program manufacturing an impossible internal Function object.
 set(ZL_RUNTIME_VM_SOURCES ${SOURCES})
 list(FILTER ZL_RUNTIME_VM_SOURCES EXCLUDE REGEX ".*/main\\.cpp$")
-zl_add_optional_test(zl-runtime-hardening-vm-tests tests/runtime_hardening_vm_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
-if(TARGET zl-runtime-hardening-vm-tests AND WIN32)
+zl_add_required_test(zl-runtime-hardening-vm-tests tests/runtime_hardening_vm_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+target_link_libraries(zl-runtime-hardening-vm-tests PRIVATE Threads::Threads)
+if(WIN32)
     target_link_libraries(zl-runtime-hardening-vm-tests PRIVATE ws2_32)
+endif()
+# Lets the target re-run the boundary lint inside its own process as a
+# regression case (compiler boundary violations must keep being caught).
+find_program(ZL_TEST_BASH NAMES bash)
+if(ZL_TEST_BASH)
+    target_compile_definitions(zl-runtime-hardening-vm-tests PRIVATE
+        ZL_BOUNDARY_LINT_ROOT="${CMAKE_SOURCE_DIR}"
+        ZL_BOUNDARY_LINT_BASH="${ZL_TEST_BASH}")
 endif()
 
 # --- Native backend (MIR -> native IR -> machine code) ----------------------
 # Drives the whole native pipeline and *executes* the emitted machine code, so
 # it links the front end (its end-to-end cases lower real ZL source) plus the
 # native sources themselves.
-zl_add_optional_test(zl-native-backend-tests tests/native_backend_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
-if(TARGET zl-native-backend-tests AND WIN32)
+zl_add_required_test(zl-native-backend-tests tests/native_backend_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+if(WIN32)
     target_link_libraries(zl-native-backend-tests PRIVATE ws2_32)
 endif()
-if(TARGET zl-native-backend-tests)
-    target_link_libraries(zl-native-backend-tests PRIVATE Threads::Threads)
-endif()
+target_link_libraries(zl-native-backend-tests PRIVATE Threads::Threads)
 
 # --- MIR (mid-level IR) -----------------------------------------------------
 # Two targets, split by what they need to link.
@@ -162,7 +188,7 @@ endif()
 # utilities the verifier delegates to, so it stays fast and does not depend on
 # the front end.
 # CFG queries, data-flow analyses, and slot -> block-parameter construction.
-zl_add_optional_test(zl-mir-ssa-tests tests/mir_ssa_tests.cpp
+zl_add_required_test(zl-mir-ssa-tests tests/mir_ssa_tests.cpp
     src/mir/folding.cpp
     src/mir/effects.cpp
     src/mir/analysis.cpp
@@ -178,7 +204,7 @@ zl_add_optional_test(zl-mir-ssa-tests tests/mir_ssa_tests.cpp
     src/compiler/operator_rules.cpp
     src/compiler/semantic_types.cpp
     src/common/type_name.cpp)
-zl_add_optional_test(zl-mir-tests tests/mir_tests.cpp
+zl_add_required_test(zl-mir-tests tests/mir_tests.cpp
     src/mir/analysis.cpp
     src/mir/builder.cpp
     src/mir/function.cpp
@@ -194,7 +220,7 @@ zl_add_optional_test(zl-mir-tests tests/mir_tests.cpp
 # The optimiser framework: pass manager, analysis manager, snapshots, the
 # passes themselves, and the differential validator. It needs no front end, so
 # it stays a fast target like zl-mir-ssa-tests.
-zl_add_optional_test(zl-mir-opt-tests tests/mir_pass_tests.cpp
+zl_add_required_test(zl-mir-opt-tests tests/mir_pass_tests.cpp
     src/mir/analysis.cpp
     src/mir/builder.cpp
     src/mir/dataflow.cpp
@@ -220,13 +246,11 @@ zl_add_optional_test(zl-mir-opt-tests tests/mir_pass_tests.cpp
 # the two modules twice - statically (compareModules) and by executing both
 # through the bytecode backend with their output captured - so it links the
 # whole compiler minus main(), like the lowering target.
-zl_add_optional_test(zl-mir-opt-pipeline-tests tests/mir_opt_pipeline_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+zl_add_required_test(zl-mir-opt-pipeline-tests tests/mir_opt_pipeline_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
 if(TARGET zl-mir-opt-pipeline-tests AND WIN32)
     target_link_libraries(zl-mir-opt-pipeline-tests PRIVATE ws2_32)
 endif()
-if(TARGET zl-mir-opt-pipeline-tests)
     target_link_libraries(zl-mir-opt-pipeline-tests PRIVATE Threads::Threads)
-endif()
 
 # zl-pipeline-tests owns the compiler pipeline itself: stage order, the
 # invariant that no backend sees unverified MIR, backend selection as a
@@ -234,34 +258,30 @@ endif()
 # compiler minus main() (ZL_RUNTIME_VM_SOURCES) because these are end-to-end
 # properties: a pipeline assembled out of mocks would prove nothing about the
 # one that ships.
-zl_add_optional_test(zl-pipeline-tests tests/pipeline_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+zl_add_required_test(zl-pipeline-tests tests/pipeline_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
 if(TARGET zl-pipeline-tests AND WIN32)
     target_link_libraries(zl-pipeline-tests PRIVATE ws2_32)
 endif()
-if(TARGET zl-pipeline-tests)
     target_link_libraries(zl-pipeline-tests PRIVATE Threads::Threads)
-endif()
 
 # zl-mir-lowering-tests drives the real pipeline - ModuleLoader, TypeChecker,
 # lowerProgram, verifyModule - so it links the whole compiler minus main().
-zl_add_optional_test(zl-mir-lowering-tests tests/mir_lowering_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+zl_add_required_test(zl-mir-lowering-tests tests/mir_lowering_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
 
 # Type-system integration: the type table, sum types, canonical nested
 # generics through lowering, dynamic-to-static boundaries, and the verifier
 # rules that keep invalid type assumptions detectable. Links the whole front
 # end because most of its cases drive the real pipeline.
-zl_add_optional_test(zl-mir-type-tests tests/mir_type_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+zl_add_required_test(zl-mir-type-tests tests/mir_type_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
 
 # Ownership/lifetime integration: storage contracts and the move/borrow/drop
 # events, with the verifier's flow rules pinning each invalid state. Links the
 # whole front end for its pipeline case.
-zl_add_optional_test(zl-mir-ownership-tests tests/mir_ownership_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+zl_add_required_test(zl-mir-ownership-tests tests/mir_ownership_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
 if(TARGET zl-mir-lowering-tests AND WIN32)
     target_link_libraries(zl-mir-lowering-tests PRIVATE ws2_32)
 endif()
-if(TARGET zl-mir-lowering-tests)
     target_link_libraries(zl-mir-lowering-tests PRIVATE Threads::Threads)
-endif()
 
 
 # --- Installation (Phase 12A foundation) -----------------------------------
@@ -348,7 +368,7 @@ include(CPack)
 
 # Phase 10+ native/backend smoke tests. These are optional for lightweight
 # checkouts for the same reason as the focused tests above.
-zl_add_optional_test(zl-native-compiler-tests tests/native_compiler_tests.cpp
+zl_add_required_test(zl-native-compiler-tests tests/native_compiler_tests.cpp
     src/compiler/native_compiler.cpp
     src/compiler/ir_lowering.cpp
     src/compiler/ir.cpp
@@ -359,12 +379,19 @@ zl_add_optional_test(zl-native-compiler-tests tests/native_compiler_tests.cpp
     src/parser/ast.cpp
     src/lexer/lexer.cpp)
 
-zl_add_optional_test(zl-native-ffi-metadata-tests tests/native_ffi_metadata_tests.cpp)
+zl_add_required_test(zl-native-ffi-metadata-tests tests/native_ffi_metadata_tests.cpp
+    src/vm/native_boundary.cpp
+    src/vm/native_resource.cpp
+    src/vm/value.cpp
+    src/vm/execution_state.cpp
+    src/vm/gc.cpp
+    src/vm/runtime_exception.cpp
+    src/vm/runtime_task.cpp)
 
-zl_add_optional_test(zl-native-resource-tests tests/native_resource_tests.cpp
+zl_add_required_test(zl-native-resource-tests tests/native_resource_tests.cpp
     src/vm/native_resource.cpp)
 
-zl_add_optional_test(zl-native-boundary-tests tests/native_boundary_tests.cpp
+zl_add_required_test(zl-native-boundary-tests tests/native_boundary_tests.cpp
     src/vm/native_boundary.cpp
     src/vm/native_resource.cpp
     src/vm/value.cpp
@@ -373,7 +400,7 @@ zl_add_optional_test(zl-native-boundary-tests tests/native_boundary_tests.cpp
     src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
 
-zl_add_optional_test(zl-native-runtime-registry-tests tests/native_runtime_registry_tests.cpp
+zl_add_required_test(zl-native-runtime-registry-tests tests/native_runtime_registry_tests.cpp
     src/vm/native_boundary.cpp
     src/vm/native_resource.cpp
     src/vm/value.cpp
@@ -382,7 +409,7 @@ zl_add_optional_test(zl-native-runtime-registry-tests tests/native_runtime_regis
     src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
 
-zl_add_optional_test(zl-native-ffi-transport-tests tests/native_ffi_transport_tests.cpp
+zl_add_required_test(zl-native-ffi-transport-tests tests/native_ffi_transport_tests.cpp
     src/vm/native_resource.cpp
     src/vm/native_boundary.cpp
     src/vm/value.cpp
@@ -391,7 +418,7 @@ zl_add_optional_test(zl-native-ffi-transport-tests tests/native_ffi_transport_te
     src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
 
-zl_add_optional_test(zl-native-ffi-lifetime-tests tests/native_ffi_lifetime_adapter_tests.cpp
+zl_add_required_test(zl-native-ffi-lifetime-tests tests/native_ffi_lifetime_adapter_tests.cpp
     src/vm/native_resource.cpp
     src/vm/native_boundary.cpp
     src/vm/value.cpp
@@ -400,11 +427,11 @@ zl_add_optional_test(zl-native-ffi-lifetime-tests tests/native_ffi_lifetime_adap
     src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
 
-zl_add_optional_test(zl-native-resource-stress-tests tests/native_resource_stress_tests.cpp
+zl_add_required_test(zl-native-resource-stress-tests tests/native_resource_stress_tests.cpp
     src/vm/native_resource.cpp)
 
 # Phase 16 native struct/library runtime tests.
-zl_add_optional_test(zl-native-struct-tests tests/native_struct_tests.cpp
+zl_add_required_test(zl-native-struct-tests tests/native_struct_tests.cpp
     src/vm/native_resource.cpp
     src/vm/native_boundary.cpp
     src/vm/value.cpp
@@ -413,43 +440,68 @@ zl_add_optional_test(zl-native-struct-tests tests/native_struct_tests.cpp
     src/vm/runtime_exception.cpp
     src/vm/runtime_task.cpp)
 
-zl_add_optional_test(zl-native-library-tests tests/native_library_tests.cpp
-    src/vm/native_library.cpp)
-if(TARGET zl-native-library-tests)
-    target_link_libraries(zl-native-library-tests PRIVATE ${CMAKE_DL_LIBS})
-endif()
+# A real shared object to load, so the library test exercises dlopen/dlsym
+# against a known symbol instead of a system library it cannot assume exists.
+add_library(zl-test-native-library SHARED tests/fixtures/native_library_fixture.cpp)
+set_target_properties(zl-test-native-library PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
-zl_add_optional_test(zl-native-ffi-declaration-tests tests/native_ffi_declaration_tests.cpp
-    src/compiler/native_ffi_declarations.cpp)
+zl_add_required_test(zl-native-library-tests tests/native_library_tests.cpp
+    src/vm/native_library.cpp)
+target_link_libraries(zl-native-library-tests PRIVATE ${CMAKE_DL_LIBS})
+target_compile_definitions(zl-native-library-tests PRIVATE
+    ZL_TEST_NATIVE_LIBRARY_PATH="$<TARGET_FILE:zl-test-native-library>")
+
+zl_add_required_test(zl-native-ffi-declaration-tests tests/native_ffi_declaration_tests.cpp
+    src/compiler/native_ffi_declarations.cpp
+    src/parser/parser.cpp
+    src/parser/expression_parser.cpp
+    src/parser/type_lookahead.cpp
+    src/parser/ast.cpp
+    src/lexer/lexer.cpp)
 
 # Safety analysis regression: malformed MIR is measured separately from source
 # corpus rejection layers, because it tests compiler/pass contracts.
-zl_add_optional_test(zl-mir-safety-tests tests/mir_safety_tests.cpp
+zl_add_required_test(zl-mir-safety-tests tests/mir_safety_tests.cpp
     src/mir/analysis.cpp src/mir/builder.cpp src/mir/function.cpp
     src/mir/instruction.cpp src/mir/printer.cpp src/mir/type.cpp
     src/mir/verifier.cpp src/mir/safety.cpp
     src/compiler/operator_rules.cpp src/compiler/semantic_types.cpp src/common/type_name.cpp)
 
 include(CTest)
-if(BUILD_TESTING AND TARGET zl-pipeline-tests)
-    add_test(NAME pipeline COMMAND zl-pipeline-tests)
-endif()
-# The compiler boundary, enforced as a check rather than as a convention: the
-# backends cannot see the AST, the lowerer cannot infer, the front end has one
-# driver, and the legacy IR cannot grow a second consumer.
 if(BUILD_TESTING)
+    # Every C++ regression target is registered under its canonical name, so
+    # `ctest` runs the whole suite and a broken target is visible there.
+    foreach(zl_test_target IN LISTS ZL_CTEST_TARGETS)
+        add_test(NAME ${zl_test_target} COMMAND ${zl_test_target})
+    endforeach()
+
+    # The compiler boundary, enforced as a check rather than as a convention:
+    # the backends cannot see the AST, the lowerer cannot infer, the front end
+    # has one driver, and the legacy IR cannot grow a second consumer.
+    # Intentionally optional: the check needs bash, a development-host tool.
     find_program(ZL_BASH NAMES bash)
     if(ZL_BASH)
         add_test(NAME boundary-lint COMMAND ${ZL_BASH}
             ${CMAKE_SOURCE_DIR}/tools/boundary_lint.sh ${CMAKE_SOURCE_DIR})
     endif()
-endif()
-if(BUILD_TESTING AND TARGET zl-mir-safety-tests)
-    add_test(NAME mir-safety COMMAND zl-mir-safety-tests)
+
+    # Intentionally optional: the checks need python3, a development-host tool.
     find_program(ZL_SAFETY_PYTHON NAMES python3)
     if(ZL_SAFETY_PYTHON)
         add_test(NAME safety-pipeline COMMAND ${ZL_SAFETY_PYTHON}
             ${CMAKE_SOURCE_DIR}/tests/safety_pipeline.py $<TARGET_FILE:zl_language>)
         set_tests_properties(safety-pipeline PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endif()
+<<<<<<< Updated upstream
+=======
+    # The --pipeline-report CLI contract: a runnable program's pipeline, or a
+    # precise refusal (library without an entry point, invalid entry point).
+    find_program(ZL_REPORT_PYTHON NAMES python3)
+    if(ZL_REPORT_PYTHON)
+        add_test(NAME pipeline-report COMMAND ${ZL_REPORT_PYTHON}
+            ${CMAKE_SOURCE_DIR}/tests/pipeline_report_cli.py $<TARGET_FILE:zl_language>)
+        set_tests_properties(pipeline-report PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endif()
+>>>>>>> Stashed changes
 endif()
