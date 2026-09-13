@@ -21,6 +21,27 @@ file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
 # Create executable
 add_executable(zl_language ${SOURCES})
 
+# --- Target organization (Objective 8) --------------------------------------
+# Everything registered below joins exactly one bucket, and the buckets are the
+# only thing the build scripts ever name:
+#
+#   zl-core  -> the usable ZL toolchain (interpreter/compiler/runtime + the
+#               tools that ship with it). This is the default developer build.
+#   zl-tests -> zl-core plus every C++ regression executable and its fixtures.
+#   zl-full  -> zl-core + zl-tests + optional/auxiliary targets.
+#
+# ZL_CORE_TARGETS / ZL_TEST_TARGETS / ZL_OPTIONAL_TARGETS are accumulated as the
+# file is read and wired into the aggregates at the very bottom, so a new target
+# only has to be appended to one list.
+set(ZL_CORE_TARGETS "")
+set(ZL_TEST_TARGETS "")
+set(ZL_OPTIONAL_TARGETS "")
+
+# The ZL executable is the root of the core closure: CMake pulls in every
+# object/library it needs, so the core build is the smallest correct closure
+# rather than a hand-written binary list.
+list(APPEND ZL_CORE_TARGETS zl_language)
+
 # Include directories
 target_include_directories(zl_language PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_definitions(zl_language PRIVATE ZL_VERSION_STRING="${ZL_VERSION_STRING}")
@@ -66,6 +87,10 @@ file(GLOB ZLBIND_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tools/zl-bind/*.c
 add_executable(zl-bind ${ZLBIND_SOURCES})
 target_include_directories(zl-bind PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
+# zlpkg and zl-bind are part of the shipped toolchain (both are installed
+# below), so both belong to the core build.
+list(APPEND ZL_CORE_TARGETS zlpkg zl-bind)
+
 # --- C++ regression targets --------------------------------------------------
 # A test target is either REQUIRED - part of the suite, a missing source is a
 # configuration error - or explicitly OPTIONAL - genuinely unavailable on some
@@ -86,6 +111,10 @@ macro(zl_add_required_test target primary_source)
     add_executable(${target} ${primary_source} ${ARGN})
     target_include_directories(${target} PRIVATE ${CMAKE_SOURCE_DIR}/include)
     list(APPEND ZL_CTEST_TARGETS ${target})
+    # Tests are reachable only through zl-tests / zl-full, never through the
+    # default core build: keep them out of the default dependency graph.
+    set_target_properties(${target} PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    list(APPEND ZL_TEST_TARGETS ${target})
 endmacro()
 
 macro(zl_add_optional_test target primary_source)
@@ -96,6 +125,8 @@ macro(zl_add_optional_test target primary_source)
     add_executable(${target} ${primary_source} ${ARGN})
     target_include_directories(${target} PRIVATE ${CMAKE_SOURCE_DIR}/include)
     list(APPEND ZL_CTEST_TARGETS ${target})
+    set_target_properties(${target} PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    list(APPEND ZL_TEST_TARGETS ${target})
 endmacro()
 
 zl_add_required_test(zl-runtime-type-tests tests/runtime_type_tests.cpp
@@ -446,7 +477,10 @@ zl_add_required_test(zl-native-struct-tests tests/native_struct_tests.cpp
 # against a known symbol instead of a system library it cannot assume exists.
 add_library(zl-test-native-library SHARED tests/fixtures/native_library_fixture.cpp)
 set_target_properties(zl-test-native-library PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    EXCLUDE_FROM_ALL TRUE)
+list(APPEND ZL_TEST_TARGETS zl-test-native-library)
 
 zl_add_required_test(zl-native-library-tests tests/native_library_tests.cpp
     src/vm/native_library.cpp)
@@ -508,3 +542,49 @@ if(BUILD_TESTING)
         set_tests_properties(pipeline-report PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endif()
 endif()
+
+# --- Aggregate targets (Objective 8.7) --------------------------------------
+# Declared last so every target registered above has already joined a bucket.
+#
+#   zl-core       default developer build: the usable ZL toolchain
+#   zl-tests      zl-core + every C++ regression executable and fixture
+#   zl-benchmarks zl-core + the benchmark gate driver
+#   zl-examples   zl-core (the examples are .zl programs run by the toolchain)
+#   zl-full       everything the repository can build on purpose
+#
+# The buckets share one dependency list each; no build logic is duplicated.
+add_custom_target(zl-core
+    COMMENT "[ZL] Core toolchain built (compiler, runtime, VM, tools).")
+add_dependencies(zl-core ${ZL_CORE_TARGETS})
+
+# `zl` is the human-facing alias for the default developer build, so
+# `cmake --build build --target zl` does the documented thing.
+add_custom_target(zl COMMENT "[ZL] zl toolchain")
+add_dependencies(zl zl-core)
+
+add_custom_target(zl-tests
+    COMMENT "[ZL] Test executables built. Run them with ctest.")
+add_dependencies(zl-tests zl-core ${ZL_TEST_TARGETS})
+
+# The benchmark gate compiles generated native C++ together with its driver, so
+# it is driven by scripts/native_gate.sh rather than by a plain link target.
+add_custom_target(zl-benchmarks
+    COMMENT "[ZL] Benchmark gate prerequisites built - drive them with scripts/native_gate.sh.")
+add_dependencies(zl-benchmarks zl-core)
+
+add_custom_target(zl-examples
+    COMMENT "[ZL] Example prerequisites built - run them with scripts/run_examples.sh or .bat.")
+add_dependencies(zl-examples zl-core)
+
+add_custom_target(zl-full
+    COMMENT "[ZL] Full repository build complete.")
+add_dependencies(zl-full zl-core zl-tests zl-benchmarks zl-examples)
+if(ZL_OPTIONAL_TARGETS)
+    add_dependencies(zl-full ${ZL_OPTIONAL_TARGETS})
+endif()
+
+# Reported at configure time so the target boundary is visible, not folklore.
+list(LENGTH ZL_CORE_TARGETS ZL_CORE_TARGET_COUNT)
+list(LENGTH ZL_TEST_TARGETS ZL_TEST_TARGET_COUNT)
+message(STATUS "[ZL] core targets: ${ZL_CORE_TARGET_COUNT} (${ZL_CORE_TARGETS})")
+message(STATUS "[ZL] test targets: ${ZL_TEST_TARGET_COUNT} (built only via zl-tests / zl-full)")

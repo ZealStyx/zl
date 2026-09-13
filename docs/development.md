@@ -12,18 +12,38 @@ Portable, on every platform:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
+cmake --build build --config Release --target zl-core
 ```
 
-Targets: `zl_language` (runtime), `zlpkg` (dependency manager), and `zl-bind`
-(native binding generator), plus the C++ test executables. The Python-based `zl-lsp`
-and `zl-test` tools do not need compilation.
+### Aggregate targets
 
-On Windows, `scripts/build.bat` wraps the same configuration and accepts:
+The build is organized around four project-level aggregates, so a default
+developer build is not a complete repository build:
+
+| Target | Contents |
+| --- | --- |
+| `zl-core` (default) | `zl_language` (runtime/compiler/VM), `zlpkg`, `zl-bind` and the full source closure they need |
+| `zl-tests` | `zl-core` plus every C++ regression executable and the native-library test fixture |
+| `zl-benchmarks` / `zl-examples` | `zl-core` plus the prerequisites of the benchmark gate and the example runners |
+| `zl-full` | everything above - the intentional complete build |
+
+`zl` is an alias for `zl-core`. Test executables are marked `EXCLUDE_FROM_ALL`,
+so they are only ever built through `zl-tests` / `zl-full`; they remain fully
+registered with CTest and are never removed from the configuration.
+
+The Python-based `zl-lsp` and `zl-test` tools do not need compilation.
+
+On Windows, `scripts/build.bat` wraps the same configuration. It takes a mode
+plus options:
 
 ```bat
+scripts\build.bat            :: core toolchain only (target zl-core)
+scripts\build.bat test       :: core + all test executables (target zl-tests)
+scripts\build.bat test --ctest
+scripts\build.bat full       :: complete repository (target zl-full)
+scripts\build.bat clean      :: delete the build directory
+scripts\build.bat help       :: explain the modes
 scripts\build.bat --debug
-scripts\build.bat --clean
 scripts\build.bat --target zl_language
 scripts\build.bat --jobs 8
 ```
