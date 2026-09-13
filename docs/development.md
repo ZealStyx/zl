@@ -33,8 +33,21 @@ registered with CTest and are never removed from the configuration.
 
 The Python-based `zl-lsp` and `zl-test` tools do not need compilation.
 
-On Windows, `scripts/build.bat` wraps the same configuration. It takes a mode
-plus options:
+### Build scripts
+
+`scripts/build.sh` (Linux/macOS) and `scripts\build.bat` (Windows) wrap the same
+configuration with identical mode semantics:
+
+```bash
+scripts/build.sh              # core toolchain only (target zl-core)
+scripts/build.sh test         # core + all test executables (target zl-tests)
+scripts/build.sh test --ctest # ...and then run the suite
+scripts/build.sh full         # complete repository (target zl-full)
+scripts/build.sh clean        # delete the build directory
+scripts/build.sh help         # explain the modes
+scripts/build.sh --debug --target zl_language --jobs 8
+scripts/build.sh --run examples/basics/HelloWorld.zl
+```
 
 ```bat
 scripts\build.bat            :: core toolchain only (target zl-core)

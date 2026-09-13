@@ -77,17 +77,19 @@ Configure time now prints the boundary:
 -- [ZL] test targets: 34 (built only via zl-tests / zl-full)
 ```
 
-### `scripts/build.bat`
+### `scripts/build.bat` and `scripts/build.sh`
 
-Mode-driven, using the existing option conventions:
+Mode-driven, using the existing option conventions. `build.bat` was the only
+script in `scripts/` without a POSIX twin, so `build.sh` was added with
+identical mode semantics (the regression guard asserts the two stay in sync):
 
 | Command | CMake target |
 | --- | --- |
-| `scripts\build.bat` (or `core`) | `zl-core` |
-| `scripts\build.bat test` | `zl-tests` |
-| `scripts\build.bat full` | `zl-full` |
-| `scripts\build.bat clean` | removes the build directory |
-| `scripts\build.bat help` | explains the modes |
+| `build.bat` / `build.sh` (or `core`) | `zl-core` |
+| `build.bat test` / `build.sh test` | `zl-tests` |
+| `build.bat full` / `build.sh full` | `zl-full` |
+| `build.bat clean` / `build.sh clean` | removes the build directory |
+| `build.bat help` / `build.sh help` | explains the modes |
 
 All previous flags (`--debug`, `--release`, `--clean`, `--target`, `--jobs`,
 `--run`, `--build-dir`, …) still work; `--target` overrides the mode. New:
@@ -135,7 +137,7 @@ Wall clock for a clean `zl-core` build with 4 jobs on the verification host:
 ## 4. Regression validation
 
 `tools/dev/check_build_modes.py` configures a throwaway tree and asserts the
-boundary. All 20 checks pass:
+boundary. All 38 checks pass:
 
 ```
 [PASS] build.bat exists and is mode-driven
@@ -145,6 +147,11 @@ boundary. All 20 checks pass:
 [PASS] clean mode implemented
 [PASS] help documents the modes
 [PASS] build.bat never builds the whole tree implicitly
+[PASS] build.sh exists / is valid bash / never references ALL_BUILD
+[PASS] build.sh core|test|full modes target zl-core|zl-tests|zl-full
+[PASS] build.sh implements clean and help
+[PASS] both drivers support --debug --release --clean --ctest --jobs
+                            --target --run --build-dir --configure-only
 [PASS] clean configure succeeds
 [PASS] test targets still registered in CMake - 34 test executables
 [PASS] zl-core is far smaller than a full build - 86 vs 820
@@ -158,13 +165,27 @@ boundary. All 20 checks pass:
 [PASS] core build produces the toolchain binaries
 ```
 
-Additionally verified by hand on a clean tree:
+Additionally verified by executing every mode end-to-end on a clean tree
+(`scripts/build.sh`, which shares the mode dispatch with `build.bat`):
 
-- `zl-tests` builds all 735 remaining edges with no errors.
-- `ctest` afterwards: **37/37 tests passed** (33 C++ targets + boundary-lint,
+- `build.sh help` — prints the modes; exit 0.
+- `build.sh clean` — handles both an existing and an absent build directory.
+- `build.sh --configure-only` — reports `core targets: 3`, `test targets: 34`.
+- `build.sh` (default) — clean-tree build produced **exactly 3 binaries**
+  (`zl_language`, `zlpkg`, `zl-bind`) and **zero** `*-tests` executables.
+- `build.sh --run examples/basics/HelloWorld.zl` — prints `Hello, World!`;
+  `zl_language --version` reports `ZL 0.1.0` and `zlpkg --help` works, so the
+  core build is a genuinely usable toolchain, not just a set of links.
+- `build.sh test --ctest` — built the remaining 735 edges, then
+  **37/37 tests passed** (33 C++ targets + boundary-lint,
   boundary-lint-regressions, safety-pipeline, pipeline-report), so the
-  Objective 6 restorations are intact and still exercised.
+  Objective 6 restorations are intact and still exercised. Exit 0.
 - `zl-full` completes with no additional work beyond `zl-tests`.
+
+The strongest structural check: `ninja -t inputs zl-core` resolves to only
+three object directories — `zl_language.dir`, `zlpkg.dir`, `zl-bind.dir` — and
+matches **no** file under `tests/` or `tests/fixtures/`. The core closure
+cannot reach a test target even transitively.
 
 ## 5. Objective 8.10 checklist
 
@@ -180,4 +201,15 @@ Additionally verified by hand on a clean tree:
 | `build.bat help` explains the modes | ✅ |
 | Tests remain available, not removed from CMake | ✅ `EXCLUDE_FROM_ALL`, still in `ZL_CTEST_TARGETS` |
 | Optional components available through explicit targets | ✅ `zl-tests`, `zl-benchmarks`, `zl-examples`, `zl-full` |
-| Core build does not depend on test targets | ✅ asserted by the regression script |
+| Core build does not depend on test targets | ✅ asserted by the regression script and by `ninja -t inputs` |
+
+## 6. Files changed
+
+| File | Change |
+| --- | --- |
+| `CMakeLists.txt` | target buckets + `zl-core`/`zl`/`zl-tests`/`zl-benchmarks`/`zl-examples`/`zl-full` aggregates; tests marked `EXCLUDE_FROM_ALL`; configure-time boundary report |
+| `scripts/build.bat` | mode-driven driver (`core`/`test`/`full`/`clean`/`help`), explicit `--target`, `[ZL]` output, new `--ctest` |
+| `scripts/build.sh` | **new** — POSIX twin with identical mode semantics |
+| `tools/dev/check_build_modes.py` | **new** — 38-check regression guard for the target boundary |
+| `BUILD_TARGETS_REPORT.md` | **new** — this report |
+| `README.md`, `docs/development.md` | document the modes and aggregate targets |

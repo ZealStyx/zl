@@ -27,6 +27,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 BAT = REPO / "scripts" / "build.bat"
+SH = REPO / "scripts" / "build.sh"
 
 
 def run(cmd, **kw):
@@ -83,6 +84,23 @@ def main() -> int:
           ("Modes" in bat and "clean" in bat and "help" in bat))
     check("build.bat never builds the whole tree implicitly",
           "--target !BUILD_TARGET!" in bat and "ALL_BUILD" not in bat)
+
+    # --- build.sh must mirror build.bat -------------------------------------
+    check("build.sh exists", SH.exists())
+    if SH.exists():
+        sh = SH.read_text(errors="replace")
+        check("build.sh is valid bash",
+              run(["bash", "-n", str(SH)]).returncode == 0)
+        for mode, target in (("core", "zl-core"), ("test", "zl-tests"),
+                             ("full", "zl-full")):
+            check(f"build.sh {mode} mode targets {target}", target in sh)
+        check("build.sh implements clean and help",
+              'MODE}" == "clean"' in sh and "usage()" in sh)
+        check("build.sh never references ALL_BUILD", "ALL_BUILD" not in sh)
+        # The two drivers must offer the same user-facing modes/options.
+        for flag in ("--debug", "--release", "--clean", "--ctest", "--jobs",
+                     "--target", "--run", "--build-dir", "--configure-only"):
+            check(f"both drivers support {flag}", flag in sh and flag in bat)
 
     # --- configure ----------------------------------------------------------
     cfg = run(["cmake", "-S", str(REPO), "-B", str(tmp), "-G", "Ninja",

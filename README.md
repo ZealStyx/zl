@@ -71,19 +71,21 @@ Convenience wrappers are also provided:
 
 | Task | Linux / macOS | Windows |
 | --- | --- | --- |
-| Build (core toolchain) | `cmake --build build --target zl-core` | `scripts\build.bat` |
-| Build tests | `cmake --build build --target zl-tests` | `scripts\build.bat test` |
-| Build everything | `cmake --build build --target zl-full` | `scripts\build.bat full` |
+| Build (core toolchain) | `scripts/build.sh` | `scripts\build.bat` |
+| Build tests | `scripts/build.sh test` | `scripts\build.bat test` |
+| Build everything | `scripts/build.sh full` | `scripts\build.bat full` |
+| Clean | `scripts/build.sh clean` | `scripts\build.bat clean` |
 | Run a file | `scripts/zl <file.zl>` | `scripts\run.bat <file.zl>` |
 | Run examples | `scripts/run_examples.sh` | `scripts\run_examples.bat` |
 | Run + verify examples | `examples/run_all.sh` | `examples\run_all.bat` |
 | Run regressions | `scripts/run_regressions.sh` | `scripts\run_regressions.bat` |
 | Native compiler gate | `scripts/native_gate.sh` | `scripts\native_gate.ps1` |
 
-`scripts\build.bat` takes a mode - `core` (default), `test`, `full`, `clean`, `help` -
-plus `--debug`, `--target <name>`, `--jobs <n>` and `--run [file]`.
-The default mode builds only the toolchain; it never pulls in tests, benchmarks
-or examples.
+`scripts/build.sh` and `scripts\build.bat` are the same driver for their platform.
+Both take a mode - `core` (default), `test`, `full`, `clean`, `help` - plus
+`--debug`, `--target <name>`, `--jobs <n>`, `--ctest` and `--run [file]`.
+The default mode builds only the toolchain (3 binaries); it never pulls in
+tests, benchmarks or examples.
 
 ## Run a program
 
