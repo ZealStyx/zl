@@ -68,7 +68,7 @@ void testBorrowTracksLifetime() {
         require(!borrow.valid(), "the borrow goes invalid when the owner dies");
         bool threw = false;
         try {
-            borrow.get();
+            (void)borrow.get();
         } catch (const std::runtime_error&) {
             threw = true;
         }
@@ -92,7 +92,7 @@ void testBorrowTracksLifetime() {
         require(!empty.valid(), "a zero-handle owner is invalid");
         bool threw = false;
         try {
-            empty.get();
+            (void)empty.get();
         } catch (const std::runtime_error&) {
             threw = true;
         }
@@ -112,7 +112,7 @@ void testBufferView() {
         require(!view.valid(), "the view dies with the owner");
         bool threw = false;
         try {
-            view.data();
+            (void)view.data();
         } catch (const std::runtime_error&) {
             threw = true;
         }
@@ -135,7 +135,7 @@ void testRegistry() {
     {
         bool invalidRejected = false;
         try {
-            nativeResourceRegistry().insert(NativeResourceOwner{});
+            (void)nativeResourceRegistry().insert(NativeResourceOwner{});
         } catch (const std::runtime_error&) {
             invalidRejected = true;
         }
@@ -154,13 +154,13 @@ void testRegistry() {
         (void)consumed;
         require(!nativeResourceRegistry().contains(ref), "consume removes the token");
         try {
-            nativeResourceRegistry().consume(ref);
+            (void)nativeResourceRegistry().consume(ref);
         } catch (const std::runtime_error& e) {
             doubleBorrowAfterConsume = std::string(e.what()) == "invalid native handle";
         }
         require(doubleBorrowAfterConsume, "a second consume is an invalid-handle error");
         try {
-            nativeResourceRegistry().borrow(ref);
+            (void)nativeResourceRegistry().borrow(ref);
         } catch (const std::runtime_error&) {
             require(true, "borrowing a consumed handle throws");
         }

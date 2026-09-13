@@ -116,6 +116,33 @@ def main() -> int:
     check("test targets still registered in CMake", len(test_exes) >= 30,
           f"{len(test_exes)} test executables")
 
+    # --- platform link requirements (Windows ws2_32 regression) -------------
+    # Every target built from ZL_RUNTIME_VM_SOURCES compiles src/vm/native.cpp,
+    # which calls Winsock. Missing ws2_32 links fine on Linux and fails only on
+    # Windows, so assert the registration is centralized instead of per-target.
+    cml = (REPO / "CMakeLists.txt").read_text(errors="replace")
+    vm_tests = re.findall(r"zl_add_vm_test\(([\w-]+)", cml)
+    check("VM-sources tests go through zl_add_vm_test", len(vm_tests) >= 7,
+          f"{len(vm_tests)} targets: {vm_tests}")
+    # The only legitimate zl_add_required_test(... ZL_RUNTIME_VM_SOURCES ...)
+    # call is the one inside the zl_add_vm_test macro body; any other is a
+    # target bypassing the centralized platform link requirements.
+    macro_body = re.search(r"macro\(zl_add_vm_test.*?endmacro\(\)", cml, re.S).group(0)
+    raw = [l.strip() for l in cml.splitlines()
+           if "ZL_RUNTIME_VM_SOURCES" in l
+           and "zl_add_required_test" in l
+           and l.strip() not in macro_body]
+    check("no VM test bypasses zl_add_vm_test", not raw, str(raw))
+    check("zl_add_vm_test links ws2_32 on Windows",
+          re.search(r"macro\(zl_add_vm_test.*?endmacro\(\)", cml, re.S) is not None
+          and "ws2_32" in re.search(r"macro\(zl_add_vm_test.*?endmacro\(\)",
+                                    cml, re.S).group(0))
+    check("zl_add_vm_test links Threads",
+          "Threads::Threads" in re.search(r"macro\(zl_add_vm_test.*?endmacro\(\)",
+                                          cml, re.S).group(0))
+    check("a configure-time guard fails the build on a missing ws2_32",
+          "would fail" in cml and "ZL_VM_TEST_TARGETS" in cml)
+
     core = edges(tmp, "zl-core")
     tests = edges(tmp, "zl-tests")
     full = edges(tmp, "zl-full")

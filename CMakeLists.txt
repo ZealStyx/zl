@@ -187,11 +187,22 @@ target_link_libraries(zl-runtime-scheduler-tests PRIVATE Threads::Threads)
 # program manufacturing an impossible internal Function object.
 set(ZL_RUNTIME_VM_SOURCES ${SOURCES})
 list(FILTER ZL_RUNTIME_VM_SOURCES EXCLUDE REGEX ".*/main\\.cpp$")
-zl_add_required_test(zl-runtime-hardening-vm-tests tests/runtime_hardening_vm_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
-target_link_libraries(zl-runtime-hardening-vm-tests PRIVATE Threads::Threads)
-if(WIN32)
-    target_link_libraries(zl-runtime-hardening-vm-tests PRIVATE ws2_32)
-endif()
+
+# Any target that links ZL_RUNTIME_VM_SOURCES pulls in src/vm/native.cpp, which
+# calls Winsock (Network.resolve), and the runtime's threading. Those platform
+# link requirements are a property of the source set, not of the individual
+# test, so they are attached in one place: registering a VM-sources test any
+# other way is what let zl-mir-type-tests and zl-mir-ownership-tests ship
+# without ws2_32 and fail to link on Windows only.
+macro(zl_add_vm_test target primary_source)
+    zl_add_required_test(${target} ${primary_source} ${ZL_RUNTIME_VM_SOURCES} ${ARGN})
+    target_link_libraries(${target} PRIVATE Threads::Threads)
+    if(WIN32)
+        target_link_libraries(${target} PRIVATE ws2_32)
+    endif()
+    list(APPEND ZL_VM_TEST_TARGETS ${target})
+endmacro()
+zl_add_vm_test(zl-runtime-hardening-vm-tests tests/runtime_hardening_vm_tests.cpp)
 # Lets the target re-run the boundary lint inside its own process as a
 # regression case (compiler boundary violations must keep being caught).
 find_program(ZL_TEST_BASH NAMES bash)
@@ -205,11 +216,7 @@ endif()
 # Drives the whole native pipeline and *executes* the emitted machine code, so
 # it links the front end (its end-to-end cases lower real ZL source) plus the
 # native sources themselves.
-zl_add_required_test(zl-native-backend-tests tests/native_backend_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
-if(WIN32)
-    target_link_libraries(zl-native-backend-tests PRIVATE ws2_32)
-endif()
-target_link_libraries(zl-native-backend-tests PRIVATE Threads::Threads)
+zl_add_vm_test(zl-native-backend-tests tests/native_backend_tests.cpp)
 
 # --- MIR (mid-level IR) -----------------------------------------------------
 # Two targets, split by what they need to link.
@@ -279,11 +286,7 @@ zl_add_required_test(zl-mir-opt-tests tests/mir_pass_tests.cpp
 # the two modules twice - statically (compareModules) and by executing both
 # through the bytecode backend with their output captured - so it links the
 # whole compiler minus main(), like the lowering target.
-zl_add_required_test(zl-mir-opt-pipeline-tests tests/mir_opt_pipeline_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
-if(TARGET zl-mir-opt-pipeline-tests AND WIN32)
-    target_link_libraries(zl-mir-opt-pipeline-tests PRIVATE ws2_32)
-endif()
-    target_link_libraries(zl-mir-opt-pipeline-tests PRIVATE Threads::Threads)
+zl_add_vm_test(zl-mir-opt-pipeline-tests tests/mir_opt_pipeline_tests.cpp)
 
 # zl-pipeline-tests owns the compiler pipeline itself: stage order, the
 # invariant that no backend sees unverified MIR, backend selection as a
@@ -291,30 +294,22 @@ endif()
 # compiler minus main() (ZL_RUNTIME_VM_SOURCES) because these are end-to-end
 # properties: a pipeline assembled out of mocks would prove nothing about the
 # one that ships.
-zl_add_required_test(zl-pipeline-tests tests/pipeline_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
-if(TARGET zl-pipeline-tests AND WIN32)
-    target_link_libraries(zl-pipeline-tests PRIVATE ws2_32)
-endif()
-    target_link_libraries(zl-pipeline-tests PRIVATE Threads::Threads)
+zl_add_vm_test(zl-pipeline-tests tests/pipeline_tests.cpp)
 
 # zl-mir-lowering-tests drives the real pipeline - ModuleLoader, TypeChecker,
 # lowerProgram, verifyModule - so it links the whole compiler minus main().
-zl_add_required_test(zl-mir-lowering-tests tests/mir_lowering_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+zl_add_vm_test(zl-mir-lowering-tests tests/mir_lowering_tests.cpp)
 
 # Type-system integration: the type table, sum types, canonical nested
 # generics through lowering, dynamic-to-static boundaries, and the verifier
 # rules that keep invalid type assumptions detectable. Links the whole front
 # end because most of its cases drive the real pipeline.
-zl_add_required_test(zl-mir-type-tests tests/mir_type_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
+zl_add_vm_test(zl-mir-type-tests tests/mir_type_tests.cpp)
 
 # Ownership/lifetime integration: storage contracts and the move/borrow/drop
 # events, with the verifier's flow rules pinning each invalid state. Links the
 # whole front end for its pipeline case.
-zl_add_required_test(zl-mir-ownership-tests tests/mir_ownership_tests.cpp ${ZL_RUNTIME_VM_SOURCES})
-if(TARGET zl-mir-lowering-tests AND WIN32)
-    target_link_libraries(zl-mir-lowering-tests PRIVATE ws2_32)
-endif()
-    target_link_libraries(zl-mir-lowering-tests PRIVATE Threads::Threads)
+zl_add_vm_test(zl-mir-ownership-tests tests/mir_ownership_tests.cpp)
 
 
 # --- Installation (Phase 12A foundation) -----------------------------------
@@ -542,6 +537,23 @@ if(BUILD_TESTING)
         set_tests_properties(pipeline-report PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endif()
 endif()
+
+# --- Platform link-requirement guard ----------------------------------------
+# A test that compiles src/vm/native.cpp but never links Winsock builds fine on
+# Linux and fails only at link time on Windows. Rather than trust review to
+# catch that, assert it here: every target carrying the VM sources must have
+# gone through zl_add_vm_test, which is the only place the link requirements
+# live.
+foreach(zl_vm_target IN LISTS ZL_VM_TEST_TARGETS)
+    get_target_property(zl_vm_libs ${zl_vm_target} LINK_LIBRARIES)
+    if(WIN32 AND NOT "ws2_32" IN_LIST zl_vm_libs)
+        message(FATAL_ERROR
+            "${zl_vm_target} links the VM sources but not ws2_32; it would fail "
+            "to link on Windows. Register it with zl_add_vm_test().")
+    endif()
+endforeach()
+list(LENGTH ZL_VM_TEST_TARGETS ZL_VM_TEST_COUNT)
+message(STATUS "[ZL] VM-sources tests: ${ZL_VM_TEST_COUNT} (Threads + Winsock linked centrally)")
 
 # --- Aggregate targets (Objective 8.7) --------------------------------------
 # Declared last so every target registered above has already joined a bucket.

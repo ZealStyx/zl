@@ -203,13 +203,78 @@ cannot reach a test target even transitively.
 | Optional components available through explicit targets | ✅ `zl-tests`, `zl-benchmarks`, `zl-examples`, `zl-full` |
 | Core build does not depend on test targets | ✅ asserted by the regression script and by `ninja -t inputs` |
 
-## 6. Files changed
+## 6. Windows link-requirement fix (follow-up)
+
+A Windows build of `zl-mir-type-tests` / `zl-mir-ownership-tests` failed with
+undefined references to `__imp_WSAStartup`, `__imp_getaddrinfo`, etc. Both link
+`ZL_RUNTIME_VM_SOURCES`, which includes `src/vm/native.cpp` (Winsock-based
+`Network.resolve`), but neither linked `ws2_32`.
+
+The reported fix was to add `ws2_32` to the two failing targets. The audit
+showed the real defect is structural: the `ws2_32` / `Threads::Threads` links
+were **copy-pasted per target** across 7 VM-sources tests, and 2 copies were
+missing. Adding 2 more copies preserves the trap for the 8th target.
+
+Instead the requirement is attached once, to the source set it belongs to:
+
+```cmake
+macro(zl_add_vm_test target primary_source)
+    zl_add_required_test(${target} ${primary_source} ${ZL_RUNTIME_VM_SOURCES} ${ARGN})
+    target_link_libraries(${target} PRIVATE Threads::Threads)
+    if(WIN32)
+        target_link_libraries(${target} PRIVATE ws2_32)
+    endif()
+    list(APPEND ZL_VM_TEST_TARGETS ${target})
+endmacro()
+```
+
+All 7 VM-sources targets now route through it: `zl-runtime-hardening-vm-tests`,
+`zl-native-backend-tests`, `zl-mir-opt-pipeline-tests`, `zl-pipeline-tests`,
+`zl-mir-lowering-tests`, `zl-mir-type-tests`, `zl-mir-ownership-tests`. This
+also removed a latent bug — the old block set `Threads`/`ws2_32` on
+`zl-mir-lowering-tests` *twice* while `zl-mir-ownership-tests` got neither.
+
+A configure-time guard makes the failure impossible to reintroduce, turning a
+Windows-only link error at the end of a long build into an immediate,
+cross-platform configuration error:
+
+```cmake
+foreach(zl_vm_target IN LISTS ZL_VM_TEST_TARGETS)
+    get_target_property(zl_vm_libs ${zl_vm_target} LINK_LIBRARIES)
+    if(WIN32 AND NOT "ws2_32" IN_LIST zl_vm_libs)
+        message(FATAL_ERROR "${zl_vm_target} links the VM sources but not ws2_32 ...")
+    endif()
+endforeach()
+```
+
+Verified by forcing `WIN32` in a scratch project: a hand-registered target
+without `ws2_32` aborts configuration with the diagnostic; the compliant one
+passes. All 7 targets link cleanly on Linux, and the suite is **37/37**.
+
+### `[[nodiscard]]` warnings
+
+The same Windows run reported `-Wunused-result` warnings. A repo-wide sweep of
+every test source found **29** across 4 files, all deliberate discards, fixed
+with an explicit `(void)` cast:
+
+| File | Fixed |
+| --- | --- |
+| `tests/mir_tests.cpp` | 13 |
+| `tests/mir_ownership_tests.cpp` | 9 |
+| `tests/native_resource_tests.cpp` | 6 |
+| `tests/native_boundary_tests.cpp` | 1 |
+
+Re-scanning all test sources afterwards reports **0** remaining. These were
+warnings only (no `-Werror`), so no build was ever broken by them.
+
+## 7. Files changed
 
 | File | Change |
 | --- | --- |
 | `CMakeLists.txt` | target buckets + `zl-core`/`zl`/`zl-tests`/`zl-benchmarks`/`zl-examples`/`zl-full` aggregates; tests marked `EXCLUDE_FROM_ALL`; configure-time boundary report |
 | `scripts/build.bat` | mode-driven driver (`core`/`test`/`full`/`clean`/`help`), explicit `--target`, `[ZL]` output, new `--ctest` |
 | `scripts/build.sh` | **new** — POSIX twin with identical mode semantics |
-| `tools/dev/check_build_modes.py` | **new** — 38-check regression guard for the target boundary |
+| `tools/dev/check_build_modes.py` | **new** — 43-check regression guard for the target boundary and the VM-test link requirements |
+| `tests/mir_tests.cpp`, `mir_ownership_tests.cpp`, `native_resource_tests.cpp`, `native_boundary_tests.cpp` | 29 `[[nodiscard]]` discards made explicit |
 | `BUILD_TARGETS_REPORT.md` | **new** — this report |
 | `README.md`, `docs/development.md` | document the modes and aggregate targets |

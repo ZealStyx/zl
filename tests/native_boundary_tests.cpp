@@ -205,7 +205,7 @@ void testOwnedHandleTransfer() {
 
         bool gone = false;
         try {
-            nativeResourceRegistry().consume(ref);
+            (void)nativeResourceRegistry().consume(ref);
         } catch (const std::runtime_error&) {
             gone = true;
         }
