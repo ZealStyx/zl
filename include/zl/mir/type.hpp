@@ -213,6 +213,9 @@ struct Type {
 // Every rule about "is this a collection" therefore has to accept both
 // spellings, or the two forms quietly diverge - indexing may accept `List<T>`
 // while construction rejects it, which is what this predicate exists to stop.
+// Fixed-size `array[N]<T>` is accepted as well: at runtime it is a list with
+// a size contract, and literals of it are built by the same collection
+// shape, so the rules that apply to list construction and access apply to it.
 [[nodiscard]] bool isCollectionType(const Type& type) noexcept;
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 #include "zl/compiler/compiler.hpp"
 #include "zl/compiler/semantic_types.hpp"
-#include "zl/common/type_annotation.hpp"
+#include "zl/parser/type_annotation.hpp"
 #include "zl/vm/gc.hpp"
 #include <functional>
 

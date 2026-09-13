@@ -402,8 +402,15 @@ void dynamicBoundaryTest() {
 
     const zl::mir::Function* main = findFunction(lowered, "Dyn.main()");
     require(main != nullptr, "Dyn.main() must be lowered");
-    // Both boundaries are explicit refine instructions: the argument into
-    // take's int parameter, and the typed declaration of m.
+    // The typed declaration `int m = alias` is an explicit refine at the store
+    // boundary. The argument into take's int parameter is deliberately NOT a
+    // caller-side refine: the callee's call frame asserts every argument
+    // against the declared parameter types in one transaction (committing the
+    // contracts the checks pin only when the whole argument batch passes, so
+    // a batch that fails on argument N leaves arguments 1..N-1 unbound), and
+    // that frame runs on every ZL call path. Refining each argument at the
+    // call site would commit it as it passed, so a failed batch would leave
+    // the earlier arguments pinned - the rollback the contract requires.
     std::size_t refines = 0;
     for (const auto& block : main->blocks) {
         for (const auto& instruction : block.instructions) {
@@ -413,8 +420,8 @@ void dynamicBoundaryTest() {
             }
         }
     }
-    require(refines >= 2, "each dynamic-to-static boundary is an explicit refine, saw " +
-                              std::to_string(refines));
+    require(refines == 1, "the store boundary is the one explicit refine (the call "
+                          "argument is checked in the callee's frame), saw " + std::to_string(refines));
     require(contains(lowered, "Dyn.main()", "refine"), "the printed MIR shows the boundary");
 
     // And the module the backend produces asserts the same fact at runtime:
@@ -431,6 +438,58 @@ void dynamicBoundaryTest() {
         }
     }
     require(sawAssertInt, "the backend emits a runtime type assertion for the boundary");
+}
+
+// A native call carries no caller-side argument assertion: the reference
+// bytecode compiler emits none, the front end checks statically typed
+// arguments, and the native self-checks dynamic ones at runtime with a
+// function-specific fault. The regression this pins: the old lowering
+// asserted the catalog's declared names at the call site, so a user class
+// named exactly like a generic native token (`T` against Collection.push's
+// list<T>/T) was mistaken for the token and asserted against from a frame
+// that binds neither - rejecting valid writes - and every call argument
+// carried a refine the runtime committed one by one. The only refines such a
+// program may contain are the identity storage-contract pins of its
+// collection literals.
+void nativeCallBoundaryTest() {
+    const Lowered lowered = lower("NativeBoundary",
+        "class T { public int marker }\n"
+        "class NativeBoundary {\n"
+        "    static func pushIt(unknown target, unknown value): void {\n"
+        "        Collection.push(target, value)\n"
+        "    }\n"
+        "    func main(): void {\n"
+        "        list<int> numbers = [1]\n"
+        "        NativeBoundary.pushIt(numbers, 2)\n"
+        "        var thing = new T()\n"
+        "        log(numbers)\n"
+        "        log(thing)\n"
+        "    }\n"
+        "}\n");
+    require(lowered.ok, "native boundary program lowered to invalid MIR:\n" + lowered.errors);
+
+    const zl::mir::Function* main = findFunction(lowered, "NativeBoundary.main()");
+    require(main != nullptr, "NativeBoundary.main() must be lowered");
+    const zl::mir::Function* pushIt = nullptr;
+    for (const auto& function : lowered.module.functions) {
+        if (function.name.rfind("NativeBoundary.pushIt(", 0) == 0) pushIt = &function;
+    }
+    require(pushIt != nullptr, "NativeBoundary.pushIt(unknown,unknown) must be lowered");
+
+    auto identityRefinesOnly = [&](const zl::mir::Function* function, const char* what) {
+        for (const auto& block : function->blocks) {
+            for (const auto& instruction : block.instructions) {
+                if (instruction.opcode != zl::mir::Opcode::Refine) continue;
+                require(instruction.operands.size() == 1 &&
+                            instruction.operands[0].type == instruction.resultType,
+                        std::string(what) + " contains a dynamic-to-static refine; the native "
+                                           "call boundary is the native's own contract, not a "
+                                           "caller-side assert");
+            }
+        }
+    };
+    identityRefinesOnly(main, "NativeBoundary.main()");
+    identityRefinesOnly(pushIt, "NativeBoundary.pushIt()");
 }
 
 void unionNarrowingTest() {
@@ -729,6 +788,7 @@ int main() {
     unionReturnTypeTest();
     functionTypeTest();
     dynamicBoundaryTest();
+    nativeCallBoundaryTest();
     unionNarrowingTest();
     verifierRejectsUnrefinedStoreTest();
     verifierAcceptsRefinedStoreTest();

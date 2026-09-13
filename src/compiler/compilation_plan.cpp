@@ -1,6 +1,6 @@
 #include "zl/compiler/compiler.hpp"
 #include "zl/compiler/dispatch_table.hpp"
-#include "zl/common/type_annotation.hpp"
+#include "zl/parser/type_annotation.hpp"
 
 #include <algorithm>
 #include <stdexcept>

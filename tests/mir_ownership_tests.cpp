@@ -85,7 +85,7 @@ void useAfterDropTest() {
     OwnedModule m;
     m.storeRes();
     m.fb.emitDrop(m.res);
-    m.fb.emitLoad(m.res); // the use the release invalidated
+    (void)m.fb.emitLoad(m.res); // the use the release invalidated
     const auto report = m.verify();
     require(!report.ok(), "a load after drop of the same slot must be rejected:\n" + reportText(report));
     require(report.describe().find("dropped") != std::string::npos,
@@ -108,7 +108,7 @@ void doubleDropTest() {
 void dropAfterMoveTest() {
     OwnedModule m;
     m.storeRes();
-    m.fb.emitMove(m.res);
+    (void)m.fb.emitMove(m.res);
     m.fb.emitDrop(m.res);
     const auto report = m.verify();
     require(!report.ok(), "a drop after move of the same slot must be rejected:\n" + reportText(report));
@@ -125,7 +125,7 @@ void dropWhileBorrowedTest() {
                                      zl::OwnershipKind::BORROW, "res");
     m.fb.emitBorrow(view, m.loadedRes());
     m.fb.emitDrop(m.res);
-    m.fb.emitLoad(view); // the borrow still reading a released owner
+    (void)m.fb.emitLoad(view); // the borrow still reading a released owner
     const auto report = m.verify();
     require(!report.ok(), "a drop while a local borrow is live must be rejected:\n" + reportText(report));
     require(report.describe().find("borrowed by") != std::string::npos,
@@ -214,7 +214,7 @@ void dropOnOnePathUseAtJoinTest() {
     fb.emitJump(join);
 
     fb.setCurrentBlock(join);
-    fb.emitLoad(res); // dead on one incoming path, therefore dead here
+    (void)fb.emitLoad(res); // dead on one incoming path, therefore dead here
     fb.emitReturn();
     fb.finish();
     builder.setEntryPoint(fb.function().id);
@@ -247,14 +247,14 @@ void moveOnOnePathUseAtJoinTest() {
                   thenB, elseB);
 
     fb.setCurrentBlock(thenB);
-    fb.emitMove(res); // moved on this path only
+    (void)fb.emitMove(res); // moved on this path only
     fb.emitJump(join);
 
     fb.setCurrentBlock(elseB);
     fb.emitJump(join);
 
     fb.setCurrentBlock(join);
-    fb.emitLoad(res);
+    (void)fb.emitLoad(res);
     fb.emitReturn();
     fb.finish();
     builder.setEntryPoint(fb.function().id);
@@ -313,7 +313,7 @@ void exitReleaseWithLiveBorrowTest() {
     const SlotId view = m.fb.addSlot("view", m.builder.types().objectType("Res"), true,
                                      zl::OwnershipKind::BORROW, "res");
     m.fb.emitBorrow(view, m.loadedRes());
-    m.fb.emitLoad(view); // the borrow's last use
+    (void)m.fb.emitLoad(view); // the borrow's last use
     m.fb.emitDrop(m.res); // trailing cleanup: nothing after but drops and the return
     const auto report = m.verify();
     require(report.ok(), "an exit release while a function-scoped borrow is live verifies:\n" +
@@ -329,7 +329,7 @@ void borrowEndMoveTest() {
                                      zl::OwnershipKind::BORROW, "res");
     m.fb.emitBorrow(view, m.loadedRes());
     m.fb.emitEndBorrow(view);
-    m.fb.emitMove(m.res);
+    (void)m.fb.emitMove(m.res);
     const auto report = m.verify();
     require(report.ok(), "borrow, end_borrow, then move must verify:\n" + reportText(report));
 }
@@ -339,7 +339,7 @@ void borrowEndMoveTest() {
 void storeAfterMoveRejectedTest() {
     OwnedModule m;
     m.storeRes();
-    m.fb.emitMove(m.res);
+    (void)m.fb.emitMove(m.res);
     m.storeRes(); // assignment to a moved variable
     const auto report = m.verify();
     require(!report.ok(), "a store to a moved slot must be rejected, as in the checker:\n" +

@@ -37,6 +37,42 @@
 // The analysis is a question, not a transform: nothing here rewrites the module.
 // `ReachabilityReport::complete()` is what a caller must check before acting on
 // `functions`, and a module with reflection in it reports incomplete.
+//
+// ### The semantic contract of `complete()`
+//
+// Every instruction that can transfer execution to code is classified, and
+// `complete() == true` **only when every possible execution edge relevant to
+// this module has been statically accounted for** - that is, when the module
+// has an entry point and every edge is one of the closed kinds below:
+//
+//   * **direct/static call** - `Call`, `InvokeStatic`, `InvokeSuper`: the target
+//     function is recorded on the instruction;
+//   * **virtual/interface dispatch** - `InvokeMethod`: resolved over the
+//     recorded class hierarchy (over-approximated, see above);
+//   * **known closure/function value** - `CallIndirect` (and `TaskSpawn`,
+//     `ThreadStart`, the `*WithLock` family) through a value the analysis can
+//     *prove* is one closure body: a single SSA definition, possibly through
+//     a slot with exactly one store;
+//   * **native opaque entry** - `CallNative` / `FfiCall` / `CallbackInvoke`
+//     into a known symbol: the execution leaves this module's functions by
+//     design, so it cannot enter a function this analysis forgot.
+//
+// The report is **incomplete** when any edge of an open kind is reachable:
+//
+//   * **indirect/unresolved call** - a call through a function value that
+//     cannot be pinned to a single body (a function-valued parameter, a
+//     block parameter, a static, a temp with any other definition, a slot
+//     with zero or multiple stores). The value may hold *any* function the
+//     caller chooses, so the reachable set is a lower bound;
+//   * **reflection/dynamic dispatch** - a native that enters code by name
+//     (the reflection invoke family): the callee is a runtime value.
+//
+// An unresolved edge is never silently dropped and never "explained away" by
+// assuming the operand's current lowering pattern: a callee that is provably
+// known is enqueued, and everything else makes the report incomplete. A later
+// function-value analysis can only *shrink* the set of unresolved edges (by
+// proving more values to be single closures) - it cannot change what
+// `complete()` means.
 
 namespace zl::mir {
 
@@ -51,13 +87,30 @@ struct ReachabilityReport {
     // anything must refuse.
     bool dynamicEntry{false};
     std::string dynamicEntryReason;
+    // Set when a function that can run executes a function value it cannot
+    // pin to a single closure body (an unresolved indirect call). Like
+    // dynamicEntry, this makes `functions` a lower bound: the value may hold
+    // any function the caller of that function chose.
+    bool unresolvedCalls{false};
+    // The first unresolved site, named: which function and which construct.
+    std::string unresolvedCallReason;
+    // Every unresolved site, counted - the report is a lower bound by at least
+    // this many edges.
+    std::size_t unresolvedCallCount{0};
     // Human-readable notes about the approximation: how many functions were kept
     // by hierarchy-wide dispatch resolution, and why.
     std::vector<std::string> notes;
 
-    // True when the answer is exact enough to act on: every path into a function
-    // is either an edge in the call graph or an entry point.
-    [[nodiscard]] bool complete() const noexcept { return hasEntryPoint && !dynamicEntry; }
+    // True only when every possible execution edge relevant to this module has
+    // been statically accounted for: an entry point exists, no reflection
+    // native opens the graph, and no reachable call executes a function value
+    // that is not provably a single closure body. That is the condition under
+    // which `functions` is safe to use as a removal guarantee; in every other
+    // case it is a lower bound and a caller that would delete anything must
+    // refuse.
+    [[nodiscard]] bool complete() const noexcept {
+        return hasEntryPoint && !dynamicEntry && !unresolvedCalls;
+    }
     [[nodiscard]] std::size_t size() const noexcept { return functions.size(); }
     [[nodiscard]] bool contains(FunctionId id) const { return functions.count(id) != 0; }
 

@@ -759,11 +759,29 @@ int main(int argc, char** argv) {
             if (!appendStandardRoots(argv[0], roots, exitCode)) return exitCode;
 
             // The report covers the whole pipeline, code generation included,
-            // so this command answers for the same stages a run does. It also
-            // means the entry file must be a program: a library with no entry
-            // point has no code-generation stage to report.
-            pipeline::Pipeline compiler(optionsForEmit(backend, /*optimize=*/true));
+            // so it describes a *runnable program's* pipeline - and that is a
+            // program contract: the entry file must define a valid entry
+            // point. A library is rejected at the semantic stage
+            // (requireMain below, the same stage that validates main's
+            // signature), never with a report that pretends a code-generation
+            // stage exists for a module nothing can enter. Inspect a library
+            // with --emit-mir instead: that command's contract stops at MIR.
+            pipeline::Options reportOptions = optionsForEmit(backend, /*optimize=*/true);
+            reportOptions.requireMain = true;
+            pipeline::Pipeline compiler(reportOptions);
             if (!compiler.run(entry, roots)) return reportPipelineFailure(compiler.result());
+            if (compiler.result().module.entryPoint == zl::mir::kNoFunction) {
+                // A backstop for the command-level contract: the semantic stage
+                // already refuses a missing main, so this only fires if that
+                // ever relaxes. The report still must not describe a module
+                // with no entry point.
+                std::cerr << "error: --pipeline-report describes a runnable program's pipeline, but '"
+                          << entry << "' has no entry point (no main()): it is a library module, "
+                          "and a library has no code-generation stage to report\n"
+                          << "  inspect the library with --emit-mir, or add a main() function to "
+                          "run it as a program\n";
+                return 2;
+            }
             std::cout << compiler.result().describe() << "\n";
             std::cout << "stage invariants\n";
             for (std::size_t i = 0; i < pipeline::kStageCount; ++i) {
@@ -773,10 +791,13 @@ int main(int argc, char** argv) {
             }
 
             // The other backend, from the same source: same MIR, or the
-            // backend-independence claim in the header is false.
+            // backend-independence claim in the header is false. Same program
+            // contract: the sibling run reports the same entry-point rules.
             const pipeline::Backend other = backend == pipeline::Backend::Bytecode
                 ? pipeline::Backend::Native : pipeline::Backend::Bytecode;
-            pipeline::Pipeline sibling(optionsForEmit(other, /*optimize=*/true));
+            pipeline::Options siblingOptions = optionsForEmit(other, /*optimize=*/true);
+            siblingOptions.requireMain = true;
+            pipeline::Pipeline sibling(siblingOptions);
             if (!sibling.run(entry, roots)) return reportPipelineFailure(sibling.result());
             const std::string mine = compiler.result().mirDigest();
             const std::string theirs = sibling.result().mirDigest();

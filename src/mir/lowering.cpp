@@ -6,7 +6,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "zl/common/type_annotation.hpp"
+#include "zl/parser/type_annotation.hpp"
 #include "zl/common/type_name.hpp"
 #include "zl/compiler/dispatch_table.hpp"
 #include "zl/compiler/native_catalog.hpp"
@@ -432,6 +432,34 @@ struct FunctionLowerer {
         return slot;
     }
 
+    // The function-level slot registered under `key`, or 0. Scopes may shadow
+    // a name with a read-only value binding (a match arm rebinds its subject
+    // to a refined value) while the addressable storage still exists here.
+    [[nodiscard]] SlotId slotNamed(const std::string& key) const {
+        for (std::size_t i = 0; i < fb.function().slots.size(); ++i) {
+            if (fb.function().slots[i].name == key) return static_cast<SlotId>(i + 1);
+        }
+        return 0;
+    }
+
+    // Binds a name introduced by a match pattern. A binding the arm assigns to
+    // (its storage key is in `writtenLocals`) gets its own writable slot - the
+    // write needs addressable storage of the binding's own, shadowing any outer
+    // name the binding may hide; every other binding stays a read-only value.
+    void bindPatternBinding(const std::string& bindingName, const std::string& storageName,
+                            const Operand& value, const zl::MatchExpr::Arm& arm, SourceLocation loc) {
+        (void)arm;
+        if (bindingName.empty() || bindingName == "_") return;
+        const std::string key = storageKey(storageName, bindingName);
+        if (!storageName.empty() && writtenLocals.count(key) != 0) {
+            const SlotId slot = fb.addSlot(key, value.type, true, zl::OwnershipKind::GC, {}, loc);
+            fb.emitStore(slot, value, loc);
+            bindLocalBoth(bindingName, storageName, LocalRef::slotRef(slot));
+            return;
+        }
+        bindLocalBoth(bindingName, storageName, LocalRef::valueRef(value));
+    }
+
     // --- types ------------------------------------------------------------
     [[nodiscard]] TypeId typeOfNode(const zl::AstNode* node) const {
         return types.fromInferred(ctx.checker.expressionType(node));
@@ -580,7 +608,7 @@ struct FunctionLowerer {
         }
         switch (node.op) {
             case zl::TokenType::MINUS: {
-                const auto result = zl::OperatorRules::unaryResult(zl::TokenType::MINUS, zlTypeOf(operand.type));
+                const auto result = zl::OperatorRules::unaryResult(zl::Operator::Minus, zlTypeOf(operand.type));
                 if (!result) { unsupported(&node, "unary '-'"); return Operand::none(); }
                 const TypeId type = typeIdFor(*result);
                 return Operand::temp(fb.emitUnary(Opcode::Neg, operand, type, loc), type);
@@ -637,7 +665,7 @@ struct FunctionLowerer {
             unsupported(&node, "binary operator");
             return Operand::none();
         }
-        const auto result = zl::OperatorRules::binaryResult(tokenFor(opcode), zlTypeOf(left.type),
+        const auto result = zl::OperatorRules::binaryResult(operatorFor(opcode), zlTypeOf(left.type),
                                                             zlTypeOf(right.type));
         // An unknown operand is a dynamic boundary, not a type error: the
         // checker could not classify the operator statically (an untyped
@@ -715,10 +743,21 @@ struct FunctionLowerer {
     }
 
     [[nodiscard]] Operand assign(const zl::AssignExpr& node) {
-        const SlotId slot = lookupSlot(storageKey(node.storageName, node.name));
+        const std::string key = storageKey(node.storageName, node.name);
+        SlotId slot = lookupSlot(key);
         if (slot == 0) {
-            unsupported(&node, "assignment to unbound local '" + node.name + "'");
-            return Operand::none();
+            // A match arm rebinds its subject to a read-only (possibly
+            // refined) value in the arm scope, while the addressable storage
+            // the name refers to - a parameter or local materialized for the
+            // write - still exists at function level. A write through such a
+            // shadow must reach that storage; rebind the name to it here so
+            // later reads in this scope observe the fresh value.
+            slot = slotNamed(key);
+            if (slot == 0 || !fb.function().slot(slot)->isMutable) {
+                unsupported(&node, "assignment to unbound local '" + node.name + "'");
+                return Operand::none();
+            }
+            bindLocalBoth(node.name, node.storageName, LocalRef::slotRef(slot));
         }
         Operand value = expression(node.value.get());
         if (value.isNone()) return Operand::none();
@@ -1032,14 +1071,16 @@ struct FunctionLowerer {
                 Operand concurrency =
                     concurrencyNativeCall(qualifiedName, arguments, resultType, loc, lowered);
                 if (lowered) return concurrency;
-                // The native catalog's declared parameter names are the FFI
-                // boundary's contract; assert dynamics against them here.
-                for (std::size_t i = 0; i < arguments.size() && i < (*native)->parameterTypeNames.size(); ++i) {
-                    const std::string& declared = (*native)->parameterTypeNames[i];
-                    if (declared.empty()) continue;
-                    Operand refined = coerce(arguments[i], types.fromRendered(declared), loc);
-                    if (!refined.isNone()) arguments[i] = std::move(refined);
-                }
+                // No per-argument assertion here - the reference bytecode
+                // compiler emits none for native calls. Statically typed
+                // arguments are checked by the front end; dynamic ones are
+                // checked by the native itself (its require* contract throws a
+                // clean, function-specific type error) and by the container
+                // storage-contract machinery. Asserting the catalog's declared
+                // names at the call site would instead commit each argument's
+                // pin as it passed - a batch that fails on argument N would
+                // leave 1..N-1 pinned - and a generic native's tokens (push's
+                // list<T>/T) are not resolvable outside the native's own frame.
                 const TempId temp = fb.emitCallNative(qualifiedName, static_cast<std::int32_t>((*native)->id),
                                                       std::move(arguments), returnsVoid ? 0 : resultType,
                                                       (*native)->taskValueType != zl::ZlType::UNKNOWN, loc);
@@ -1073,12 +1114,8 @@ struct FunctionLowerer {
                     const TempId temp = fb.emitSharedCreate(std::move(arguments[0]), resultType, loc);
                     return Operand::temp(temp, resultType);
                 }
-                for (std::size_t i = 0; i < arguments.size() && i < (*native)->parameterTypeNames.size(); ++i) {
-                    const std::string& declared = (*native)->parameterTypeNames[i];
-                    if (declared.empty()) continue;
-                    Operand refined = coerce(arguments[i], types.fromRendered(declared), loc);
-                    if (!refined.isNone()) arguments[i] = std::move(refined);
-                }
+                // No per-argument assertion: the reference emits none for
+                // native calls (see the qualified path above).
                 const TempId temp = fb.emitCallNative(node.calleeName, static_cast<std::int32_t>((*native)->id),
                                                      std::move(arguments), returnsVoid ? 0 : resultType,
                                                      (*native)->taskValueType != zl::ZlType::UNKNOWN, loc);
@@ -1519,7 +1556,8 @@ struct FunctionLowerer {
                 if (key.isNone() || value.isNone()) return Operand::none();
                 fb.emitIndexStore(result, key, value, loc);
             }
-            return result;
+            if (collection->kind == TypeKind::Object) return result;
+            return pinRawCollectionContract(result, type, loc);
         }
         const TypeId elementType = collection->arguments.empty() ? 0 : collection->arguments.front();
         for (std::size_t i = 0; i < node.elements.size(); ++i) {
@@ -1531,7 +1569,20 @@ struct FunctionLowerer {
                                                     ctx.builder.types().intType());
             fb.emitIndexStore(result, index, value, loc);
         }
-        return result;
+        if (collection->kind == TypeKind::Object) return result;
+        return pinRawCollectionContract(result, type, loc);
+    }
+
+    // A raw native collection (list/map/set/array) is built as an untyped
+    // native container plus element writes; nothing else records the literal's
+    // declared element contract. Re-asserting the finished container against
+    // its declared type pins the storage contract transactionally (the assert
+    // descends into the elements, so nested containers inherit theirs), which
+    // is what makes later writes enforce the literal's declared element type.
+    // Class-layer collections need no pin: their push/add/put methods already
+    // run the boundary through the call frame.
+    [[nodiscard]] Operand pinRawCollectionContract(const Operand& value, TypeId type, SourceLocation loc) {
+        return Operand::temp(fb.emitRefine(value, type, loc), type);
     }
 
     [[nodiscard]] Operand await(const zl::AwaitExpr& node) {
@@ -2130,27 +2181,27 @@ struct FunctionLowerer {
         }
     }
 
-    [[nodiscard]] static zl::TokenType tokenFor(Opcode opcode) {
+    [[nodiscard]] static zl::Operator operatorFor(Opcode opcode) {
         switch (opcode) {
-            case Opcode::Add: return zl::TokenType::PLUS;
-            case Opcode::Sub: return zl::TokenType::MINUS;
-            case Opcode::Mul: return zl::TokenType::STAR;
-            case Opcode::Div: return zl::TokenType::SLASH;
-            case Opcode::Mod: return zl::TokenType::PERCENT;
-            case Opcode::Pow: return zl::TokenType::POW;
-            case Opcode::BitAnd: return zl::TokenType::BIT_AND;
-            case Opcode::BitOr: return zl::TokenType::BIT_OR;
-            case Opcode::BitXor: return zl::TokenType::BIT_XOR;
-            case Opcode::Shl: return zl::TokenType::SHL;
-            case Opcode::Shr: return zl::TokenType::SHR;
-            case Opcode::Ushr: return zl::TokenType::USHR;
-            case Opcode::Eq: return zl::TokenType::EQ;
-            case Opcode::Ne: return zl::TokenType::NEQ;
-            case Opcode::Lt: return zl::TokenType::LT;
-            case Opcode::Le: return zl::TokenType::LTE;
-            case Opcode::Gt: return zl::TokenType::GT;
-            case Opcode::Ge: return zl::TokenType::GTE;
-            default: return zl::TokenType::UNKNOWN;
+            case Opcode::Add: return zl::Operator::Plus;
+            case Opcode::Sub: return zl::Operator::Minus;
+            case Opcode::Mul: return zl::Operator::Multiply;
+            case Opcode::Div: return zl::Operator::Divide;
+            case Opcode::Mod: return zl::Operator::Modulo;
+            case Opcode::Pow: return zl::Operator::Power;
+            case Opcode::BitAnd: return zl::Operator::BitAnd;
+            case Opcode::BitOr: return zl::Operator::BitOr;
+            case Opcode::BitXor: return zl::Operator::BitXor;
+            case Opcode::Shl: return zl::Operator::ShiftLeft;
+            case Opcode::Shr: return zl::Operator::ShiftRight;
+            case Opcode::Ushr: return zl::Operator::ShiftRightZero;
+            case Opcode::Eq: return zl::Operator::Equal;
+            case Opcode::Ne: return zl::Operator::NotEqual;
+            case Opcode::Lt: return zl::Operator::Less;
+            case Opcode::Le: return zl::Operator::LessEqual;
+            case Opcode::Gt: return zl::Operator::Greater;
+            case Opcode::Ge: return zl::Operator::GreaterEqual;
+            default: return zl::Operator::Unknown;
         }
     }
 
@@ -2258,14 +2309,13 @@ struct FunctionLowerer {
         switch (pattern.kind) {
             case zl::MatchExpr::PatternKind::Wildcard:
                 break; // matches any value
-            case zl::MatchExpr::PatternKind::Variable:
-                if (!pattern.bindingName.empty() && pattern.bindingName != "_") {
-                    const auto storage = arm.storageBindings.find(pattern.bindingName);
-                    bindLocalBoth(pattern.bindingName,
-                                  storage == arm.storageBindings.end() ? std::string{} : storage->second,
-                                  LocalRef::valueRef(subject));
-                }
+            case zl::MatchExpr::PatternKind::Variable: {
+                const auto storage = arm.storageBindings.find(pattern.bindingName);
+                bindPatternBinding(pattern.bindingName,
+                                   storage == arm.storageBindings.end() ? std::string{} : storage->second,
+                                   subject, arm, loc);
                 break;
+            }
             case zl::MatchExpr::PatternKind::Literal:
             case zl::MatchExpr::PatternKind::EnumMember: {
                 Operand value = patternValue(pattern, subject.type);
@@ -2292,9 +2342,9 @@ struct FunctionLowerer {
                         value = Operand::temp(fb.emitRefine(subject, narrowed, loc), narrowed);
                     }
                     const auto storage = arm.storageBindings.find(pattern.bindingName);
-                    bindLocalBoth(pattern.bindingName,
-                                  storage == arm.storageBindings.end() ? std::string{} : storage->second,
-                                  LocalRef::valueRef(value));
+                    bindPatternBinding(pattern.bindingName,
+                                       storage == arm.storageBindings.end() ? std::string{} : storage->second,
+                                       value, arm, loc);
                 }
                 break;
             }
@@ -2564,6 +2614,36 @@ struct FunctionLowerer {
     //     a value whose shape does not match the destination fails loudly
     //     instead of being trusted. Every consumer of MIR - optimiser,
     //     backend, analyser - sees exactly where the checked boundaries are.
+    // True when every type-parameter token inside `type` is one of this
+    // function's own type parameters. The VM's AssertType resolves tokens
+    // lexically against the *frame's* bindings, so an assertion is only
+    // meaningful when the frame binds each token: a dynamic store into a
+    // `T`-typed local inside a `Cell<T>` method checks against the
+    // instantiation's concrete T, but a generic native's declared parameters
+    // (Collection.push's `list<T>`/`T`) seen from a non-generic caller name a
+    // token that frame has no binding for - asserting against it would test
+    // the literal name "T" (matching nothing) or pin a container's storage
+    // contract to it.
+    [[nodiscard]] bool tokensBoundHere(const Type* type, std::size_t depth) const {
+        if (!type || depth > 16) return true;
+        if (type->kind == TypeKind::TypeParam) {
+            return std::find(typeParams.begin(), typeParams.end(), type->name) != typeParams.end();
+        }
+        if (type->kind == TypeKind::Object && !type->name.empty() && type->name != "object" &&
+            type->arguments.empty() && !ctx.builder.module().classLayout(type->name)) {
+            // fromName renders an unbound catalog token as a bare object type
+            // (`T` -> object "T"), so a bare identifier naming no class in the
+            // module is the same unbound-token case. "object" is the builtin
+            // dynamic top type (and an empty name is the anonymous object),
+            // neither of which is a token.
+            return std::find(typeParams.begin(), typeParams.end(), type->name) != typeParams.end();
+        }
+        for (const std::uint32_t argument : type->arguments) {
+            if (!tokensBoundHere(ctx.builder.types().find(argument), depth + 1)) return false;
+        }
+        return true;
+    }
+
     [[nodiscard]] Operand coerce(Operand value, TypeId target, SourceLocation loc) {
         if (value.isNone() || value.type == target) return value;
         const Type* from = ctx.builder.types().find(value.type);
@@ -2574,7 +2654,11 @@ struct FunctionLowerer {
         }
         if (from->kind == TypeKind::Nil && isNullableKind(to->kind)) return value;
         if (from->kind == TypeKind::Unknown && to->kind != TypeKind::Unknown &&
-            to->kind != TypeKind::TypeParam && to->kind != TypeKind::Void) {
+            to->kind != TypeKind::Void && tokensBoundHere(to, 0)) {
+            // The target may name this function's own type parameters: the VM
+            // substitutes them from the frame at the assert, which is exactly
+            // the language's `try { t = dynamic } catch ...` contract for
+            // generic methods.
             return Operand::temp(fb.emitRefine(value, target, loc), target);
         }
         // Anything else is the checker's business, not the lowerer's: it already
@@ -2599,12 +2683,21 @@ struct FunctionLowerer {
             const TypeId parameterType = callee.parameters[i + skipLeading].type;
             const Type* parameter = ctx.builder.types().find(parameterType);
             if (!parameter) continue;
-            if (parameter->kind == TypeKind::TypeParam || parameter->kind == TypeKind::Unknown ||
-                parameter->kind == TypeKind::Void) {
-                continue;
+            // The parameter ASSERTION is not the caller's: the callee's call
+            // frame checks every argument against the declared parameter
+            // types in one transaction (committing the element contracts the
+            // checks pin only when the whole argument batch passes - a failed
+            // batch must leave its arguments unbound), and it throws the
+            // caller's `catch` sees. Emitting one assert per argument at the
+            // call site would commit each one as it passes, so a batch that
+            // fails on argument N leaves arguments 1..N-1 pinned - the
+            // rollback the language's contract requires. What the caller still
+            // owes is value conversion, not assertion: int -> double.
+            const Type* from = ctx.builder.types().find(arguments[i + skipLeading].type);
+            if (from && from->kind == TypeKind::Int && parameter->kind == TypeKind::Double) {
+                arguments[i + skipLeading] =
+                    Operand::temp(fb.emitWiden(arguments[i + skipLeading], loc), parameterType);
             }
-            Operand refined = coerce(arguments[i + skipLeading], parameterType, loc);
-            if (!refined.isNone()) arguments[i + skipLeading] = std::move(refined);
         }
     }
 };

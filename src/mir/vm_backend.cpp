@@ -774,11 +774,18 @@ private:
             case Opcode::Refine: {
                 // A refine is the runtime type assertion at a dynamic-to-static
                 // boundary, so this backend emits a real AssertType when the
-                // operand is not already statically the asserted type. Only an
-                // identity refinement stays a no-op: there the MIR checker
-                // proved the value already has the type, and re-checking it
-                // would burn time re-proving a static fact.
-                if (ins.operands[0].type != ins.resultType) {
+                // operand is not already statically the asserted type. An
+                // identity refinement on a plain value stays a no-op: there the
+                // MIR checker proved the value already has the type, and
+                // re-checking it would burn time re-proving a static fact. The
+                // one exception is a collection: there the identity assert is
+                // what pins the container's storage contract (the assert
+                // descends into the elements and commits their contracts),
+                // which is how a literal's declared element type is enforced
+                // on later writes. Dropping it silently un-types the container.
+                const Type* refined = module_.types.find(ins.resultType);
+                const bool pinsCollectionContract = refined && isCollectionType(*refined);
+                if (ins.operands[0].type != ins.resultType || pinsCollectionContract) {
                     pushOperand(fn, ins.operands[0], body, line);
                     body.emit(OpCode::AssertType, addName(module_.types.render(ins.resultType)), line);
                     defineTemp(ins.result, body, line);

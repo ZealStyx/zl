@@ -520,6 +520,233 @@ void testReachabilityOnALibrary() {
 }
 
 // ---------------------------------------------------------------------------
+// Function values: the execution edges a call through a value creates
+// ---------------------------------------------------------------------------
+
+// A plain direct call is a closed edge: the target is recorded on the
+// instruction, and the report may be used as a removal guarantee.
+const char* kDirectCallProgram =
+    "class FnDirect {\n"
+    "    static func add(int a, int b): int { return a + b }\n"
+    "    func main(): void {\n"
+    "        log(\"sum \" + FnDirect.add(2, 3))\n"
+    "    }\n"
+    "}\n";
+
+// A closure that is provably one body: `let` keeps it as an SSA value, `var`
+// stores it to a single slot and reads it back. Both are pinned by SSA
+// structure, so both are closed edges.
+const char* kKnownClosureProgram =
+    "class FnClosure {\n"
+    "    static func body(int x): int { return x * 3 }\n"
+    "    static func viaLet(): int {\n"
+    "        let f = FnClosure.body\n"
+    "        return f(10)\n"
+    "    }\n"
+    "    static func viaSlot(): int {\n"
+    "        var f = FnClosure.body\n"
+    "        return f(20)\n"
+    "    }\n"
+    "    func main(): void {\n"
+    "        log(\"let \" + FnClosure.viaLet())\n"
+    "        log(\"slot \" + FnClosure.viaSlot())\n"
+    "    }\n"
+    "}\n";
+
+// The callee is a parameter: whatever the caller chose can run. The analysis
+// must not pretend the graph is closed, and must not invent a target.
+const char* kFunctionParameterProgram =
+    "class FnParam {\n"
+    "    static func apply(func(int): int f, int v): int { return f(v) }\n"
+    "    func main(): void {\n"
+    "        log(\"applied \" + FnParam.apply(func(int x) => x + 1, 40))\n"
+    "    }\n"
+    "}\n";
+
+// A function value stored in a slot and invoked later: provable when the slot
+// holds one known closure, open when it holds a parameter the caller chose.
+const char* kStoredKnownFunctionProgram =
+    "class FnStored {\n"
+    "    static func body(int x): int { return x + 7 }\n"
+    "    static func use(): int {\n"
+    "        var g = FnStored.body\n"
+    "        return g(6)\n"
+    "    }\n"
+    "    func main(): void {\n"
+    "        log(\"stored \" + FnStored.use())\n"
+    "    }\n"
+    "}\n";
+
+const char* kStoredUnknownFunctionProgram =
+    "class FnStoredUnknown {\n"
+    "    static func use(func(int): int f, int v): int {\n"
+    "        var g = f\n"
+    "        return g(v)\n"
+    "    }\n"
+    "    func main(): void {\n"
+    "        log(\"stored \" + FnStoredUnknown.use(func(int x) => x * 2, 21))\n"
+    "    }\n"
+    "}\n";
+
+// One proven target and one open edge in the same module: the known body is
+// still accounted for, and the unknown edge still makes the report
+// incomplete.
+const char* kMixedTargetsProgram =
+    "class FnMixed {\n"
+    "    static func body(int x): int { return x + 7 }\n"
+    "    static func known(int x): int {\n"
+    "        var f = FnMixed.body\n"
+    "        return f(x)\n"
+    "    }\n"
+    "    static func unknown(func(int): int f, int x): int { return f(x) }\n"
+    "    func main(): void {\n"
+    "        log(\"known \" + FnMixed.known(1))\n"
+    "        log(\"unknown \" + FnMixed.unknown(func(int x) => x, 2))\n"
+    "    }\n"
+    "}\n";
+
+void testDirectCallsKeepTheGraphClosed() {
+    const fs::path file = writeProgram("FnDirect", kDirectCallProgram);
+    const Result compiled = compileWhole(file, Options{});
+    require(compiled.ok(), "the direct-call program should compile");
+
+    const zl::mir::ReachabilityReport report = zl::mir::reachableFunctions(compiled.module);
+    require(report.hasEntryPoint, "it has an entry point");
+    require(report.complete(), "direct calls are recorded targets, so the graph is closed");
+    require(!report.unresolvedCalls, "and no function-value edge was reported");
+    require(report.contains(functionIdOf(compiled.module, "FnDirect.main()")),
+            "the entry point is reachable");
+    require(report.contains(functionIdOf(compiled.module, "FnDirect.add(int,int)")),
+            "the directly called function is reachable");
+}
+
+void testKnownClosureCallsAreAccounted() {
+    const fs::path file = writeProgram("FnClosure", kKnownClosureProgram);
+    const Result compiled = compileWhole(file, Options{});
+    require(compiled.ok(), "the known-closure program should compile");
+
+    const zl::mir::ReachabilityReport report = zl::mir::reachableFunctions(compiled.module);
+    require(report.complete(),
+            "a closure pinned to one body (directly or through a single-store slot) is a closed edge");
+    require(!report.unresolvedCalls, "so no edge was left unresolved");
+    require(report.contains(functionIdOf(compiled.module, "FnClosure.body(int)")),
+            "the closure body is reachable through both the SSA value and the stored value");
+}
+
+void testUnresolvedIndirectCallsLeaveTheGraphOpen() {
+    const fs::path file = writeProgram("FnParam", kFunctionParameterProgram);
+    const Result compiled = compileWhole(file, Options{});
+    require(compiled.ok(), "the function-parameter program should compile");
+
+    const zl::mir::ReachabilityReport report = zl::mir::reachableFunctions(compiled.module);
+    require(report.hasEntryPoint, "it has an entry point");
+    require(report.unresolvedCalls,
+            "a call through a function-valued parameter is an execution edge with no static target");
+    require(report.unresolvedCallCount >= 1, "the unresolved edge is counted");
+    require(!report.unresolvedCallReason.empty(),
+            "and the report says which function and construct opened the graph");
+    require(report.unresolvedCallReason.find("FnParam.apply") != std::string::npos,
+            "the reason names the function that executes the value");
+    require(!report.complete(),
+            "so the caller cannot treat the reachable set as a removal guarantee");
+    require(report.describe(compiled.module).find("not pinned") != std::string::npos,
+            "and the one-line report carries the caveat");
+}
+
+void testStoredFunctionValuesFollowTheSameRule() {
+    const fs::path known = writeProgram("FnStored", kStoredKnownFunctionProgram);
+    const Result knownCompiled = compileWhole(known, Options{});
+    require(knownCompiled.ok(), "the stored-known program should compile");
+    const zl::mir::ReachabilityReport knownReport = zl::mir::reachableFunctions(knownCompiled.module);
+    require(knownReport.complete(),
+            "a slot holding one known closure is provable, so the stored call is a closed edge");
+    require(knownReport.contains(functionIdOf(knownCompiled.module, "FnStored.body(int)")),
+            "the stored closure's body is reachable");
+
+    const fs::path unknown = writeProgram("FnStoredUnknown", kStoredUnknownFunctionProgram);
+    const Result unknownCompiled = compileWhole(unknown, Options{});
+    require(unknownCompiled.ok(), "the stored-unknown program should compile");
+    const zl::mir::ReachabilityReport unknownReport =
+        zl::mir::reachableFunctions(unknownCompiled.module);
+    require(unknownReport.unresolvedCalls,
+            "a slot holding a parameter can hold any function the caller chose");
+    require(!unknownReport.complete(),
+            "so the reachable set is a lower bound and not removal-safe");
+}
+
+void testMixedKnownAndUnknownIndirectTargets() {
+    const fs::path file = writeProgram("FnMixed", kMixedTargetsProgram);
+    const Result compiled = compileWhole(file, Options{});
+    require(compiled.ok(), "the mixed-targets program should compile");
+
+    const zl::mir::ReachabilityReport report = zl::mir::reachableFunctions(compiled.module);
+    require(report.unresolvedCalls, "the parameter call opens the graph");
+    require(!report.complete(), "one open edge is enough to make the report incomplete");
+    require(report.contains(functionIdOf(compiled.module, "FnMixed.body(int)")),
+            "but the proven target is still accounted for in the reachable set");
+    require(report.unresolvedCallCount >= 1, "and the open edge is recorded, not dropped");
+}
+
+// ---------------------------------------------------------------------------
+// The pipeline-report contract: a runnable program, or a precise refusal
+// ---------------------------------------------------------------------------
+//
+// `--pipeline-report` describes a runnable program's pipeline, code
+// generation included, so it runs with the same program contract a run does:
+// requireMain, enforced at the semantic stage with the entry-point
+// diagnostics. A library is refused there - never reported as if a
+// code-generation stage had run for a module nothing can enter.
+
+void testPipelineReportRequiresAProgram() {
+    // A library: the program contract refuses it at the semantic stage, and
+    // the diagnostic names what is missing.
+    const fs::path libraryFile =
+        writeProgram("ShelfReport", "class ShelfReport {\n    func size(): int { return 0 }\n}\n");
+    Options programContract;
+    programContract.requireMain = true; // what --pipeline-report runs with
+    const Result library = compileWhole(libraryFile, programContract);
+    require(!library.ok(), "a library has no entry point, so the program pipeline refuses it");
+    require(library.failure.kind == ErrorKind::TypeCheck,
+            "the refusal is a semantic-stage diagnostic, not a later surprise");
+    require(library.failure.stage == Stage::SemanticAnalysis,
+            "the entry point is validated where language semantics are decided");
+    require(library.failure.message.find("main") != std::string::npos,
+            "and the diagnostic names what is missing: " + library.failure.message);
+    require(library.stage(Stage::CodeGeneration) == nullptr ||
+                !library.stage(Stage::CodeGeneration)->ran,
+            "code generation never ran for a module nothing can enter");
+
+    // A program: the same contract accepts it, records the entry point, and
+    // runs the code-generation stage the report describes.
+    const fs::path programFile = writeProgram("Pipe", kProgram);
+    Options okOptions;
+    okOptions.requireMain = true;
+    const Result program = compileWhole(programFile, okOptions);
+    require(program.ok(), "a program with a valid main satisfies the report contract");
+    require(program.module.entryPoint != zl::mir::kNoFunction,
+            "and the entry point the report starts from is recorded");
+    require(program.stage(Stage::CodeGeneration) != nullptr &&
+                program.stage(Stage::CodeGeneration)->ran,
+            "the code-generation stage the report describes actually ran");
+
+    // An invalid entry point: the same stage names the exact violation.
+    const fs::path wrongReturn =
+        writeProgram("BadReturn", "class BadReturn {\n    func main(): int { return 0 }\n}\n");
+    const Result wrongReturnCompiled = compileWhole(wrongReturn, okOptions);
+    require(!wrongReturnCompiled.ok(), "a main that returns a value is not a valid entry point");
+    require(wrongReturnCompiled.failure.message.find("void") != std::string::npos,
+            "and the diagnostic says what main must return: " + wrongReturnCompiled.failure.message);
+
+    const fs::path staticMain =
+        writeProgram("BadStatic", "class BadStatic {\n    static func main(): void {}\n}\n");
+    const Result staticMainCompiled = compileWhole(staticMain, okOptions);
+    require(!staticMainCompiled.ok(), "a static main is not a valid entry point");
+    require(staticMainCompiled.failure.message.find("instance") != std::string::npos,
+            "and the diagnostic says main must be an instance method: " +
+                staticMainCompiled.failure.message);
+}
+
+// ---------------------------------------------------------------------------
 // The opt-in stages are invisible, and say so when skipped
 // ---------------------------------------------------------------------------
 
@@ -778,6 +1005,12 @@ int main() {
     testReachabilityIsSoundAndUseful();
     testReachabilityRefusesToCloseAGraphWithReflection();
     testReachabilityOnALibrary();
+    testDirectCallsKeepTheGraphClosed();
+    testKnownClosureCallsAreAccounted();
+    testUnresolvedIndirectCallsLeaveTheGraphOpen();
+    testStoredFunctionValuesFollowTheSameRule();
+    testMixedKnownAndUnknownIndirectTargets();
+    testPipelineReportRequiresAProgram();
     testBackendSelectionKeepsMirIdentical();
     testBackendChoiceDoesNotChangeBehaviour();
     testOptimizationIsObservational();

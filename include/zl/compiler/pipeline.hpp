@@ -214,6 +214,12 @@ struct Options {
     Backend backend{Backend::Bytecode};
     Execution execution{Execution::Vm};
 
+    // The semantic stage refuses a program with no (or an invalid) entry
+    // point. On by default - a *run* needs a program - and `--pipeline-report`
+    // keeps it on, because its contract is a runnable program's pipeline: a
+    // library has no code-generation stage to report, and the report must not
+    // pretend otherwise. Commands that stop at MIR (the `--emit-*` family)
+    // turn it off: their result is the module, and a library is a module.
     bool requireMain{true};
 
     // Stage 4. On by default and not meant to be turned off; the switch exists
