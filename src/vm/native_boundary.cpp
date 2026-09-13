@@ -196,6 +196,11 @@ Value invokeNativeExport(const ZlNativeExport& exportInfo,
             }
         }
         return unpack(result, exportInfo.returnType);
+    } catch (const ZlThrownException&) {
+        // Boundary errors already carry their message and stack trace;
+        // rethrowing any other std::exception as ZlThrownException would
+        // replace them with the generic "ZL exception" text.
+        throw;
     } catch (const std::exception& e) {
         throwBoundaryError(e.what(), chunk, state);
     }

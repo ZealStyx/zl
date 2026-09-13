@@ -1,4 +1,5 @@
 #include "zl/compiler/type_checker.hpp"
+#include <iostream>
 #include "zl/compiler/operator_rules.hpp"
 #include "zl/compiler/generic_instantiation.hpp"
 #include "zl/compiler/thread_capture.hpp"
@@ -1028,6 +1029,57 @@ void TypeChecker::check(const Program& program, bool requireMain) {
     for (const auto& decl : program.declarations) {
         if (decl->kind == NodeKind::InterfaceDecl) {
             semanticModel_.resolveInterfaceMethods(static_cast<const InterfaceDecl*>(decl.get())->name);
+        }
+    }
+
+    // Pass 0b-fixup: registerClassShape ran before interface registration
+    // (class shapes must exist first so registerInterfaceShape can detect
+    // name collisions), so a parameter or return type named after an
+    // interface was recorded as UNKNOWN. Re-resolve those now: the recorded
+    // metadata drives dispatch identities (ask(G) vs ask(object)), overload
+    // resolution and interface-implementation matching, and a stale UNKNOWN
+    // silently degrades all three (the call lowers to nothing and the
+    // bytecode backend then drops it from the compiled body).
+    for (const auto& decl : program.declarations) {
+        if (decl->kind != NodeKind::ClassDecl && decl->kind != NodeKind::DataDecl) continue;
+        const std::string className = decl->kind == NodeKind::ClassDecl
+            ? static_cast<const ClassDecl*>(decl.get())->name
+            : static_cast<const DataDecl*>(decl.get())->name;
+        auto* classIt = semanticModel_.findClass(className);
+        if (!classIt) continue;
+        const auto& members = decl->kind == NodeKind::ClassDecl
+            ? static_cast<const ClassDecl*>(decl.get())->members
+            : static_cast<const DataDecl*>(decl.get())->members;
+        std::unordered_map<std::string, std::size_t> ctorIndex, methodIndex;
+        for (const auto& member : members) {
+            if (!member || member->kind != NodeKind::FunctionDecl) continue;
+            const auto* fn = static_cast<const FunctionDecl*>(member.get());
+            const std::size_t index = (fn->isConstructor ? ctorIndex : methodIndex)[fn->name]++;
+            ClassMethodInfo* target = nullptr;
+            if (fn->isConstructor) {
+                target = index < classIt->constructors.size() ? &classIt->constructors[index] : nullptr;
+            } else {
+                const auto overloads = classIt->methods.find(fn->name);
+                if (overloads != classIt->methods.end() && index < overloads->second.size())
+                    target = &overloads->second[index];
+            }
+            if (!target) continue;
+            std::string returnClassName;
+            const ZlType returnType = resolveType(fn->returnType, &returnClassName);
+            if (target->returnType == ZlType::UNKNOWN && target->returnClassName.empty() &&
+                returnType != ZlType::UNKNOWN) {
+                target->returnType = returnType;
+                target->returnClassName = returnClassName;
+            }
+            for (std::size_t i = 0; i < fn->params.size() && i < target->paramTypes.size(); ++i) {
+                std::string paramClassName;
+                const ZlType paramType = resolveType(fn->params[i].type, &paramClassName);
+                if (target->paramTypes[i] == ZlType::UNKNOWN && target->paramClassNames[i].empty() &&
+                    paramType != ZlType::UNKNOWN) {
+                    target->paramTypes[i] = paramType;
+                    target->paramClassNames[i] = paramClassName;
+                }
+            }
         }
     }
 
