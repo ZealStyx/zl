@@ -65,13 +65,28 @@ expected to keep:
    may assume MIR's invariants because something checked them, and code
    generation re-checks immediately before it consumes the module.
 
-Rules 1 and 2 are checked mechanically, not just written down:
+The rules are checked mechanically, not just written down:
 `tools/boundary_lint.sh` reads the tree and fails if a backend includes the AST,
-the parser, the type checker, the module loader, the pipeline, or the legacy IR;
-if the lowerer touches the checker except through `expressionType`; if anything
-outside the pipeline constructs a `ModuleLoader` or a `TypeChecker`; or if the
-legacy `zl::ir` gains a second consumer. It is registered with CTest as
-`boundary-lint`, so a violation fails the build rather than surviving review.
+the parser, the type checker, the module loader, the pipeline, or the legacy IR
+- directly, *or transitively*, through a permitted header that later starts
+reaching one (the check walks each backend file's include graph to a fixpoint
+and names the chain that reached the forbidden header); if the lowerer touches
+the checker except through `expressionType`; if anything outside the pipeline
+constructs a `ModuleLoader` or a `TypeChecker` - scanned across the whole
+production source tree, in every spelling (qualified, unqualified, `new`,
+`make_unique`, aliases, line-broken), with the pipeline driver as the single
+explicit allowlist entry; or if the legacy `zl::ir` gains a second consumer.
+It is registered with CTest as `boundary-lint`, with the lint's own
+regressions (`boundary-lint-regressions`) proving each rule still fails on the
+broken trees it exists for, so a violation fails the build rather than
+surviving review.
+
+The include graph is kept honest structurally as well as by lint: `zl/common/`
+is audited to include nothing frontend, the shared operator table
+(`zl::OperatorRules`) is keyed by `Operator` rather than by a lexer token, and
+the frontend-facing lowering seam (`zl/mir/lowering.hpp`) is the only MIR
+header that includes the AST or the checker - so a backend that pulled in the
+front end would do so visibly, not through a header that looked safe.
 
 ## Stages and their invariants
 
@@ -172,14 +187,28 @@ an over-approximation on purpose, and the direction is the point:
   statics initialise lazily, on first access.
 
 So a function it calls unreachable really is unreachable, which is what makes the
-answer usable for anything that would *remove* code. The one case where it
-refuses to be exact is reflection: `Reflection.methodInvoke` (and the constructor
-and function forms) calls whatever a `Method`/`Function`/`Constructor` value
-describes, so a program that reaches one has no closed call graph.
-`ReachabilityReport::complete()` is false there, and `dynamicEntryReason` names
-the native that opened the graph. Which natives can enter code by name is
-`nativeEntersCodeByName` in the catalog - the catalog owns what a native does, so
-a caller cannot drift from it with a hand-written list.
+answer usable for anything that would *remove* code. There are two cases where it
+refuses to be exact, and in both `ReachabilityReport::complete()` is false,
+because the reachable set is then a *lower bound* and not removal-safe:
+
+- **Reflection**: `Reflection.methodInvoke` (and the constructor and function
+  forms) calls whatever a `Method`/`Function`/`Constructor` value describes, so a
+  program that reaches one has no closed call graph. `dynamicEntryReason` names
+  the native that opened the graph. Which natives can enter code by name is
+  `nativeEntersCodeByName` in the catalog - the catalog owns what a native does,
+  so a caller cannot drift from it with a hand-written list.
+- **Unresolved function values**: `call_indirect` (and `Task.spawn`,
+  `Thread.start`, the `withLock` family) executes a value, not a named target.
+  The analysis proves the edge to a single body only from SSA structure - a
+  single definition, possibly through a slot with exactly one store. A value it
+  cannot pin (a function-valued parameter, a block parameter, a static, a slot
+  with zero or multiple stores) may hold any function the caller chose, so the
+  edge is recorded as unresolved instead of dropped or guessed:
+  `unresolvedCalls` is set, the report counts every such site, and
+  `unresolvedCallReason` names the first. A later function-value analysis can
+  shrink the unresolved set by proving more values to be single closures; it
+  cannot change what `complete()` means - it is true only when every possible
+  execution edge relevant to the module has been statically accounted for.
 
 It is a question, not a transform: nothing in this phase deletes a function, and
 `--backend native` reports the answer rather than acting on it - the numbers
@@ -255,7 +284,7 @@ honest:
 | `zl --backend native --strict-native f.zl` | 1-6 | fails unless *every* function compiled natively |
 | `zl --reference-compiler file.zl` / `ZL_COMPILER=ast` | 1-2 + reference compiler | the differential escape hatch, not the pipeline |
 | `zl --check file.zl` | 1-2 | stops after semantic analysis; nothing is generated |
-| `zl --pipeline-report file.zl` | 1-6, both backends | ledger, invariants, MIR digest parity |
+| `zl --pipeline-report file.zl` | 1-6, both backends | ledger, invariants, MIR digest parity; requires a program (a valid `main`) - a library is refused with the entry-point diagnostic, because the report describes a runnable program's pipeline |
 | `zl --mir-vm file.zl` | 1-6, execute | the same pipeline as the default path, with the ledger on |
 | `zl --emit-mir <out\|-> f.zl` | 1-4 | the lowered module, before optimisation |
 | `zl --emit-ssa <out\|-> f.zl` | 1-4 | the same module in its SSA form; re-verified after promotion |
@@ -345,5 +374,5 @@ reported rather than described as "passing".
 | `tools/mir_opt_diff.sh` | optimised vs unoptimised, run both ways: **50 of 50 identical** |
 | `tools/mir_promotion_diff.sh` | memory form vs value form, run both ways: **50 of 50 identical** |
 | `tools/mir_opt_check_all.sh` | optimised vs unoptimised *statically*, over `examples/` and `stdlib/` |
-| `tools/boundary_lint.sh` (CTest `boundary-lint`) | rules 1-4 above: no backend sees the AST, the lowerer only reads recorded types, the front end has one driver, the legacy IR keeps one consumer |
+| `tools/boundary_lint.sh` (CTest `boundary-lint`, `boundary-lint-regressions`) | rules 1-4 above: no backend sees the AST (directly or through the include graph), the lowerer only reads recorded types, the front end is constructed in exactly one place (scanned across the production tree), the legacy IR keeps one consumer |
 | `tools/native_demo.sh` | one program through source → MIR → native IR → disassembly, calling the emitted code and diffing against the VM |

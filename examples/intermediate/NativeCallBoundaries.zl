@@ -1,0 +1,63 @@
+// ============================================================================
+// ZL Examples - Intermediate - Native Call Boundaries
+//
+// A native call carries no per-argument runtime assertion at the call site
+// (the reference bytecode compiler emits none): a statically typed argument
+// is checked by the front end, and a dynamic one by the native itself and by
+// the container storage-contract machinery. Two regressions are pinned here:
+//
+//   * a user class named exactly like a generic token of a native signature
+//     (`class T` against Collection.push's list<T>/T) must never be mistaken
+//     for the token - the old lowering asserted the literal token from a
+//     frame that binds neither and rejected valid writes;
+//   * a native call that fails on a dynamic argument commits nothing: there
+//     is no per-argument pin to leak, so the argument's container is exactly
+//     as it was when the failed boundary ran.
+// ============================================================================
+
+// An ordinary class whose name collides with the generic natives' token.
+class T {
+    public int marker
+}
+
+class NativeCallBoundaries {
+    static func pushIt(unknown target, unknown value): void {
+        Collection.push(target, value)
+    }
+    static func uppercase(unknown value): string {
+        return String.upper(value)
+    }
+
+    func main(): void {
+        // The token-named class is just a class; its presence must not
+        // change what a generic native call enforces.
+        var marker = new T()
+        marker.marker = 7
+        log("class T ok " + marker.marker)
+
+        // A generic native through fully dynamic parameters: the caller's
+        // frame binds no token, so the boundary is the native's own
+        // contract, and the valid write goes through.
+        list<double> wide = [1]
+        NativeCallBoundaries.pushIt(wide, 2.5)
+        log("wide " + wide)
+
+        // A wrong-typed dynamic argument is rejected by the native itself,
+        // with the function-specific diagnostic the reference emits.
+        var raw = Collection.newList()
+        try { NativeCallBoundaries.uppercase(raw) }
+        catch TypeError error { log("upper " + error.message) }
+
+        // The failed call bound nothing: raw is exactly as it was, so it
+        // still accepts a write through the same dynamic path.
+        NativeCallBoundaries.pushIt(raw, "still writable")
+        log("raw " + raw)
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// class T ok 7
+// wide [1, 2.5]
+// upper String.upper expects a string argument
+// raw ["still writable"]
+// --- End expected output ---

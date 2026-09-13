@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -24,32 +25,46 @@ namespace {
 // extend an interface and a class can reach one through its parent. The type
 // checker rules out cycles, but every walk still checks for revisiting, so a
 // malformed module cannot make a diagnostic hang.
+//
+// The hierarchy is the analysis run's, not a global cache: it is built once per
+// `reachableFunctions` call over the module it answers for, and the
+// per-(receiver, method) dispatch results are cached inside it for the same run
+// only.
 class Hierarchy {
 public:
-    explicit Hierarchy(const Module& module) {
+    explicit Hierarchy(const Module& module) : module_(module) {
         for (const auto& layout : module.classes) layoutByName_.emplace(layout.name, &layout);
         for (const auto& interface : module.interfaces) interfaceBases_.emplace(interface.name, interface.bases);
+        for (const auto& function : module.functions) {
+            if (!function.ownerClass.empty()) methodsByClass_[function.ownerClass].push_back(function.id);
+        }
         // Every class's supertypes, computed once, so the closure queries below
         // are set lookups rather than repeated graph walks.
         for (const auto& [name, layout] : layoutByName_) {
             (void)layout;
             (void)supertypesOf(name);
         }
+        // The inverse relation, computed once from those same supertype sets:
+        // every name -> the classes that can be its runtime value. `closure`
+        // becomes a lookup plus a union instead of a scan of every class for
+        // each distinct receiver - that scan is what made deep hierarchies cost
+        // O(classes) per dispatch site.
+        for (const auto& [className, layout] : layoutByName_) {
+            (void)layout;
+            for (const auto& supertype : supertypesOf(className)) subtypes_[supertype].insert(className);
+        }
     }
 
     // Every class name that a value of static type `name` can actually be: the
     // name itself, plus its subtypes - and, when `name` is an interface, the
-    // classes that implement it.
+    // classes that implement it (transitively, through interface extends).
     [[nodiscard]] const std::unordered_set<std::string>& closure(const std::string& name) const {
         const auto cached = closure_.find(name);
         if (cached != closure_.end()) return cached->second;
 
-        std::unordered_set<std::string> result;
-        result.insert(name);
-        for (const auto& [className, layout] : layoutByName_) {
-            (void)layout;
-            if (supertypesOf(className).count(name) != 0) result.insert(className);
-        }
+        std::unordered_set<std::string> result{name};
+        const auto subtypes = subtypes_.find(name);
+        if (subtypes != subtypes_.end()) result.insert(subtypes->second.begin(), subtypes->second.end());
         return closure_.emplace(name, std::move(result)).first->second;
     }
 
@@ -93,12 +108,121 @@ public:
         return supertypes_.emplace(name, std::move(supers)).first->second;
     }
 
+    // The dispatch candidates for one (static type, method name) pair: every
+    // function that a call of `methodName` on a receiver of static type
+    // `className` can run. That is the methods of every class the receiver's
+    // runtime value can be (the closure) plus every class/interface the method
+    // could be declared in (the supertypes), filtered by declared name.
+    //
+    // Computed once per pair and cached for the lifetime of this analysis run,
+    // so N dispatch sites with the same receiver cost the candidate search
+    // once, not N times - while a pair never seen stays uncached, so the cache
+    // cannot outlive the module it was built for.
+    [[nodiscard]] const std::vector<FunctionId>& dispatchCandidates(const std::string& className,
+                                                                    const std::string& methodName) const {
+        const auto byMethod = dispatch_.find(className);
+        if (byMethod != dispatch_.end()) {
+            const auto found = byMethod->second.find(methodName);
+            if (found != byMethod->second.end()) return found->second;
+        }
+
+        std::vector<FunctionId> candidates;
+        const auto& runtimeClasses = closure(className);
+        const auto& declaringClasses = supertypesOf(className);
+        const auto consider = [&](const std::string& candidateClass) {
+            const auto methods = methodsByClass_.find(candidateClass);
+            if (methods == methodsByClass_.end()) return;
+            for (const FunctionId method : methods->second) {
+                const Function* callee = module_.function(method);
+                if (callee == nullptr || callee->declaredName() != methodName) continue;
+                candidates.push_back(method);
+            }
+        };
+        for (const auto& candidateClass : runtimeClasses) consider(candidateClass);
+        for (const auto& candidateClass : declaringClasses) consider(candidateClass);
+        return dispatch_[className].emplace(methodName, std::move(candidates)).first->second;
+    }
+
 private:
+    const Module& module_;
     std::unordered_map<std::string, const ClassLayout*> layoutByName_;
     std::unordered_map<std::string, std::vector<std::string>> interfaceBases_;
+    std::unordered_map<std::string, std::vector<FunctionId>> methodsByClass_;
+    // name -> classes whose transitive supertypes include name.
+    std::unordered_map<std::string, std::unordered_set<std::string>> subtypes_;
     mutable std::unordered_map<std::string, std::unordered_set<std::string>> supertypes_;
     mutable std::unordered_map<std::string, std::unordered_set<std::string>> closure_;
+    // (static type, method name) -> dispatch candidates, for this run only.
+    mutable std::unordered_map<std::string, std::unordered_map<std::string, std::vector<FunctionId>>> dispatch_;
 };
+
+// --- function-value proofs --------------------------------------------------
+//
+// A `CallIndirect` (or a Task.spawn / Thread.start / withLock site) executes a
+// *value*, not a named target. The analysis can prove such an edge to a single
+// body only from SSA structure: the value has one definition, and that
+// definition is a closure - possibly through a slot the function stores to
+// exactly once. Anything else (a function-valued parameter, a block parameter,
+// a static, a temp with any other definition, a slot with zero or multiple
+// stores) may hold any function the caller chose, and the edge is unresolved.
+//
+// The proof is deliberately narrow: it never guesses from the value's type,
+// its current lowering pattern, or its name. A later function-value analysis
+// can prove more values to be single closures, shrinking the unresolved set;
+// it cannot change what the classification means.
+struct ValueProof {
+    bool built{false};
+    // TempId -> the instruction that defines the temp.
+    std::unordered_map<std::uint32_t, const Instruction*> defOf;
+    // SlotId -> every store to the slot, in block order.
+    std::unordered_map<std::uint32_t, std::vector<const Instruction*>> storesTo;
+
+    void build(const Function& function) {
+        for (const auto& block : function.blocks) {
+            for (const auto& instruction : block.instructions) {
+                if (instruction.result != kNoTemp) defOf[instruction.result] = &instruction;
+                if (instruction.opcode == Opcode::Store) storesTo[instruction.slot].push_back(&instruction);
+            }
+        }
+        built = true;
+    }
+};
+
+std::optional<FunctionId> proveTemp(ValueProof& proof, const Function& function, const Operand& operand,
+                                    std::unordered_set<std::uint32_t>& visitedSlots) {
+    if (operand.kind != OperandKind::Temp) return std::nullopt;
+    if (!proof.built) proof.build(function);
+    const auto def = proof.defOf.find(operand.index);
+    if (def == proof.defOf.end()) return std::nullopt;
+    const Instruction* instruction = def->second;
+    if (instruction->opcode == Opcode::MakeClosure) {
+        if (instruction->target.function == kNoFunction) return std::nullopt;
+        return instruction->target.function;
+    }
+    if (instruction->opcode == Opcode::Load) {
+        // Follow the slot: provable only when the function stores to it
+        // exactly once, and the stored value is itself provable. A slot read
+        // before any store (zero stores) or written from several values
+        // (multiple stores) can hold any function.
+        if (!visitedSlots.insert(instruction->slot).second) return std::nullopt;
+        const auto stores = proof.storesTo.find(instruction->slot);
+        if (stores == proof.storesTo.end() || stores->second.size() != 1) return std::nullopt;
+        const Instruction* store = stores->second.front();
+        if (store->operands.empty()) return std::nullopt;
+        return proveTemp(proof, function, store->operands[0], visitedSlots);
+    }
+    return std::nullopt;
+}
+
+// The single closure body `operand` is pinned to, or nullopt when it is not
+// provable. `proof` is the per-function index, shared by every edge in the
+// function; the slot-visit guard is per proof, so one value's chain cannot
+// poison another's.
+std::optional<FunctionId> provenClosureBody(ValueProof& proof, const Function& function,
+                                            const Operand& operand) {
+    std::unordered_set<std::uint32_t> visitedSlots;
+    return proveTemp(proof, function, operand, visitedSlots);
+}
 
 std::string functionName(const Module& module, FunctionId id) {
     const Function* function = module.function(id);
@@ -117,6 +241,11 @@ std::string ReachabilityReport::describe(const Module& module) const {
     if (dynamicEntry) {
         text += "; more through reflection (" + dynamicEntryReason + ")";
     }
+    if (unresolvedCalls) {
+        text += "; more through " + std::to_string(unresolvedCallCount) +
+                " function-value call(s) that are not pinned to a single closure body (" +
+                unresolvedCallReason + ")";
+    }
     return text;
 }
 
@@ -132,13 +261,11 @@ ReachabilityReport reachableFunctions(const Module& module) {
     // Name indexes, built once: a dispatch site should not scan the module's
     // functions, and this analysis runs on modules with hundreds of them.
     std::unordered_map<std::string, std::vector<FunctionId>> functionsByName;
-    std::unordered_map<std::string, std::vector<FunctionId>> methodsByClass;
     for (const auto& function : module.functions) {
         // Keyed by the declared name: a dispatch site names "speak", not
         // "speak()". Overloads of one name share a key on purpose - keeping all
         // of them is the over-approximation this analysis promises.
         functionsByName[function.declaredName()].push_back(function.id);
-        if (!function.ownerClass.empty()) methodsByClass[function.ownerClass].push_back(function.id);
     }
 
     std::size_t dispatchKept = 0;
@@ -173,6 +300,35 @@ ReachabilityReport reachableFunctions(const Module& module) {
         dispatchKept += candidates->second.size();
         for (const FunctionId candidate : candidates->second) enqueue(candidate);
     };
+    // An execution edge the analysis cannot pin to a body. The edge is
+    // recorded, not dropped: the report becomes incomplete, and a caller that
+    // would remove anything must refuse.
+    const auto noteUnresolvedEdge = [&](const Function& function, const char* construct) {
+        report.unresolvedCalls = true;
+        report.unresolvedCallCount++;
+        if (report.unresolvedCallReason.empty()) {
+            report.unresolvedCallReason = "'" + function.name + "' " + construct;
+        }
+    };
+    // Executes the function value in operand slot `operandIndex` of `instruction`:
+    // proven bodies are enqueued, unprovable values open the graph. `proof` is
+    // the per-function index, built lazily on first use.
+    const auto executeValue = [&](const Function& function, ValueProof& proof,
+                                  const Instruction& instruction, std::size_t operandIndex,
+                                  const char* construct) {
+        if (operandIndex >= instruction.operands.size()) {
+            // Malformed shape: the value is not there, so it cannot be pinned.
+            noteUnresolvedEdge(function, construct);
+            return;
+        }
+        const std::optional<FunctionId> body =
+            provenClosureBody(proof, function, instruction.operands[operandIndex]);
+        if (body.has_value()) {
+            enqueue(*body);
+            return;
+        }
+        noteUnresolvedEdge(function, construct);
+    };
 
     enqueue(module.entryPoint);
 
@@ -184,16 +340,22 @@ ReachabilityReport reachableFunctions(const Module& module) {
         const Function* function = module.function(id);
         if (function == nullptr) continue;
 
+        // The per-function index for value proofs, built lazily on the first
+        // function-value edge in this function.
+        ValueProof proof;
+
         for (const auto& block : function->blocks) {
             for (const auto& instruction : block.instructions) {
                 switch (instruction.opcode) {
+                    // Closed edges: the target is recorded on the instruction.
                     case Opcode::Call:
                     case Opcode::InvokeSuper:
                     case Opcode::InvokeStatic:
-                    case Opcode::CallIndirect:
                     case Opcode::MakeClosure:
                         enqueue(instruction.target.function);
                         break;
+                    // Virtual/interface dispatch: closed by over-approximation
+                    // over the recorded hierarchy.
                     case Opcode::InvokeMethod: {
                         const std::string& className = instruction.target.className;
                         const std::string& methodName = instruction.target.methodName;
@@ -201,25 +363,62 @@ ReachabilityReport reachableFunctions(const Module& module) {
                             enqueueByName(methodName);
                             break;
                         }
-                        std::size_t kept = 0;
-                        const auto& runtimeClasses = hierarchy.closure(className);
-                        const auto& declaringClasses = hierarchy.supertypesOf(className);
-                        const auto consider = [&](const std::string& candidateClass) {
-                            const auto methods = methodsByClass.find(candidateClass);
-                            if (methods == methodsByClass.end()) return;
-                            for (const FunctionId method : methods->second) {
-                                const Function* callee = module.function(method);
-                                if (callee == nullptr || callee->declaredName() != methodName) continue;
-                                enqueue(method);
-                                ++kept;
-                            }
-                        };
-                        for (const auto& candidateClass : runtimeClasses) consider(candidateClass);
-                        for (const auto& candidateClass : declaringClasses) consider(candidateClass);
-                        if (kept == 0) enqueueByName(methodName);
-                        else dispatchKept += kept;
+                        const auto& candidates = hierarchy.dispatchCandidates(className, methodName);
+                        if (candidates.empty()) {
+                            enqueueByName(methodName);
+                        } else {
+                            dispatchKept += candidates.size();
+                            for (const FunctionId candidate : candidates) enqueue(candidate);
+                        }
                         break;
                     }
+                    // Indirect/unresolved call: the callee is a value, not a
+                    // recorded target. Proven to a single closure body -> the
+                    // edge is closed and the body is enqueued; anything else
+                    // -> the report is incomplete. Never silently dropped.
+                    case Opcode::CallIndirect:
+                        executeValue(*function, proof, instruction, 0,
+                                     "calls through a function value that is not pinned to a single closure body");
+                        break;
+                    // Function values the runtime executes for the program:
+                    // the spawned task's closure, the worker thread's closure,
+                    // the lock's critical-section closure. Same classification
+                    // as CallIndirect - a value that cannot be pinned opens the
+                    // graph, because the caller may have chosen any body.
+                    case Opcode::TaskSpawn:
+                        executeValue(*function, proof, instruction, 0,
+                                     "runs a function value through Task.spawn that is not pinned to a single "
+                                     "closure body");
+                        break;
+                    case Opcode::ThreadStart:
+                        executeValue(*function, proof, instruction, 0,
+                                     "runs a function value through Thread.start that is not pinned to a single "
+                                     "closure body");
+                        break;
+                    case Opcode::MutexWithLock:
+                        executeValue(*function, proof, instruction, 1,
+                                     "runs a function value through Mutex.withLock that is not pinned to a single "
+                                     "closure body");
+                        break;
+                    case Opcode::RwLockWithRead:
+                        executeValue(*function, proof, instruction, 1,
+                                     "runs a function value through RwLock.withRead that is not pinned to a single "
+                                     "closure body");
+                        break;
+                    case Opcode::RwLockWithWrite:
+                        executeValue(*function, proof, instruction, 1,
+                                     "runs a function value through RwLock.withWrite that is not pinned to a single "
+                                     "closure body");
+                        break;
+                    case Opcode::SharedWithLock:
+                        executeValue(*function, proof, instruction, 1,
+                                     "runs a function value through Shared.withLock that is not pinned to a single "
+                                     "closure body");
+                        break;
+                    // Native opaque entries: execution leaves this module's
+                    // functions by design (a known symbol), so they cannot
+                    // enter a function this analysis forgot - except natives
+                    // that enter code by name, which open the graph.
                     case Opcode::CallNative:
                         if (instruction.target.nativeId >= 0 &&
                             ::zl::nativeEntersCodeByName(
@@ -248,6 +447,11 @@ ReachabilityReport reachableFunctions(const Module& module) {
     if (dispatchKept != 0) {
         report.notes.push_back("virtual dispatch resolved over the class hierarchy: " +
                                std::to_string(dispatchKept) + " override candidate(s) kept");
+    }
+    if (report.unresolvedCalls) {
+        report.notes.push_back(std::to_string(report.unresolvedCallCount) +
+                               " call(s) through function values could not be resolved statically: "
+                               "the reachable set is a lower bound");
     }
     if (report.dynamicEntry) {
         report.notes.push_back("reflection makes the call graph open: this is a lower bound");

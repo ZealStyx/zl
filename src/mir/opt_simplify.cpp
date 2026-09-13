@@ -284,11 +284,18 @@ std::optional<Operand> tryRedundantConversion(Module& module, const Instruction&
         case Opcode::Refine: {
             // A runtime type assertion to the type the value already has. The
             // assertion cannot fail when the static type is one the MIR can
-            // reason about, so the result is the operand.
+            // reason about, so the result is the operand - except for raw
+            // collections, where the same-type assert is not inert: it pins
+            // the container's storage contract (committing the element
+            // contracts reached through the descent), which is how a literal's
+            // declared element type is enforced on later writes. Deleting it
+            // silently un-types the container.
             if (instruction.operands.size() != 1) return std::nullopt;
             const Operand& operand = instruction.operands[0];
             if (operand.type != instruction.resultType) return std::nullopt;
             if (isOpaqueType(module, operand.type)) return std::nullopt;
+            const Type* refined = module.types.find(operand.type);
+            if (refined && isCollectionType(*refined)) return std::nullopt;
             return operand;
         }
         case Opcode::NullCheck: {
