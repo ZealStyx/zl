@@ -8,6 +8,7 @@
 #include "zl/mir/builder.hpp"
 #include "zl/mir/printer.hpp"
 #include "zl/mir/verifier.hpp"
+#include "zl/mir/reachability.hpp"
 
 #include <cstdlib>
 #include <optional>
@@ -2074,6 +2075,312 @@ void testAwaitOfVoidTaskAcceptsUnknownTemp() {
     std::cout << "mir verifier await void temp: PASS\n";
 }
 
+
+// ---------------------------------------------------------------------------
+// Reachability: function-value execution edges
+// ---------------------------------------------------------------------------
+//
+// These modules are built by hand rather than lowered, because the point is
+// to prove each *opcode* that executes a function value is classified: a
+// proven body is a closed edge, an unprovable value opens the graph, and
+// nothing is silently dropped. The pipeline tests cover the same
+// classification from ZL source.
+
+FunctionId findFunctionByName(const Module& module, const std::string& name) {
+    for (const auto& function : module.functions)
+        if (function.name == name) return function.id;
+    return kNoFunction;
+}
+
+// Builds:  Work.run(int): int  { return a + 1 }
+//          Work.main(): void   { %c = make_closure run
+//                                 task_spawn %c
+//                                 shared_with_lock(cell, %c)
+//                                 thread_start %c }
+// Every one of those executes the same provably single closure body.
+Module buildClosureValueModule() {
+    ModuleBuilder builder("work");
+    TypeArena& types = builder.types();
+
+    FunctionSignature closureSignature;
+    closureSignature.parameterTypes = {types.intType()};
+    closureSignature.returnType = types.intType();
+    const TypeId closureType = types.functionType(closureSignature);
+
+    FunctionId runId = kNoFunction;
+    {
+        FunctionBuilder fb = builder.addFunction("Work.run(int)");
+        fb.setReturnType(types.intType());
+        const ParamId a = fb.addParameter("a", types.intType());
+        const BlockId entry = fb.addBlock();
+        fb.setCurrentBlock(entry);
+        const TempId plus =
+            fb.emitBinary(Opcode::Add, fb.parameterOperand(a),
+                          Operand::constant(builder.constantInt(1), types.intType()), types.intType());
+        fb.emitReturn(Operand::temp(plus, types.intType()));
+        fb.finish();
+        runId = fb.function().id;
+    }
+
+    FunctionId mainId = kNoFunction;
+    {
+        FunctionBuilder fb = builder.addFunction("Work.main()");
+        fb.setReturnType(types.voidType());
+        const ParamId cell = fb.addParameter("cell", types.objectType("Shared"));
+        const BlockId entry = fb.addBlock();
+        fb.setCurrentBlock(entry);
+        const TempId closure = fb.emitMakeClosure(runId, {}, closureType);
+        fb.emitTaskSpawn(Operand::temp(closure, closureType), types.taskType(types.intType()));
+        fb.emitSharedWithLock(fb.parameterOperand(cell), Operand::temp(closure, closureType), 0);
+        fb.emitThreadStart(Operand::temp(closure, closureType), types.objectType("Thread"));
+        fb.emitReturn();
+        fb.finish();
+        mainId = fb.function().id;
+    }
+    builder.setEntryPoint(mainId);
+    return builder.take();
+}
+
+void testReachabilityProvesClosureValueEdges() {
+    const Module module = buildClosureValueModule();
+    const ReachabilityReport report = reachableFunctions(module);
+
+    require(report.hasEntryPoint, "the module has an entry point");
+    require(report.complete(),
+            "spawned/locked closures pinned to one body are closed edges");
+    require(!report.unresolvedCalls, "so no function-value edge was left open");
+    require(report.contains(findFunctionByName(module, "Work.run(int)")),
+            "the closure body is reachable through every execute site");
+}
+
+// The closure is a parameter: the caller chose it, so Task.spawn,
+// Thread.start, and the withLock family each open the graph.
+Module buildUnprovenClosureValueModule() {
+    ModuleBuilder builder("work2");
+    TypeArena& types = builder.types();
+
+    FunctionSignature closureSignature;
+    closureSignature.parameterTypes = {types.intType()};
+    closureSignature.returnType = types.intType();
+    const TypeId closureType = types.functionType(closureSignature);
+
+    {
+        FunctionBuilder fb = builder.addFunction("Work2.spawnIt(func)");
+        fb.setReturnType(types.voidType());
+        const ParamId f = fb.addParameter("f", closureType);
+        const ParamId g = fb.addParameter("g", closureType);
+        const ParamId cell = fb.addParameter("cell", types.objectType("Shared"));
+        const BlockId entry = fb.addBlock();
+        fb.setCurrentBlock(entry);
+        fb.emitTaskSpawn(fb.parameterOperand(f), types.taskType(types.intType()));
+        fb.emitThreadStart(fb.parameterOperand(f), types.objectType("Thread"));
+        fb.emitMutexWithLock(fb.parameterOperand(cell), fb.parameterOperand(f), 0);
+        // A multi-store slot: the value can be either parameter.
+        const SlotId slot = fb.addSlot("s", closureType);
+        fb.emitStore(slot, fb.parameterOperand(f));
+        fb.emitStore(slot, fb.parameterOperand(g));
+        const TempId loaded = fb.emitLoad(slot);
+        fb.emitCallIndirect(Operand::temp(loaded, closureType), {}, types.intType());
+        fb.emitReturn();
+        fb.finish();
+    }
+    builder.setEntryPoint(builder.findFunction("Work2.spawnIt(func)"));
+    return builder.take();
+}
+
+void testReachabilityUnprovenClosureValuesOpenTheGraph() {
+    const Module module = buildUnprovenClosureValueModule();
+    const ReachabilityReport report = reachableFunctions(module);
+
+    require(report.hasEntryPoint, "the module has an entry point");
+    require(report.unresolvedCalls,
+            "a parameter-held function value has no statically known target");
+    // task_spawn, thread_start, mutex_with_lock, and the call through the
+    // multi-store slot: four open edges.
+    require(report.unresolvedCallCount == 4,
+            "every unprovable execute site is counted (got " +
+                std::to_string(report.unresolvedCallCount) + ")");
+    require(!report.complete(),
+            "the reachable set is a lower bound, not a removal guarantee");
+    require(!report.unresolvedCallReason.empty(), "and the report says where it is open");
+}
+
+// A slot with zero stores: reading it before any write is not provable, and
+// the edge must stay open rather than be answered from an absence.
+void testReachabilitySlotWithoutStoresStaysOpen() {
+    ModuleBuilder builder("work3");
+    TypeArena& types = builder.types();
+
+    FunctionSignature closureSignature;
+    closureSignature.parameterTypes = {types.intType()};
+    closureSignature.returnType = types.intType();
+    const TypeId closureType = types.functionType(closureSignature);
+
+    {
+        FunctionBuilder fb = builder.addFunction("Work3.readIt()");
+        fb.setReturnType(types.voidType());
+        const BlockId entry = fb.addBlock();
+        fb.setCurrentBlock(entry);
+        const SlotId slot = fb.addSlot("s", closureType);
+        const TempId loaded = fb.emitLoad(slot);
+        fb.emitCallIndirect(Operand::temp(loaded, closureType), {}, types.intType());
+        fb.emitReturn();
+        fb.finish();
+    }
+    builder.setEntryPoint(builder.findFunction("Work3.readIt()"));
+    const Module module = builder.take();
+    const ReachabilityReport report = reachableFunctions(module);
+    require(report.unresolvedCalls,
+            "a slot with no store cannot be pinned to a body");
+    require(!report.complete(), "so the graph stays open, not guessed");
+}
+
+
+// ---------------------------------------------------------------------------
+// Reachability: dispatch resolution at hierarchy scale
+// ---------------------------------------------------------------------------
+//
+// The hierarchy the dispatch resolver runs over is built once per analysis:
+// subtypes are precomputed, and each (receiver, method) pair is resolved once
+// and cached for the run. This test builds a wide, deep hierarchy with many
+// dispatch sites all sharing a few (receiver, method) pairs, and checks the
+// resolution stays exact: every override in the receiver's hierarchy is kept,
+// every interface implementor is kept, and nothing outside the hierarchy is.
+
+// Builds:
+//   * a chain of 250 classes: Base <- C01 <- C02 ... <- C249, each with m();
+//   * an interface chain I0 <- I1 <- I2, implemented by Impl, which alone
+//     defines m2();
+//   * a Loner class with a same-named m() and no relationship to Base;
+//   * main, which calls ten dispatcher functions, each holding 20 invoke
+//     sites on Base.m and two on I0.m2 - 200 dispatch sites that all resolve
+//     to the same two (receiver, method) pairs.
+Module buildLargeHierarchyModule() {
+    constexpr std::size_t kChainLength = 249;
+    constexpr std::size_t kDispatchers = 10;
+    constexpr std::size_t kSitesPerDispatcher = 20;
+
+    ModuleBuilder builder("hierarchy");
+    TypeArena& types = builder.types();
+    const TypeId receiverType = types.objectType("Base");
+
+    auto addMethod = [&](const std::string& className, const std::string& methodName) {
+        FunctionBuilder fb = builder.addFunction(className + "." + methodName + "()");
+        fb.setReturnType(types.stringType());
+        const BlockId entry = fb.addBlock();
+        fb.setCurrentBlock(entry);
+        fb.emitReturn(Operand::constant(builder.constantString(className), types.stringType()));
+        fb.finish();
+    };
+
+    for (std::size_t i = 0; i < kChainLength; ++i) {
+        const std::string name = "C" + std::to_string(i + 1);
+        ClassLayout& layout = builder.addClassLayout(name);
+        layout.parent = (i == 0) ? "Base" : "C" + std::to_string(i);
+        addMethod(name, "m");
+    }
+    builder.addClassLayout("Base");
+    addMethod("Base", "m");
+
+    builder.addInterface("I0");
+    InterfaceInfo& i1 = builder.addInterface("I1");
+    i1.bases = {"I0"};
+    InterfaceInfo& i2 = builder.addInterface("I2");
+    i2.bases = {"I1"};
+    ClassLayout& impl = builder.addClassLayout("Impl");
+    impl.interfaces = {"I2"};
+    addMethod("Impl", "m2");
+
+    ClassLayout& loner = builder.addClassLayout("Loner");
+    (void)loner;
+    addMethod("Loner", "m");
+
+    FunctionId mainId = kNoFunction;
+    for (std::size_t d = 0; d < kDispatchers; ++d) {
+        const std::string name = "Dispatcher" + std::to_string(d) + ".dispatch()";
+        FunctionBuilder fb = builder.addFunction(name);
+        fb.setReturnType(types.voidType());
+        const ParamId receiver = fb.addParameter("r", receiverType);
+        const BlockId entry = fb.addBlock();
+        fb.setCurrentBlock(entry);
+        for (std::size_t s = 0; s < kSitesPerDispatcher; ++s) {
+            fb.emitInvokeMethod(fb.parameterOperand(receiver), "Base", "m", {}, types.stringType());
+        }
+        fb.emitInvokeMethod(fb.parameterOperand(receiver), "I0", "m2", {}, types.stringType());
+        fb.emitReturn();
+        fb.finish();
+        if (d == 0) mainId = fb.function().id; // not the entry; main calls all of them
+    }
+
+    {
+        FunctionBuilder fb = builder.addFunction("Harness.main()");
+        fb.setReturnType(types.voidType());
+        const BlockId entry = fb.addBlock();
+        fb.setCurrentBlock(entry);
+        for (std::size_t d = 0; d < kDispatchers; ++d) {
+            const FunctionId dispatcher =
+                builder.findFunction("Dispatcher" + std::to_string(d) + ".dispatch()");
+            fb.emitCall(dispatcher, {}, 0);
+        }
+        fb.emitReturn();
+        fb.finish();
+        mainId = fb.function().id;
+    }
+    builder.setEntryPoint(mainId);
+    return builder.take();
+}
+
+void testReachabilityDispatchScalesWithTheHierarchy() {
+    const Module module = buildLargeHierarchyModule();
+    const ReachabilityReport report = reachableFunctions(module);
+
+    require(report.hasEntryPoint, "the module has an entry point");
+    require(report.complete(), "pure virtual dispatch is a closed (over-approximated) edge");
+
+    // Every override in the receiver's hierarchy is kept, including the
+    // dead subclasses no path constructs - the over-approximation promise.
+    for (std::size_t i = 0; i < 249; ++i) {
+        const std::string id = "C" + std::to_string(i + 1) + ".m()";
+        const FunctionId found = [module, id]() {
+            for (const auto& function : module.functions)
+                if (function.name == id) return function.id;
+            return kNoFunction;
+        }();
+        require(report.contains(found), "override " + id + " of the called method is reachable");
+    }
+    const FunctionId base = [&]() {
+        for (const auto& function : module.functions)
+            if (function.name == "Base.m()") return function.id;
+        return kNoFunction;
+    }();
+    require(report.contains(base), "the base implementation is reachable");
+
+    // The interface chain reaches its implementor's method...
+    const FunctionId m2 = [&]() {
+        for (const auto& function : module.functions)
+            if (function.name == "Impl.m2()") return function.id;
+        return kNoFunction;
+    }();
+    require(report.contains(m2), "an implementor behind an interface chain is reachable");
+
+    // ...and nothing outside the receiver's hierarchy is kept by name alone.
+    const FunctionId loner = [&]() {
+        for (const auto& function : module.functions)
+            if (function.name == "Loner.m()") return function.id;
+        return kNoFunction;
+    }();
+    require(!report.contains(loner),
+            "a same-named method outside the receiver's hierarchy is not reachable");
+
+    // The caches belong to the analysis run: a second pass over the same
+    // module answers identically, and the module itself was not touched.
+    const ReachabilityReport again = reachableFunctions(module);
+    require(again.functions == report.functions,
+            "re-running the analysis gives the same reachable set (no leaked state)");
+    require(again.unresolvedCalls == report.unresolvedCalls,
+            "and the same openness");
+}
+
 int main() {
     testTypeArena();
     testValidModuleVerifies();
@@ -2147,6 +2454,11 @@ int main() {
     testCallbackRules();
     testBorrowOfTaskRejects();
     testAwaitOfVoidTaskAcceptsUnknownTemp();
+
+    testReachabilityProvesClosureValueEdges();
+    testReachabilityUnprovenClosureValuesOpenTheGraph();
+    testReachabilitySlotWithoutStoresStaysOpen();
+    testReachabilityDispatchScalesWithTheHierarchy();
 
     if (failures != 0) {
         std::cerr << failures << " MIR regression(s) failed\n";

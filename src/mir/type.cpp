@@ -128,6 +128,12 @@ bool isCollectionType(const Type& type) noexcept {
         case TypeKind::List:
         case TypeKind::Map:
         case TypeKind::Set:
+        // A fixed-size array is a list at runtime (see the array branch of
+        // runtimeValueTypeName), and its literals are built by the same
+        // new_collection + index_store shape. Excluding it here made the
+        // lowerer downgrade an `array[N]<T>` literal to list<unknown>, a
+        // store the verifier then refused on the array-typed slot.
+        case TypeKind::Array:
             return true;
         // The capitalised class forms. Only the three collection classes count:
         // ZL has plenty of other generic classes, and none of them is a

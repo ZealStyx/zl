@@ -1,5 +1,11 @@
 #pragma once
 
+// Lives with the parser on purpose: these helpers operate on `TypeAnnotation`,
+// the AST's type shape, so this header is frontend-facing. Keeping it out of
+// `zl/common/` keeps that directory what its name promises - shared utilities
+// that are safe for a backend to include, because they include nothing
+// frontend.
+
 #include <algorithm>
 #include <functional>
 #include <limits>

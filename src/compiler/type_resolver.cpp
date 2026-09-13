@@ -1,5 +1,5 @@
 #include "zl/compiler/type_resolver.hpp"
-#include "zl/common/type_annotation.hpp"
+#include "zl/parser/type_annotation.hpp"
 #include "zl/common/type_name.hpp"
 
 #include <algorithm>
