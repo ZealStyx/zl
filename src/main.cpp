@@ -840,7 +840,8 @@ int main(int argc, char** argv) {
             std::vector<std::string> programArgs;
             for (int i = 3; i < argc; ++i) programArgs.emplace_back(argv[i]);
             zl::VM vm;
-            return vm.run(*result.chunk, programArgs);
+            auto chunk = std::make_shared<zl::Chunk>(std::move(*compiler.result().chunk));
+            return vm.run(std::move(chunk), programArgs);
         }
         if (command == "--emit-native") {
             // Legacy tier, deliberately kept and deliberately not grown: this is
@@ -1126,9 +1127,9 @@ int main(int argc, char** argv) {
             // compared against, so it says so.
             std::cerr << "reference compiler: AST -> bytecode (not the MIR pipeline)\n";
             zl::Compiler astCompiler;
-            zl::Chunk chunk = astCompiler.compile(*compiler.result().program);
+            auto chunk = std::make_shared<zl::Chunk>(astCompiler.compile(*compiler.result().program));
             zl::VM vm;
-            return vm.run(chunk, programArgs);
+            return vm.run(std::move(chunk), programArgs);
         }
 
         // Stages 3-6: MIR, verification, optimisation, the selected backend.
@@ -1148,7 +1149,10 @@ int main(int argc, char** argv) {
         // The executed artifact is bytecode translated from the same verified
         // MIR whichever backend generated code, because the VM is the execution
         // driver in this phase. See docs/pipeline.md.
-        return vm.run(*result.chunk, programArgs);
+        // Shared ownership lets every closure and async invocation reference
+        // this one chunk instead of deep-copying it per closure.
+        auto chunk = std::make_shared<zl::Chunk>(std::move(*compiler.result().chunk));
+        return vm.run(std::move(chunk), programArgs);
     } catch (const zl::SystemExitException& ex) {
         // System.exit(code) - deliberately NOT caught by zl's own try/catch
         // (it isn't a std::runtime_error), so it always terminates the program.

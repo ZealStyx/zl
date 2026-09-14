@@ -26,6 +26,16 @@ public:
     // list<string> passed to main() if it declares a parameter (see
     // Compiler::compile / OpCode::PushProgramArgs).
     [[nodiscard]] int run(const Chunk& chunk, const std::vector<std::string>& programArgs = {});
+    // Preferred entry point: same behavior, but the VM can hand closures and
+    // async invocations a reference to this shared owner instead of deep-
+    // copying the whole chunk on every MakeClosure / async call. The bare
+    // reference overload keeps working (callers that keep the chunk alive
+    // themselves), it just pays the old copy cost.
+    [[nodiscard]] int run(std::shared_ptr<const Chunk> chunk, const std::vector<std::string>& programArgs = {});
+    // Shared tail of both run() entry points; `owner` is the shared chunk
+    // ownership when the caller had one.
+    [[nodiscard]] int runImpl(const Chunk& chunk, const std::vector<std::string>& programArgs,
+                              std::shared_ptr<const Chunk> owner);
 
     Value invokeReflectiveMethod(const Value& methodValue, const Value& receiver, const Value& argsList);
     Value invokeReflectiveConstructor(const Value& constructorValue, const Value& argsList);
@@ -51,7 +61,12 @@ public:
 private:
     class ProgramScope {
     public:
-        ProgramScope(VM& vm, const Chunk& chunk);
+        // `owner` is the shared ownership of `chunk`, when the caller has it.
+        // A null owner inherits the enclosing scope's owner when both scopes
+        // are for the same chunk object (run() -> execute() nests exactly so),
+        // and is null otherwise - shareActiveChunk() then falls back to
+        // copying, which is the pre-sharing behavior.
+        ProgramScope(VM& vm, const Chunk& chunk, std::shared_ptr<const Chunk> owner = {});
         ~ProgramScope();
         ProgramScope(const ProgramScope&) = delete;
         ProgramScope& operator=(const ProgramScope&) = delete;
@@ -62,7 +77,8 @@ private:
     };
     enum class ExecuteStatus { Completed, Suspended };
     [[nodiscard]] ExecuteStatus execute(const Chunk& chunk, std::size_t startIp, bool stopAtReturn,
-                              const std::vector<std::string>& programArgs, Value* returnValue);
+                              const std::vector<std::string>& programArgs, Value* returnValue,
+                              std::shared_ptr<const Chunk> owner = {});
     // Handler search shared by thrown ZL exceptions and converted runtime
     // faults. Returns false when this run owns no matching handler.
     bool dispatchThrownException(const Chunk& chunk, const ObjectRef& thrown,
@@ -70,7 +86,11 @@ private:
     [[nodiscard]] Value invokeFunction(const Chunk& chunk, std::size_t functionIndex,
                                        const std::vector<Value>& args,
                                        const std::optional<Value>& receiver = std::nullopt,
-                                       const ClosureRef& closure = {});
+                                       const ClosureRef& closure = {},
+                                       std::shared_ptr<const Chunk> owner = {});
+    // The chunk backing every closure/async invocation made from here: the
+    // active scope's shared owner when there is one, a fresh copy otherwise.
+    [[nodiscard]] std::shared_ptr<const Chunk> shareActiveChunk() const;
     ExecutionState::CallFrame makeCallFrame(const Chunk& chunk, const FunctionInfo& fn,
                                            const std::vector<Value>& args,
                                            const std::optional<Value>& receiver = std::nullopt,
@@ -125,6 +145,10 @@ private:
     std::vector<std::vector<Value>> nativeRootFrames_;
     const Chunk* activeChunk_{nullptr};
     std::vector<const Chunk*> activePrograms_;
+    // Parallel to activePrograms_: each scope's shared chunk owner (may be
+    // null). Keeping it as a shared_ptr here is what pins the chunk for as
+    // long as any scope - or any closure handed out from under it - lives.
+    std::vector<std::shared_ptr<const Chunk>> activeChunkOwners_;
     DeferredThreadJoins threadJoins_;
     std::uint64_t gcParticipantId_{0};
 

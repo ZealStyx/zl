@@ -193,8 +193,17 @@ ExecutionState::CallFrame VM::makeCallFrame(const Chunk& chunk, const FunctionIn
     return frame;
 }
 
-VM::ProgramScope::ProgramScope(VM& vm, const Chunk& chunk) : vm_(vm), previous_(vm.activeChunk_) {
+VM::ProgramScope::ProgramScope(VM& vm, const Chunk& chunk, std::shared_ptr<const Chunk> owner)
+    : vm_(vm), previous_(vm.activeChunk_) {
+    if (!owner && !vm_.activeChunkOwners_.empty() && vm_.activeChunk_ == &chunk &&
+        vm_.activeChunkOwners_.back()) {
+        // Nested scope over the same chunk object (run() -> execute(), or a
+        // re-entrant native callback): the enclosing scope's owner is exactly
+        // this chunk's owner.
+        owner = vm_.activeChunkOwners_.back();
+    }
     vm_.activePrograms_.push_back(&chunk);
+    vm_.activeChunkOwners_.push_back(std::move(owner));
     vm_.activeChunk_ = &chunk;
     previousJoins_ = DeferredThreadJoins::bind(&vm_.threadJoins_);
 }
@@ -203,6 +212,17 @@ VM::ProgramScope::~ProgramScope() {
     DeferredThreadJoins::bind(previousJoins_);
     vm_.activeChunk_ = previous_;
     vm_.activePrograms_.pop_back();
+    vm_.activeChunkOwners_.pop_back();
+}
+
+std::shared_ptr<const Chunk> VM::shareActiveChunk() const {
+    if (!activeChunkOwners_.empty() && activeChunkOwners_.back() &&
+        activeChunkOwners_.back().get() == activeChunk_) {
+        return activeChunkOwners_.back();
+    }
+    // No shared owner was handed to this run (bare-reference entry point):
+    // keep the old behavior and hand out a copy.
+    return std::make_shared<Chunk>(*activeChunk_);
 }
 
 GCRoots VM::gcRoots() const {
@@ -506,7 +526,20 @@ void VM::pumpSchedulerUntilTerminal(const TaskRef& task) {
 }
 
 int VM::run(const Chunk& chunk, const std::vector<std::string>& programArgs) {
-    ProgramScope program(*this, chunk);
+    return runImpl(chunk, programArgs, {});
+}
+
+int VM::run(std::shared_ptr<const Chunk> chunk, const std::vector<std::string>& programArgs) {
+    // Bind the reference before moving ownership into runImpl: argument
+    // evaluation order is unspecified, so `*chunk` after std::move(chunk)
+    // could dereference a null shared_ptr.
+    const Chunk& chunkRef = *chunk;
+    return runImpl(chunkRef, programArgs, std::move(chunk));
+}
+
+int VM::runImpl(const Chunk& chunk, const std::vector<std::string>& programArgs,
+                std::shared_ptr<const Chunk> owner) {
+    ProgramScope program(*this, chunk, std::move(owner));
     const ExecuteStatus result = execute(chunk, 0, false, programArgs, nullptr);
     if (result == ExecuteStatus::Suspended) {
         throw std::runtime_error("VM: top-level execution unexpectedly suspended");
@@ -534,10 +567,11 @@ int VM::run(const Chunk& chunk, const std::vector<std::string>& programArgs) {
 }
 
 VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stopAtReturn,
-                const std::vector<std::string>& programArgs, Value* returnValue) {
+                const std::vector<std::string>& programArgs, Value* returnValue,
+                std::shared_ptr<const Chunk> owner) {
     // Re-entrant native callbacks must retain both the callee's program and
     // their caller's program; neither is an independent global GC pin.
-    ProgramScope program(*this, chunk);
+    ProgramScope program(*this, chunk, std::move(owner));
     const std::size_t initialCallDepth = state_.callDepth();
     std::size_t ip = startIp;
 
@@ -872,7 +906,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 }
                 auto frame = makeCallFrame(chunk, fn, args, receiver);
                 if (fn.isAsync) {
-                    auto task = scheduleAsyncInvocation(std::make_shared<Chunk>(chunk), instr.operand, std::move(frame));
+                    auto task = scheduleAsyncInvocation(shareActiveChunk(), instr.operand, std::move(frame));
                     if (!state_.inFunction() && !entryTask_) entryTask_ = task;
                     state_.push(task);
                     ++ip;
@@ -899,7 +933,10 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 box->isNative = fn.isNative;
                 box->entryAddress = fn.entryAddress;
                 box->functionIndex = instr.operand;
-                box->chunk = std::make_shared<Chunk>(chunk);
+                // Share the program chunk instead of copying it per closure:
+                // a deep copy here made every lambda allocation O(program
+                // size), ~350us for the stdlib-sized chunk.
+                box->chunk = shareActiveChunk();
                 const auto scope = state_.snapshotScope();
                 if (!fn.capturesEvaluationScope) {
                     // Named function values have no lexical environment.
@@ -1183,7 +1220,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 }
                 auto frame = makeCallFrame(chunk, fn, args, object);
                 if (fn.isAsync) {
-                    auto task = scheduleAsyncInvocation(std::make_shared<Chunk>(chunk), functionIndex, std::move(frame));
+                    auto task = scheduleAsyncInvocation(shareActiveChunk(), functionIndex, std::move(frame));
                     state_.push(task);
                     ++ip;
                     break;
@@ -1218,7 +1255,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
 
                 auto frame = makeCallFrame(chunk, fn, args, object);
                 if (fn.isAsync) {
-                    auto task = scheduleAsyncInvocation(std::make_shared<Chunk>(chunk), instr.operand, std::move(frame));
+                    auto task = scheduleAsyncInvocation(shareActiveChunk(), instr.operand, std::move(frame));
                     state_.push(task);
                     ++ip;
                     break;
@@ -1423,7 +1460,10 @@ void VM::resumeAsyncInvocation() {
             pendingResumeException_ = std::make_exception_ptr(ZlThrownException(std::move(ex)));
         }
         Value result;
-        const ExecuteStatus status = execute(*asyncInvocation_->chunk, asyncInvocation_->resumeIp, true, {}, &result);
+        // Pass the invocation's chunk owner along so closures and nested async
+        // calls inside the async body share it instead of copying per closure.
+        const ExecuteStatus status = execute(*asyncInvocation_->chunk, asyncInvocation_->resumeIp, true, {},
+                                             &result, asyncInvocation_->chunk);
         if (status == ExecuteStatus::Completed) {
             auto task = asyncInvocation_->task;
             asyncInvocation_.reset();
@@ -1454,7 +1494,10 @@ Value VM::invokeTaskClosure(const ClosureRef& closure) {
     if (!closure || !closure->chunk || closure->functionIndex >= closure->chunk->functions.size())
         throw std::runtime_error("VM: invalid task closure");
     if (closure->isAsync) throw std::runtime_error("VM: task closure must be synchronous");
-    return invokeFunction(*closure->chunk, closure->functionIndex, {}, std::nullopt, closure);
+    // The closure's own chunk pointer is the shared owner, so closures made
+    // inside the thread/async body share the chunk rather than copying it.
+    return invokeFunction(*closure->chunk, closure->functionIndex, {}, std::nullopt, closure,
+                          closure->chunk);
 }
 
 Value VM::invokeReflectiveFunction(const Value& functionValue, const Value& argsList) {
@@ -1484,7 +1527,8 @@ Value VM::invokeReflectiveFunction(const Value& functionValue, const Value& args
         auto frame = makeCallFrame(*(*closure)->chunk, fn, values, std::nullopt, *closure);
         return scheduleAsyncInvocation((*closure)->chunk, (*closure)->functionIndex, std::move(frame));
     }
-    return invokeFunction(*(*closure)->chunk, (*closure)->functionIndex, values, std::nullopt, *closure);
+    return invokeFunction(*(*closure)->chunk, (*closure)->functionIndex, values, std::nullopt, *closure,
+                          (*closure)->chunk);
 }
 
 Value VM::invokeReflectiveMethod(const Value& methodValue, const Value& receiver, const Value& argsList) {
@@ -1520,7 +1564,7 @@ Value VM::invokeReflectiveMethod(const Value& methodValue, const Value& receiver
     }
     if (fn.isAsync) {
         auto frame = makeCallFrame(*activeChunk_, fn, values, isStatic ? std::nullopt : std::optional<Value>(receiver));
-        return scheduleAsyncInvocation(std::make_shared<Chunk>(*activeChunk_), index, std::move(frame));
+        return scheduleAsyncInvocation(shareActiveChunk(), index, std::move(frame));
     }
     return invokeFunction(*activeChunk_, index, values, isStatic ? std::nullopt : std::optional<Value>(receiver));
 }
@@ -1559,7 +1603,7 @@ Value VM::invokeReflectiveConstructor(const Value& constructorValue, const Value
 
 Value VM::invokeFunction(const Chunk& chunk, std::size_t functionIndex,
                          const std::vector<Value>& args, const std::optional<Value>& receiver,
-                         const ClosureRef& closure) {
+                         const ClosureRef& closure, std::shared_ptr<const Chunk> owner) {
     if (functionIndex >= chunk.functions.size()) {
         throw std::runtime_error("VM: function index out of bounds");
     }
@@ -1571,7 +1615,7 @@ Value VM::invokeFunction(const Chunk& chunk, std::size_t functionIndex,
     state_.enterFrame(std::move(frame));
     Value result;
     try {
-        const ExecuteStatus status = execute(chunk, fn.entryAddress, true, {}, &result);
+        const ExecuteStatus status = execute(chunk, fn.entryAddress, true, {}, &result, std::move(owner));
         if (status != ExecuteStatus::Completed) throw std::runtime_error("VM: function execution suspended unexpectedly");
     } catch (...) {
         state_.restoreToDepth(callerStackSize, callerFrames);
