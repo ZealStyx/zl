@@ -2320,6 +2320,8 @@ Value textRegexFindMatches(const std::vector<Value>& args) {
 // --- JSON serialization ---
 class JsonParser {
     const std::string& s; std::size_t p = 0;
+    int depth = 0;
+    static constexpr int kMaxNestingDepth = 500;
     void ws() { while (p < s.size() && std::isspace(static_cast<unsigned char>(s[p]))) ++p; }
     bool take(char c) { ws(); if (p < s.size() && s[p] == c) { ++p; return true; } return false; }
     [[noreturn]] void fail(const std::string& m) { throw std::runtime_error("Serialize.decode: " + m + " at offset " + std::to_string(p)); }
@@ -2431,8 +2433,17 @@ class JsonParser {
         ws();
         if (p >= s.size()) fail("unexpected end");
         if (s[p] == '"') return parseString();
-        if (s[p] == '{') return parseObject();
-        if (s[p] == '[') return parseArray();
+        if (s[p] == '{' || s[p] == '[') {
+            // Arrays and objects recurse; without a cap a hostile payload of
+            // 100k nested '[' is a stack overflow (SIGSEGV) rather than a
+            // parse error. 500 is far above any real document and shallow
+            // enough that recursion stays in the default stack budget.
+            if (depth >= kMaxNestingDepth) fail("nesting too deep (limit " + std::to_string(kMaxNestingDepth) + ")");
+            ++depth;
+            Value v = s[p] == '{' ? parseObject() : parseArray();
+            --depth;
+            return v;
+        }
         if (s.compare(p, 4, "true") == 0) { p += 4; return true; }
         if (s.compare(p, 5, "false") == 0) { p += 5; return false; }
         if (s.compare(p, 4, "null") == 0) { p += 4; return Value{}; }

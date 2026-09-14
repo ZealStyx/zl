@@ -70,6 +70,18 @@ NodePtr ExpressionParser::parseExpression() {
 }
 
 NodePtr ExpressionParser::parsePratt(int minBindingPower) {
+    // Every nested expression (parens, unary chains, right operands, call
+    // arguments, collection literals, lambdas, match arms) funnels through
+    // here, so counting entries bounds the parser's C++ recursion depth.
+    // Parenthesized/unary nesting is otherwise unbounded and overflows the
+    // stack on hostile input; this turns it into an ordinary syntax error.
+    // The depth counter lives on Parser so it survives the nested
+    // ExpressionParser instances a statement's sub-expressions create.
+    if (++parser_.expressionDepth_ > Parser::kMaxExpressionDepth) {
+        parser_.error("expression nesting exceeds the maximum depth of " +
+                      std::to_string(Parser::kMaxExpressionDepth));
+    }
+
     NodePtr left;
 
     if (parser_.check(TokenType::KW_AWAIT)) {
@@ -137,6 +149,7 @@ NodePtr ExpressionParser::parsePratt(int minBindingPower) {
         left = makeBinary(type, std::move(left), std::move(right), op.line);
     }
 
+    --parser_.expressionDepth_;
     return left;
 }
 
