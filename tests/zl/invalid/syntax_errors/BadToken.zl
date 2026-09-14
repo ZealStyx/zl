@@ -1,0 +1,10 @@
+// Regression fixture - invalid/syntax_errors - BadToken
+//
+// '$' is not part of the language's token set anywhere.
+
+class BadToken {
+    func main(): void {
+        var broken = $oops
+        log(broken)
+    }
+}

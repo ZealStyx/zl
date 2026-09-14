@@ -104,7 +104,7 @@ import zl.test.Runner
 class ExampleTests {
     func main(): void {
         var tester = new Test()
-        tester.assertThrows(func() { throw "expected" })
+        tester.assertThrows(func() { throw new Exception("expected") })
 
         var runner = new Runner("example")
         runner.run("truth", func() { Test.assertTrue(true) })

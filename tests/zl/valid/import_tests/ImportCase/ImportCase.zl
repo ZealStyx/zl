@@ -1,0 +1,23 @@
+// ============================================================================
+// Regression fixture - valid/import_tests - ImportCase
+//
+// Bare imports resolve against the importing file's own directory first, so
+// this entry pulls in its sibling helper module (which itself has no entry
+// point and is never discovered as a case by the runner).
+//
+// The helper also uses the type it imports from ANOTHER sibling, covering
+// transitive same-directory resolution.
+// ============================================================================
+
+import ImportHelper
+
+class ImportCase {
+    func main(): void {
+        var box = new Box<int>(21)
+        log(ImportHelper.doubled(box))
+        log(ImportHelper.shout("imports"))
+        log(ImportHelper.ZERO)
+        var p = Payload { label: "transitive", weight: 3 }
+        log(ImportHelper.payloadLabel(p))
+    }
+}

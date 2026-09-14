@@ -69,4 +69,11 @@ struct Manifest {
 // a dependency missing both `path` and `git`, malformed syntax, ...).
 Manifest loadManifest(const std::filesystem::path& manifestPath);
 
+// True if `name` is an acceptable package name: letters, digits, '.', '_'
+// and '-', no leading '.'/'-' (so it can never be "..", "." or look like a
+// command-line option), no ".." anywhere, at most 100 chars. Package names
+// become directory names under .zlpkg/ and argv elements for git, so they
+// are validated before any of that happens.
+bool isValidPackageName(const std::string& name);
+
 } // namespace zlpkg

@@ -358,4 +358,36 @@ bool valuesEqual(const Value& a, const Value& b) {
     return false;
 }
 
+std::size_t MapBox::findEntry(const Value& key) const {
+    // String keys are the overwhelmingly common case and can never equal a
+    // non-string key (see the comment on stringKeyIndex), so they may use
+    // the hash index once the map is big enough for it to pay for itself.
+    if (const auto* needle = std::get_if<std::string>(&key); needle && entries.size() >= 8) {
+        std::lock_guard<std::mutex> lock(keyIndexMutex);
+        if (!stringKeyIndexValid) {
+            stringKeyIndex.clear();
+            stringKeyIndex.reserve(entries.size());
+            for (std::size_t i = 0; i < entries.size(); ++i) {
+                const auto* entryKey = std::get_if<std::string>(&entries[i].first);
+                if (!entryKey) continue; // non-string keys cannot match a string lookup
+                // emplace keeps the first position for a duplicate key; duplicates
+                // cannot arise through Collection.mapSet, this is just defensive.
+                stringKeyIndex.emplace(*entryKey, i);
+            }
+            stringKeyIndexValid = true;
+        }
+        const auto it = stringKeyIndex.find(*needle);
+        if (it == stringKeyIndex.end()) return kNoEntry;
+        // Defensive consistency check: the cache is only advisory.
+        if (it->second < entries.size() && valuesEqual(entries[it->second].first, key)) {
+            return it->second;
+        }
+        return kNoEntry;
+    }
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (valuesEqual(entries[i].first, key)) return i;
+    }
+    return kNoEntry;
+}
+
 } // namespace zl

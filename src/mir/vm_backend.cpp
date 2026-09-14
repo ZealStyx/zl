@@ -1418,6 +1418,14 @@ private:
             pushOperand(fn, ins.operands[1], body, line);
             pushOperand(fn, ins.operands[2], body, line);
             body.emit(OpCode::CallNative, nativeIndexByName("Collection.mapSet"), line, 0);
+        } else if (kind == NativeCollKind::Set) {
+            // Sets grow with setAdd, never a positional append: a literal like
+            // `set<string> {"a", "b", "a"}` must dedup to two elements, exactly
+            // as the reference's newSet/setAdd sequence does. Push would keep
+            // the duplicate and store list-style entries.
+            pushOperand(fn, ins.operands[0], body, line);
+            pushOperand(fn, ins.operands[2], body, line);
+            body.emit(OpCode::CallNative, nativeIndexByName("Collection.setAdd"), line, 0);
         } else {
             // list/array: append value (ignore the growing index).
             pushOperand(fn, ins.operands[0], body, line);

@@ -262,6 +262,12 @@ enum class NativeId : std::uint16_t {
     REFLECTION_CONSTRUCTOR,
     REFLECTION_METHOD_INVOKE,
     REFLECTION_CONSTRUCTOR_INVOKE,
+    // Reserved id for bindings registered at runtime by generated extension
+    // code (e.g. zl-bind output linked into a host binary). These names have
+    // no compile-time catalog signature; they are resolved by name through
+    // findNativeFunctionByName() rather than by catalog id, and every runtime
+    // registration shares this single id.
+    EXTENSION = 0xFFFF,
 };
 
 enum class NativeReturnTypeRule {

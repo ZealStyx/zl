@@ -10,12 +10,39 @@
 
 namespace zl {
 
+// Process-wide worker-thread bookkeeping.
+// - gAliveWorkerThreads: ZL worker threads currently running (started, not
+//   finished). A channel operation about to block when this is 0 and the
+//   scheduler has no pending frames cannot ever be unblocked - the blocking
+//   thread is the only runnable entity - so it is reported as a deadlock
+//   instead of hanging forever.
+// - gIsWorkerThread: true on ZL worker threads. Deadlock detection is
+//   disabled there (other threads, e.g. main, may still make progress).
+// - gAbandonedWorkerThreads: set when the interpreter abandoned a worker at
+//   teardown instead of waiting forever for it; the host main() then exits
+//   without running static destructors, because the abandoned thread may
+//   still touch global state.
+inline std::atomic<int> gAliveWorkerThreads{0};
+inline thread_local bool gIsWorkerThread = false;
+inline std::atomic<bool> gAbandonedWorkerThreads{false};
+
 // Allocated before a thread starts, so handing off its joinable handle from a
 // noexcept destructor never needs to allocate. GC references do not live here.
 struct ThreadJoinNode {
     std::thread thread;
+    // Set to true by the worker right before it exits, so a teardown join can
+    // wait with a timeout instead of an unbounded thread::join().
+    std::shared_ptr<std::atomic<bool>> done;
     std::unique_ptr<ThreadJoinNode> next;
+    // The destructor is a teardown context (a drop with no active joins
+    // queue): it must not hang the process on a worker blocked forever.
     ~ThreadJoinNode();
+    // Mid-run wait: the worker is doing real work the program may depend on.
+    void joinUnbounded();
+    // Teardown join: waits up to the bound for the worker to finish; if it is
+    // still running (e.g. blocked forever on a channel receive nobody will
+    // serve), prints a diagnostic, detaches it and flags the abandonment.
+    void joinOrAbandon();
 };
 
 // A VM instruction can destroy a Thread inside a map/vector update. Joining
@@ -27,7 +54,12 @@ public:
     static DeferredThreadJoins* bind(DeferredThreadJoins* queue) noexcept;
     static void retire(std::unique_ptr<ThreadJoinNode> node) noexcept;
     bool empty() const noexcept { return !pending_; }
+    // Bounded drains are for teardown only (end of VM::run, VM destruction):
+    // they abandon still-running workers instead of waiting forever. A mid-run
+    // drain keeps waiting - a dropped-but-live worker is doing real work the
+    // program may depend on, and only the exit path must not hang.
     void drain() noexcept;
+    void drainBounded() noexcept;
 private:
     std::unique_ptr<ThreadJoinNode> pending_;
 };
@@ -62,21 +94,34 @@ public:
         auto failure = failure_;
         auto failureMutex = failureMutex_;
         done->store(false, std::memory_order_release);
-        worker->thread = std::thread([done, failure, failureMutex, fn = std::forward<Fn>(fn)]() mutable {
-            try {
-                fn();
-            } catch (...) {
-                // Capture rather than propagate: an exception escaping a
-                // std::thread's entry point calls std::terminate. join()
-                // rethrows this in the joining thread instead.
-                // The collector does not trace threads, so this failure pins
-                // its own payload until join() consumes it.
-                std::lock_guard<std::mutex> lock(*failureMutex);
-                *failure = StoredException(std::current_exception(),
-                                           StoredException::Retention::Untraced);
-            }
-            done->store(true, std::memory_order_release);
-        });
+        worker->done = done;
+        // Count the worker BEFORE it is spawned, from the starting thread: a
+        // channel operation on the starter can observe the alive count before
+        // the OS thread has run its first instruction, and a 0 there would
+        // turn a legitimate block into a false deadlock report.
+        gAliveWorkerThreads.fetch_add(1, std::memory_order_release);
+        try {
+            worker->thread = std::thread([done, failure, failureMutex, fn = std::forward<Fn>(fn)]() mutable {
+                gIsWorkerThread = true;
+                try {
+                    fn();
+                } catch (...) {
+                    // Capture rather than propagate: an exception escaping a
+                    // std::thread's entry point calls std::terminate. join()
+                    // rethrows this in the joining thread instead.
+                    // The collector does not trace threads, so this failure pins
+                    // its own payload until join() consumes it.
+                    std::lock_guard<std::mutex> lock(*failureMutex);
+                    *failure = StoredException(std::current_exception(),
+                                               StoredException::Retention::Untraced);
+                }
+                done->store(true, std::memory_order_release);
+                gAliveWorkerThreads.fetch_sub(1, std::memory_order_release);
+            });
+        } catch (...) {
+            gAliveWorkerThreads.fetch_sub(1, std::memory_order_release);
+            throw;
+        }
         worker_ = std::move(worker);
         started_ = true;
     }

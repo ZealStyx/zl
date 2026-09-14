@@ -669,6 +669,13 @@ bool Parser::startsTypeAnnotation() const {
 // map<string, int>
 // int|string             (union - repeatable: int|string|bool)
 TypeAnnotation Parser::parseTypeAnnotation() {
+    // Generic type arguments recurse through here (`list<list<list<...>>>`),
+    // so nesting is counted like blocks and expressions. Both returns below
+    // decrement; a thrown ParseError discards the whole parser, so a missing
+    // decrement on that path cannot be observed.
+    if (++typeDepth_ > kMaxTypeDepth) {
+        error("type nesting exceeds the maximum depth of " + std::to_string(kMaxTypeDepth));
+    }
     TypeAnnotation type;
     type.line = peek().line;
 
@@ -767,9 +774,11 @@ TypeAnnotation Parser::parseTypeAnnotation() {
         while (match({TokenType::BIT_OR})) {
             unionType.unionOf.push_back(parseTypeAnnotation());
         }
+        --typeDepth_;
         return unionType;
     }
 
+    --typeDepth_;
     return type;
 }
 
@@ -1037,12 +1046,19 @@ NodePtr Parser::parseThrowStmt() {
 }
 
 std::unique_ptr<BlockStmt> Parser::parseBlock() {
+    // Every '{' recurses through here (a block's statements can contain
+    // blocks), so this is where nesting is counted. The error is a normal
+    // ParseError: hostile input gets a syntax error, not a stack overflow.
+    if (++blockDepth_ > kMaxBlockDepth) {
+        error("block nesting exceeds the maximum depth of " + std::to_string(kMaxBlockDepth));
+    }
     expect(TokenType::LBRACE, "Expected '{'");
     auto block = std::make_unique<BlockStmt>();
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
         block->statements.push_back(parseStatement());
     }
     expect(TokenType::RBRACE, "Expected '}'");
+    --blockDepth_;
     return block;
 }
 

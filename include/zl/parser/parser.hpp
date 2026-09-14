@@ -133,6 +133,19 @@ private:
     // for the same reason.
     bool noDataLiteral_{false};
 
+    // Recursion guards. The parser is recursive descent, so pathological
+    // input (thousands of nested parentheses, or thousands of nested '{'
+    // blocks) is a stack overflow (SIGSEGV) rather than a syntax error
+    // without a counted limit. Both counters are members because expression
+    // nesting recurses through one ExpressionParser instance while block
+    // nesting recurses through Parser::parseBlock -> parseStatement.
+    int expressionDepth_{0};
+    int blockDepth_{0};
+    int typeDepth_{0};
+    static constexpr int kMaxExpressionDepth = 1000;
+    static constexpr int kMaxBlockDepth = 500;
+    static constexpr int kMaxTypeDepth = 500;
+
     std::vector<Token> tokens_;
     std::size_t pos_{0};
     TypeLookahead typeLookahead_;

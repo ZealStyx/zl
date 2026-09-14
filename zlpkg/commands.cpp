@@ -33,8 +33,7 @@ std::filesystem::path findZlLanguageBinary(const char* argv0) {
 }
 
 bool verifyRuntimeCompatibility(const std::filesystem::path& zlBinary) {
-    const std::string command = shellQuote(zlBinary.string()) + " --version";
-    const auto result = runCaptured(command);
+    const auto result = runCaptured({zlBinary.string(), "--version"});
     if (result.exitCode != 0) {
         std::cerr << "zlpkg: could not query runtime version: " << result.output;
         return false;
@@ -159,14 +158,16 @@ int cmdRun(const std::filesystem::path& projectDir, const std::filesystem::path&
         return 1;
     }
 
-    std::string cmd = shellQuote(zlBinary.string());
+    std::vector<std::string> argv;
+    argv.push_back(zlBinary.string());
     for (const auto& d : deps) {
-        cmd += " --root " + shellQuote(d.moduleRoot().string());
+        argv.push_back("--root");
+        argv.push_back(d.moduleRoot().string());
     }
-    cmd += " " + shellQuote(entry.string());
-    for (const auto& a : programArgs) cmd += " " + shellQuote(a);
+    argv.push_back(entry.string());
+    for (const auto& a : programArgs) argv.push_back(a);
 
-    return run(cmd);
+    return run(argv);
 }
 
 } // namespace zlpkg

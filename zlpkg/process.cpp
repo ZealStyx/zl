@@ -3,29 +3,27 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
 #include <sys/wait.h>
+#include <unistd.h>
+#include <cerrno>
 #endif
 
 namespace zlpkg {
+namespace {
 
-std::string shellQuote(const std::string& arg) {
 #ifdef _WIN32
-    // zlpkg launches child processes through the Windows command shell
-    // (`system`/`_popen`). Backslashes are ordinary Windows path separators
-    // and must not be escaped merely because the argument is quoted. The old
-    // implementation escaped every backslash, corrupting paths such as
-    // `D:\zl_language\build\zl_language.exe` and causing cmd.exe to report
-    // the misleading "The filename, directory name, or volume label syntax
-    // is incorrect." error.
-    //
-    // Quote according to the Windows command-line parsing rules: only
-    // backslashes immediately preceding a literal quote (or the closing
-    // quote) need doubling.
+// Quotes one argument for a CreateProcess command line (which the child's
+// CRT parses back into argv with the standard MS rules). Only backslashes
+// that immediately precede a double quote (or the closing quote) need
+// doubling; a trailing backslash run must be doubled so it cannot escape
+// the closing quote.
+std::string quoteWindowsArg(const std::string& arg) {
     std::string out = "\"";
     std::size_t backslashes = 0;
     for (char c : arg) {
@@ -43,22 +41,43 @@ std::string shellQuote(const std::string& arg) {
         backslashes = 0;
         out += c;
     }
-    // A trailing run of backslashes would otherwise escape the closing quote.
     out.append(backslashes * 2, '\\');
     out += '"';
     return out;
-#else
-    std::string out = "\"";
-    for (char c : arg) {
-        if (c == '"' || c == '\\') out += '\\';
-        out += c;
-    }
-    out += '"';
-    return out;
-#endif
 }
 
-ProcessResult runCaptured(const std::string& command) {
+std::string windowsCommandLine(const std::vector<std::string>& argv) {
+    std::string line;
+    for (const auto& arg : argv) {
+        if (!line.empty()) line += ' ';
+        line += quoteWindowsArg(arg);
+    }
+    return line;
+}
+#endif
+
+#ifndef _WIN32
+[[noreturn]] void execChild(char* const argvPtr[]) {
+    ::execvp(argvPtr[0], argvPtr);
+    // execvp only returns on failure; nothing has executed yet, so the exit
+    // status tells the parent which problem it was (127 = not found).
+    ::_exit(errno == ENOENT ? 127 : 126);
+}
+
+std::vector<char*> argvForExec(const std::vector<std::string>& argv) {
+    std::vector<char*> ptrs;
+    ptrs.reserve(argv.size() + 1);
+    for (const auto& arg : argv) ptrs.push_back(const_cast<char*>(arg.c_str()));
+    ptrs.push_back(nullptr);
+    return ptrs;
+}
+#endif
+
+} // namespace
+
+ProcessResult runCaptured(const std::vector<std::string>& argv) {
+    if (argv.empty()) return {-1, "zlpkg: runCaptured: empty argv"};
+
 #ifdef _WIN32
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
@@ -75,7 +94,7 @@ ProcessResult runCaptured(const std::string& command) {
         return {-1, "failed to configure output pipe"};
     }
 
-    std::string commandLine = command;
+    std::string commandLine = windowsCommandLine(argv);
     STARTUPINFOA si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
@@ -87,7 +106,7 @@ ProcessResult runCaptured(const std::string& command) {
                         nullptr, &si, &pi)) {
         CloseHandle(readHandle);
         CloseHandle(writeHandle);
-        return {-1, "failed to launch: " + command};
+        return {-1, "failed to launch: " + commandLine};
     }
 
     CloseHandle(writeHandle);
@@ -121,27 +140,53 @@ ProcessResult runCaptured(const std::string& command) {
     CloseHandle(pi.hProcess);
     return {static_cast<int>(exitCode), output};
 #else
-    std::string fullCommand = command + " 2>&1";
-    FILE* pipe = popen(fullCommand.c_str(), "r");
-    if (!pipe) return {-1, "failed to launch: " + command};
+    int pipeFds[2];
+    if (::pipe(pipeFds) != 0) return {-1, "failed to create output pipe"};
 
+    std::vector<char*> argvPtr = argvForExec(argv);
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        ::close(pipeFds[0]);
+        ::close(pipeFds[1]);
+        return {-1, "failed to fork"};
+    }
+    if (pid == 0) {
+        // Child: both stdout and stderr feed the pipe the parent reads.
+        ::close(pipeFds[0]);
+        if (::dup2(pipeFds[1], STDOUT_FILENO) < 0) ::_exit(126);
+        if (::dup2(pipeFds[1], STDERR_FILENO) < 0) ::_exit(126);
+        if (pipeFds[1] != STDOUT_FILENO && pipeFds[1] != STDERR_FILENO) ::close(pipeFds[1]);
+        execChild(argvPtr.data());
+    }
+
+    ::close(pipeFds[1]);
     std::string output;
     std::array<char, 4096> buffer{};
     while (true) {
-        const std::size_t n = std::fread(buffer.data(), 1, buffer.size(), pipe);
+        const ssize_t n = ::read(pipeFds[0], buffer.data(), buffer.size());
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
         if (n == 0) break;
-        output.append(buffer.data(), n);
+        output.append(buffer.data(), static_cast<std::size_t>(n));
     }
+    ::close(pipeFds[0]);
 
-    const int status = pclose(pipe);
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return {-1, "failed to wait for child"};
+    }
     const int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     return {exitCode, output};
 #endif
 }
 
-int run(const std::string& command) {
+int run(const std::vector<std::string>& argv) {
+    if (argv.empty()) return -1;
+
 #ifdef _WIN32
-    std::string commandLine = command;
+    std::string commandLine = windowsCommandLine(argv);
     STARTUPINFOA si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
@@ -156,8 +201,15 @@ int run(const std::string& command) {
     CloseHandle(pi.hProcess);
     return static_cast<int>(exitCode);
 #else
-    const int status = std::system(command.c_str());
-    if (status == -1) return 1;
+    std::vector<char*> argvPtr = argvForExec(argv);
+    const pid_t pid = ::fork();
+    if (pid < 0) return -1;
+    if (pid == 0) execChild(argvPtr.data());
+
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return 1;
+    }
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 #endif
 }

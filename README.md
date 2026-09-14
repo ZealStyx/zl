@@ -183,8 +183,9 @@ summarized in [docs/language-guide.md](docs/language-guide.md#memory-model-direc
   VM, OS access, parsing engines, and storage primitives stay native.
 - `func`-typed slots don't carry full signature types yet, so arity mismatches on a
   closure call are runtime errors rather than compile-time ones.
-- Async is partial: `async func`, `Task<T>`, and `await` work; `block()`/`ignore()`,
-  cancellation propagation, unobserved-failure reporting, and async lambdas are pending.
+- Async is partial: `async func`, `Task<T>`, `await`, and collecting a task from sync
+  code with `block()` (plus `ignore()`/`cancel()`) work; cancellation propagation,
+  unobserved-failure reporting, and async lambdas are pending.
 - `zlpkg` has no registry — dependencies resolve by `git` URL or local `path` only,
   with no version ranges, workspaces, or dev-dependencies.
 - One class per file, matching the file stem.

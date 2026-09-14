@@ -416,14 +416,16 @@ Value collMapSet(const std::vector<Value>& args) {
     Value replacement = args[2];
     RuntimeTypeCheck types(nativeChunk());
     types.mapWrite(map, args[1], replacement);
-    for (auto& entry : map->entries) {
-        if (valuesEqual(entry.first, args[1])) {
-            std::swap(entry.second, replacement);
-            types.commit();
-            return Value{};
-        }
+    const std::size_t pos = map->findEntry(args[1]);
+    if (pos != MapBox::kNoEntry) {
+        // In-place value update: keys keep their positions, so the lookup
+        // index stays valid.
+        std::swap(map->entries[pos].second, replacement);
+        types.commit();
+        return Value{};
     }
     map->entries.emplace_back(args[1], std::move(replacement));
+    map->noteAppendedKey(args[1]);
     types.commit();
     return Value{};
 }
@@ -431,31 +433,26 @@ Value collMapSet(const std::vector<Value>& args) {
 Value collMapGet(const std::vector<Value>& args) {
     RuntimeTypeCheck access(nativeChunk());
     auto map = requireMap(args[0], "Collection.mapGet");
-    for (auto& entry : map->entries) {
-        if (valuesEqual(entry.first, args[1])) return entry.second;
-    }
+    const std::size_t pos = map->findEntry(args[1]);
+    if (pos != MapBox::kNoEntry) return map->entries[pos].second;
     throwKeyError("Collection.mapGet: key not found");
 }
 
 Value collMapHas(const std::vector<Value>& args) {
     RuntimeTypeCheck access(nativeChunk());
     auto map = requireMap(args[0], "Collection.mapHas");
-    for (auto& entry : map->entries) {
-        if (valuesEqual(entry.first, args[1])) return true;
-    }
-    return false;
+    return map->findEntry(args[1]) != MapBox::kNoEntry;
 }
 
 Value collMapRemove(const std::vector<Value>& args) {
     auto map = requireMap(args[0], "Collection.mapRemove");
     std::pair<Value, Value> removed;
     RuntimeTypeCheck access(nativeChunk());
-    for (auto it = map->entries.begin(); it != map->entries.end(); ++it) {
-        if (valuesEqual(it->first, args[1])) {
-            removed = std::move(*it);
-            map->entries.erase(it);
-            break;
-        }
+    const std::size_t pos = map->findEntry(args[1]);
+    if (pos != MapBox::kNoEntry) {
+        removed = std::move(map->entries[pos]);
+        map->entries.erase(map->entries.begin() + static_cast<std::ptrdiff_t>(pos));
+        map->invalidateKeyIndex();
     }
     return Value{};
 }
@@ -1447,6 +1444,20 @@ Value channelCreate(const std::vector<Value>& args) {
     return obj;
 }
 
+namespace {
+// True when a blocking channel operation on THIS thread certainly cannot ever
+// be unblocked: no ZL worker thread exists, no async frame is queued on the
+// scheduler, and the caller is not itself a worker (main may still make
+// progress). The only remaining runnable entity is the thread about to block,
+// so waiting would be a hang - report it as a deadlock instead.
+bool channelBlockWouldDeadlock() {
+    if (gIsWorkerThread) return false;
+    if (gAliveWorkerThreads.load(std::memory_order_acquire) > 0) return false;
+    if (g_currentNativeVm && g_currentNativeVm->schedulerPendingCount() > 0) return false;
+    return true;
+}
+} // namespace
+
 Value channelSend(const std::vector<Value>& args) {
     auto obj = std::get_if<ObjectRef>(&args[0]);
     if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
@@ -1456,6 +1467,10 @@ Value channelSend(const std::vector<Value>& args) {
     {
         VM::BlockingNativeCall blocked(g_currentNativeVm);
         lock.lock();
+        if (state->items.size() >= state->capacity && channelBlockWouldDeadlock()) {
+            throw std::runtime_error(
+                "Channel.send: deadlock - the channel is full and no other thread or pending task can receive");
+        }
         state->cvNotFull.wait(lock, [&] { return state->items.size() < state->capacity; });
     }
     state->items.push_back(args[1]);
@@ -1473,6 +1488,10 @@ Value channelReceive(const std::vector<Value>& args) {
     {
         VM::BlockingNativeCall blocked(g_currentNativeVm);
         lock.lock();
+        if (state->items.empty() && channelBlockWouldDeadlock()) {
+            throw std::runtime_error(
+                "Channel.receive: deadlock - the channel is empty and no other thread or pending task can send");
+        }
         state->cvNotEmpty.wait(lock, [&] { return !state->items.empty(); });
     }
     Value value = std::move(state->items.front());
@@ -2320,6 +2339,8 @@ Value textRegexFindMatches(const std::vector<Value>& args) {
 // --- JSON serialization ---
 class JsonParser {
     const std::string& s; std::size_t p = 0;
+    int depth = 0;
+    static constexpr int kMaxNestingDepth = 500;
     void ws() { while (p < s.size() && std::isspace(static_cast<unsigned char>(s[p]))) ++p; }
     bool take(char c) { ws(); if (p < s.size() && s[p] == c) { ++p; return true; } return false; }
     [[noreturn]] void fail(const std::string& m) { throw std::runtime_error("Serialize.decode: " + m + " at offset " + std::to_string(p)); }
@@ -2431,8 +2452,17 @@ class JsonParser {
         ws();
         if (p >= s.size()) fail("unexpected end");
         if (s[p] == '"') return parseString();
-        if (s[p] == '{') return parseObject();
-        if (s[p] == '[') return parseArray();
+        if (s[p] == '{' || s[p] == '[') {
+            // Arrays and objects recurse; without a cap a hostile payload of
+            // 100k nested '[' is a stack overflow (SIGSEGV) rather than a
+            // parse error. 500 is far above any real document and shallow
+            // enough that recursion stays in the default stack budget.
+            if (depth >= kMaxNestingDepth) fail("nesting too deep (limit " + std::to_string(kMaxNestingDepth) + ")");
+            ++depth;
+            Value v = s[p] == '{' ? parseObject() : parseArray();
+            --depth;
+            return v;
+        }
         if (s.compare(p, 4, "true") == 0) { p += 4; return true; }
         if (s.compare(p, 5, "false") == 0) { p += 5; return false; }
         if (s.compare(p, 4, "null") == 0) { p += 4; return Value{}; }
@@ -3113,8 +3143,20 @@ std::optional<std::size_t> findNativeFunction(NativeId id) {
 
 std::optional<std::size_t> findNativeFunction(const std::string& qualifiedName) {
     const auto signature = findNativeSignature(qualifiedName);
-    if (!signature) return std::nullopt;
+    if (!signature) {
+        // Not a catalog native: it may be a runtime-registered extension
+        // binding (zl-bind output), which is resolved by name alone.
+        return findNativeFunctionByName(qualifiedName);
+    }
     return findNativeFunction((*signature)->id);
+}
+
+std::optional<std::size_t> findNativeFunctionByName(const std::string& qualifiedName) {
+    const auto& table = nativeFunctionTable();
+    for (std::size_t i = 0; i < table.size(); ++i) {
+        if (table[i].qualifiedName == qualifiedName) return i;
+    }
+    return std::nullopt;
 }
 
 } // namespace zl
