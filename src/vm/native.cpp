@@ -416,14 +416,16 @@ Value collMapSet(const std::vector<Value>& args) {
     Value replacement = args[2];
     RuntimeTypeCheck types(nativeChunk());
     types.mapWrite(map, args[1], replacement);
-    for (auto& entry : map->entries) {
-        if (valuesEqual(entry.first, args[1])) {
-            std::swap(entry.second, replacement);
-            types.commit();
-            return Value{};
-        }
+    const std::size_t pos = map->findEntry(args[1]);
+    if (pos != MapBox::kNoEntry) {
+        // In-place value update: keys keep their positions, so the lookup
+        // index stays valid.
+        std::swap(map->entries[pos].second, replacement);
+        types.commit();
+        return Value{};
     }
     map->entries.emplace_back(args[1], std::move(replacement));
+    map->noteAppendedKey(args[1]);
     types.commit();
     return Value{};
 }
@@ -431,31 +433,26 @@ Value collMapSet(const std::vector<Value>& args) {
 Value collMapGet(const std::vector<Value>& args) {
     RuntimeTypeCheck access(nativeChunk());
     auto map = requireMap(args[0], "Collection.mapGet");
-    for (auto& entry : map->entries) {
-        if (valuesEqual(entry.first, args[1])) return entry.second;
-    }
+    const std::size_t pos = map->findEntry(args[1]);
+    if (pos != MapBox::kNoEntry) return map->entries[pos].second;
     throwKeyError("Collection.mapGet: key not found");
 }
 
 Value collMapHas(const std::vector<Value>& args) {
     RuntimeTypeCheck access(nativeChunk());
     auto map = requireMap(args[0], "Collection.mapHas");
-    for (auto& entry : map->entries) {
-        if (valuesEqual(entry.first, args[1])) return true;
-    }
-    return false;
+    return map->findEntry(args[1]) != MapBox::kNoEntry;
 }
 
 Value collMapRemove(const std::vector<Value>& args) {
     auto map = requireMap(args[0], "Collection.mapRemove");
     std::pair<Value, Value> removed;
     RuntimeTypeCheck access(nativeChunk());
-    for (auto it = map->entries.begin(); it != map->entries.end(); ++it) {
-        if (valuesEqual(it->first, args[1])) {
-            removed = std::move(*it);
-            map->entries.erase(it);
-            break;
-        }
+    const std::size_t pos = map->findEntry(args[1]);
+    if (pos != MapBox::kNoEntry) {
+        removed = std::move(map->entries[pos]);
+        map->entries.erase(map->entries.begin() + static_cast<std::ptrdiff_t>(pos));
+        map->invalidateKeyIndex();
     }
     return Value{};
 }

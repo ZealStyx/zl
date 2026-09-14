@@ -113,6 +113,46 @@ struct MapBox {
     // vector, and every Collection.map* native above works entry-by-entry
     // in the vector's own order.
     std::vector<std::pair<Value, Value>> entries;
+
+    // --- string-key lookup index ------------------------------------------
+    // entries stays the source of truth and keeps its ordering contract;
+    // this cache exists only to make string-key lookups O(1) instead of
+    // O(n). It is sound because valuesEqual(string, non-string) is always
+    // false, so a string lookup key can only ever match string entry keys
+    // by exact equality - non-string keys are simply absent from the index
+    // and can never be missed. Non-string lookup keys (ints, objects, ...)
+    // still scan linearly, preserving valuesEqual's cross-numeric
+    // semantics exactly (1 == 1.0). Any structural change (append, erase)
+    // invalidates the cache; an in-place value update does not, because
+    // keys never move.
+    // Guarded by a mutex: a map shared across threads may be read
+    // concurrently, and two readers must not race while (re)building.
+    static constexpr std::size_t kNoEntry = static_cast<std::size_t>(-1);
+    mutable std::mutex keyIndexMutex;
+    mutable std::unordered_map<std::string, std::size_t> stringKeyIndex;
+    mutable bool stringKeyIndexValid{false};
+
+    // Drop the cache after any mutation that changes entry positions.
+    void invalidateKeyIndex() const {
+        std::lock_guard<std::mutex> lock(keyIndexMutex);
+        stringKeyIndexValid = false;
+        stringKeyIndex.clear();
+    }
+    // Record that `key` was just appended at the end of entries (the caller
+    // has already emplaced it). An index that is already valid can absorb a
+    // string key in O(1); a non-string key never enters the index, and an
+    // invalid index is rebuilt on the next lookup anyway.
+    void noteAppendedKey(const Value& key) const {
+        const auto* appended = std::get_if<std::string>(&key);
+        if (!appended) return;
+        std::lock_guard<std::mutex> lock(keyIndexMutex);
+        if (!stringKeyIndexValid) return;
+        stringKeyIndex.emplace(*appended, entries.size() - 1);
+    }
+    // Position of the first entry whose key equals `key`, or kNoEntry.
+    // Exact semantics of a linear valuesEqual scan, O(1) for string keys
+    // on maps of 8+ entries.
+    [[nodiscard]] std::size_t findEntry(const Value& key) const;
 };
 
 // An instance of a user-defined class. `className` identifies the class for
