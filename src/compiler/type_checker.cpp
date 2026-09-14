@@ -4,6 +4,7 @@
 #include "zl/compiler/generic_instantiation.hpp"
 #include "zl/compiler/thread_capture.hpp"
 #include "zl/parser/type_annotation.hpp"
+#include "zl/vm/native.hpp"
 
 #include <functional>
 #include <algorithm>
@@ -4032,6 +4033,31 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                 return result;
             }
             return InferredType(sig->returnType, sig->returnClassName);
+        }
+        // --- runtime-registered extension native (zl-bind output) ---
+        // Extensions have no catalog signature, so the check above cannot see
+        // them - but they are real, callable natives once linked in. Their
+        // declared arity is validated here exactly like the catalog's, and the
+        // call is dynamically typed: the binding converts and validates each
+        // argument at runtime and throws a clean, function-specific error on
+        // mismatch. Without this fallback every extension native is
+        // unreachable from ZL.
+        if (const auto extIdx = findNativeFunctionByName(qualifiedName)) {
+            const NativeFunction& ext = nativeFunctionTable()[*extIdx];
+            std::size_t extArity = 0;
+            try {
+                extArity = ext.arity();
+            } catch (const std::logic_error&) {
+                typeError("'" + qualifiedName + "' is registered without a declared arity", node->line);
+            }
+            if (extArity != node->arguments.size()) {
+                typeError("'" + qualifiedName + "' expects " + std::to_string(extArity) +
+                          " argument(s), got " + std::to_string(node->arguments.size()),
+                          node->line);
+            }
+            const auto extArgs = inferArguments(node->arguments);
+            (void)extArgs;
+            return ZlType::UNKNOWN;
         }
         typeError("unknown qualified func '" + qualifiedName + "'", node->line);
         return ZlType::UNKNOWN; // unreachable

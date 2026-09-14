@@ -200,11 +200,22 @@ run_case() {
 
     local termination_marker="${location%.zl}.expect-termination"
     if [[ -f "$termination_marker" ]]; then
-        if [[ "$actual" -ne 0 && "$actual" -ne 124 ]]; then
-            echo "  PASS  $name  (expected process termination: exit $actual)"
+        # A hardening test terminates the process with a *clean* runtime
+        # error (exit 1). Anything else is a regression: exit 0 means the
+        # fault was silently swallowed, 124 means the test hung, and 128+N
+        # means the process died by signal (crash) instead of reporting.
+        if [[ "$actual" -eq 1 ]]; then
+            echo "  PASS  $name  (expected clean error termination: exit 1)"
             PASS=$((PASS + 1))
             return
         fi
+        echo "  FAIL  $name"
+        echo "        location:      $location  ($( [[ "$kind" == "pkg" ]] && echo "via zlpkg run" || echo "direct" ))"
+        echo "        expected exit: 1  (clean error termination; got $actual)"
+        echo "        actual output:"
+        echo "$out" | sed 's/^/          /'
+        FAIL=$((FAIL + 1))
+        return
     fi
 
     if [[ "$actual" -eq "$expected" ]]; then

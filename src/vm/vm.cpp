@@ -573,6 +573,19 @@ int VM::runImpl(const Chunk& chunk, const std::vector<std::string>& programArgs,
 VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stopAtReturn,
                 const std::vector<std::string>& programArgs, Value* returnValue,
                 std::shared_ptr<const Chunk> owner) {
+    // Re-entry budget (see nestedExecuteDepth_): nested callbacks otherwise
+    // overflow the C++ stack thousands of levels below the 100k ZL-frame cap.
+    // RAII-scoped decrement: execute() has many exits (returns and throws).
+    if (++nestedExecuteDepth_ > kMaxNestedExecuteDepth) {
+        --nestedExecuteDepth_;
+        throwStackOverflowError("stack overflow: maximum nested-execution depth (" +
+                                std::to_string(kMaxNestedExecuteDepth) + ") exceeded");
+    }
+    struct NestedExecuteGuard {
+        std::size_t& depth;
+        ~NestedExecuteGuard() { --depth; }
+    };
+    NestedExecuteGuard nestedGuard{nestedExecuteDepth_};
     // Re-entrant native callbacks must retain both the callee's program and
     // their caller's program; neither is an independent global GC pin.
     ProgramScope program(*this, chunk, std::move(owner));

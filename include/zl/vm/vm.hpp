@@ -46,6 +46,13 @@ public:
     // (plus the alive-worker count) to detect that nobody can ever unblock a
     // send/receive and raise a deadlock error instead of hanging forever.
     [[nodiscard]] std::size_t schedulerPendingCount() const noexcept { return scheduler_ ? scheduler_->pendingCount() : 0; }
+    // Runs a single ready async frame on this VM's scheduler, if any.
+    // Blocking channel operations pump this while waiting (releasing the
+    // channel lock first) so an async sender/receiver queued behind the very
+    // call that is about to block still runs instead of hanging the program.
+    // Always own-scheduler: g_currentNativeVm is thread-local, so the pump
+    // runs on the same thread that owns the scheduler.
+    [[nodiscard]] bool pumpSchedulerOne() { return scheduler_ ? scheduler_->runOne() : false; }
 
     // Only the wait itself belongs in this scope: callbacks and managed-data
     // access must happen after reactivation, even if the native acquired a lock.
@@ -155,6 +162,15 @@ private:
     std::vector<std::shared_ptr<const Chunk>> activeChunkOwners_;
     DeferredThreadJoins threadJoins_;
     std::uint64_t gcParticipantId_{0};
+    // Nested execute() activations on this VM (native->ZL callbacks such as
+    // Mutex.withLock, reflective invocation, async resumption while blocked).
+    // ZL call frames live on the heap and are capped separately at 100000,
+    // but each nested execute()activation also consumes C++ stack, which
+    // overflows far earlier - so re-entry gets its own, much lower budget.
+    // 1000 activations stay comfortably inside an 8MB stack while no sane
+    // program nests anywhere near that many blocking/callback levels.
+    std::size_t nestedExecuteDepth_{0};
+    static constexpr std::size_t kMaxNestedExecuteDepth = 1000;
 
 };
 

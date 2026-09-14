@@ -164,7 +164,11 @@ zl_add_required_test(zl-runtime-task-executor-tests tests/runtime_task_executor_
     src/vm/gc.cpp)
 target_link_libraries(zl-runtime-task-executor-tests PRIVATE Threads::Threads)
 
-zl_add_required_test(zl-runtime-sync-tests tests/runtime_sync_tests.cpp)
+zl_add_required_test(zl-runtime-sync-tests tests/runtime_sync_tests.cpp
+    src/vm/value.cpp
+    src/vm/gc.cpp
+    src/vm/runtime_exception.cpp
+    src/vm/runtime_task.cpp)
 target_link_libraries(zl-runtime-sync-tests PRIVATE Threads::Threads)
 
 zl_add_required_test(zl-ir-tests tests/ir_tests.cpp src/compiler/ir.cpp src/compiler/ir_optimizer.cpp)

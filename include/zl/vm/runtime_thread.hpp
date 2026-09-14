@@ -11,11 +11,13 @@
 namespace zl {
 
 // Process-wide worker-thread bookkeeping.
-// - gAliveWorkerThreads: ZL worker threads currently running (started, not
-//   finished). A channel operation about to block when this is 0 and the
-//   scheduler has no pending frames cannot ever be unblocked - the blocking
-//   thread is the only runnable entity - so it is reported as a deadlock
-//   instead of hanging forever.
+// - gAliveWorkerThreads: runnable entities besides the calling thread that
+//   might unblock a channel wait: Thread.start workers currently running
+//   (counted before spawn, released at exit) plus CPU-pool tasks currently
+//   queued or running (counted at enqueue, released at completion). A channel
+//   operation about to block when this is 0 and the scheduler has no pending
+//   frames cannot ever be unblocked - the blocking thread is the only runnable
+//   entity - so it is reported as a deadlock instead of hanging forever.
 // - gIsWorkerThread: true on ZL worker threads. Deadlock detection is
 //   disabled there (other threads, e.g. main, may still make progress).
 // - gAbandonedWorkerThreads: set when the interpreter abandoned a worker at

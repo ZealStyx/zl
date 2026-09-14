@@ -62,7 +62,7 @@ ZlType TypeResolver::resolveType(const TypeAnnotation& annotation,
     if (n == "nil" || n == "null") return ZlType::NIL;
     if (n == "int") return ZlType::INT;
     if (n == "double") return ZlType::DOUBLE;
-    if (n == "float") return ZlType::DOUBLE;
+    if (n == "float" || n == "decimal") return ZlType::DOUBLE;
     if (n == "string") return ZlType::STRING;
     if (n == "bool") return ZlType::BOOL;
     if (n == "unknown") return ZlType::UNKNOWN;
@@ -162,7 +162,7 @@ ZlType TypeResolver::resolveType(const TypeAnnotation& annotation,
                 }
                 allOwnParams = false;
                 if (arg.name == "int") deferred.args.push_back({ZlType::INT, ""});
-                else if (arg.name == "double" || arg.name == "float") deferred.args.push_back({ZlType::DOUBLE, ""});
+                else if (arg.name == "double" || arg.name == "float" || arg.name == "decimal") deferred.args.push_back({ZlType::DOUBLE, ""});
                 else if (arg.name == "string") deferred.args.push_back({ZlType::STRING, ""});
                 else if (arg.name == "bool") deferred.args.push_back({ZlType::BOOL, ""});
                 else deferred.args.push_back({ZlType::OBJECT, arg.name});

@@ -55,7 +55,7 @@ private:
         if (start == pos_) return invalid();
         TypeName result;
         result.name = text_.substr(start, pos_ - start);
-        if (result.name == "float") result.name = "double";
+        if (result.name == "float" || result.name == "decimal") result.name = "double";
         if (result.name == "null") result.name = "nil";
         skipWhitespace();
         if (result.name == "array" && consume('[')) {

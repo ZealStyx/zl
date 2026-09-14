@@ -22,7 +22,7 @@ DispatchType dispatchTypeFor(const Param& param, const std::vector<std::string>&
     };
     const std::string& name = param.type.name;
     if (name == "int") return {DispatchTypeKind::INT, {}};
-    if (name == "double" || name == "float") return {DispatchTypeKind::DOUBLE, {}};
+    if (name == "double" || name == "float" || name == "decimal") return {DispatchTypeKind::DOUBLE, {}};
     if (name == "string") return {DispatchTypeKind::STRING, {}};
     if (name == "bool") return {DispatchTypeKind::BOOL, {}};
     if (name == "void") return {DispatchTypeKind::VOID_TYPE, {}};

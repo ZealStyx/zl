@@ -8,6 +8,7 @@
 #include <memory>
 #include <type_traits>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -125,16 +126,52 @@ struct MapBox {
     // semantics exactly (1 == 1.0). Any structural change (append, erase)
     // invalidates the cache; an in-place value update does not, because
     // keys never move.
-    // Guarded by a mutex: a map shared across threads may be read
-    // concurrently, and two readers must not race while (re)building.
+    // One mutex guards `entries` and the index together, and every
+    // operation below holds it across lookup AND use. A map shared across
+    // threads (via Shared) may be read and written concurrently; resolving
+    // a position under the lock and then using entries[pos] after unlock
+    // races with another thread's append (vector reallocation) or erase
+    // (entries shifting), which is use-after-free, not a stale read. Each
+    // single operation is therefore atomic; multi-step sequences that must
+    // be atomic together still need an explicit Mutex/Shared.withLock.
+    // The methods never nest (locked helpers are private and assume the
+    // mutex is held) and never run user code, so no lock ordering exists
+    // to invert. Traversals snapshot: holding one map's mutex across a
+    // recursive walk would invert against another thread walking nested
+    // maps in the opposite order.
     static constexpr std::size_t kNoEntry = static_cast<std::size_t>(-1);
-    mutable std::mutex keyIndexMutex;
+    mutable std::mutex mutex;
     mutable std::unordered_map<std::string, std::size_t> stringKeyIndex;
     mutable bool stringKeyIndexValid{false};
 
+    // Position of the first entry whose key equals `key`, or kNoEntry.
+    // Exact semantics of a linear valuesEqual scan, O(1) for string keys
+    // on maps of 8+ entries. The position is only meaningful while the
+    // mutex is held, so this is just the single-shot lookup for existence
+    // checks; mutation and read-then-use go through the compound ops.
+    [[nodiscard]] std::size_t findEntry(const Value& key) const;
+    // Atomic read-then-use: copies the value out under the lock.
+    [[nodiscard]] std::optional<Value> tryGetEntry(const Value& key) const;
+    // Atomic lookup-then-write: updates the value in place when the key
+    // exists (keys keep their positions, the index stays valid), else
+    // appends at the end. Preserves the ordering contract exactly.
+    void setEntry(const Value& key, Value value);
+    // Atomic lookup-then-erase. True when a entry was removed.
+    bool removeEntry(const Value& key);
+    // Point-in-time copy of every entry, for traversals (printing, JSON
+    // encoding, key/value lists, contract checks) that must not hold the
+    // mutex across a recursive walk.
+    [[nodiscard]] std::vector<std::pair<Value, Value>> snapshotEntries() const;
+    [[nodiscard]] std::size_t size() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return entries.size();
+    }
+
+private:
+    // Locked helpers: the caller holds `mutex`.
+    [[nodiscard]] std::size_t findEntryLocked(const Value& key) const;
     // Drop the cache after any mutation that changes entry positions.
-    void invalidateKeyIndex() const {
-        std::lock_guard<std::mutex> lock(keyIndexMutex);
+    void invalidateKeyIndexLocked() const {
         stringKeyIndexValid = false;
         stringKeyIndex.clear();
     }
@@ -142,17 +179,12 @@ struct MapBox {
     // has already emplaced it). An index that is already valid can absorb a
     // string key in O(1); a non-string key never enters the index, and an
     // invalid index is rebuilt on the next lookup anyway.
-    void noteAppendedKey(const Value& key) const {
+    void noteAppendedKeyLocked(const Value& key) const {
         const auto* appended = std::get_if<std::string>(&key);
         if (!appended) return;
-        std::lock_guard<std::mutex> lock(keyIndexMutex);
         if (!stringKeyIndexValid) return;
         stringKeyIndex.emplace(*appended, entries.size() - 1);
     }
-    // Position of the first entry whose key equals `key`, or kNoEntry.
-    // Exact semantics of a linear valuesEqual scan, O(1) for string keys
-    // on maps of 8+ entries.
-    [[nodiscard]] std::size_t findEntry(const Value& key) const;
 };
 
 // An instance of a user-defined class. `className` identifies the class for
@@ -240,6 +272,14 @@ struct ClosureBox {
 [[nodiscard]] Value makeEmptyList();
 [[nodiscard]] Value makeEmptyMap();
 [[nodiscard]] Value makeEmptyObject(const std::string& className);
+
+// Maximum nesting depth any recursive value-graph traversal (printing,
+// JSON encoding, structural equality, hashing) will descend. Value graphs
+// are built programmatically, so without a cap a hostile or accidental
+// 100k-deep structure is a stack overflow (SIGSEGV). Matches the JSON
+// decoder's own limit, so anything Serialize.decode produces always stays
+// printable/comparable/encodable.
+inline constexpr int kMaxValueNestingDepth = 500;
 
 // Converts any Value to its printable text form.
 [[nodiscard]] std::string valueToString(const Value &v);
