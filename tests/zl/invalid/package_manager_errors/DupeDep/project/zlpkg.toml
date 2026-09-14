@@ -1,0 +1,9 @@
+[package]
+name = "dupedep"
+version = "0.1.0"
+
+# Invalid: the same dependency name twice. zlpkg rejects this instead of
+# resolving (and re-resolving) it once per occurrence.
+[dependencies]
+mathlib = { path = "../mathlib", version = "0.1.0" }
+mathlib = { path = "../mathlib", version = "0.1.0" }

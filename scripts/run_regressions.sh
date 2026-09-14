@@ -14,7 +14,10 @@
 #     `zlpkg run <main()-file found within that project dir>`, from within
 #     the project dir, so dependencies declared in its zlpkg.toml get
 #     resolved. Its generated .zlpkg/ cache and zlpkg.lock are removed
-#     again after each run, so repeated runs stay deterministic. zlpkg is
+#     again after each run, so repeated runs stay deterministic - except
+#     that a committed zlpkg.lock.committed is copied into place as
+#     zlpkg.lock before the run (and removed again after), so lockfile
+#     fixtures exercise a known lock state deterministically. zlpkg is
 #     looked for next to the zl_language binary; if it isn't there, these
 #     cases are skipped (not failed) with a note explaining why.
 #
@@ -181,6 +184,9 @@ run_case() {
         fi
         rel_entry="${proj_entry#"$location"/}"
         rm -rf "$location/.zlpkg" "$location/zlpkg.lock"
+        if [[ -f "$location/zlpkg.lock.committed" ]]; then
+            cp "$location/zlpkg.lock.committed" "$location/zlpkg.lock"
+        fi
         out="$(cd "$location" && timeout 20s "$ZLPKG" run "$rel_entry" </dev/null 2>&1)"
         actual=$?
         rm -rf "$location/.zlpkg" "$location/zlpkg.lock"

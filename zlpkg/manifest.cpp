@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <map>
+#include <set>
 #include <sstream>
 
 namespace zlpkg {
@@ -81,6 +82,7 @@ Manifest loadManifest(const std::filesystem::path& manifestPath) {
     std::string rawLine;
     int lineNo = 0;
     bool haveName = false, haveVersion = false;
+    std::set<std::string> seenDepNames;
 
     while (std::getline(file, rawLine)) {
         ++lineNo;
@@ -128,6 +130,9 @@ Manifest loadManifest(const std::filesystem::path& manifestPath) {
                 throw err("dependency name '" + key +
                           "' is invalid: allowed are letters, digits, '.', '_' and '-', "
                           "with no leading '.'/'-' and no \"..\"");
+            }
+            if (!seenDepNames.insert(key).second) {
+                throw err("duplicate dependency '" + key + "'");
             }
             dep.name = key;
             if (auto v = fields.find("version"); v != fields.end()) dep.version = v->second;

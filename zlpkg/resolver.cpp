@@ -3,6 +3,7 @@
 #include <deque>
 #include <map>
 #include <set>
+#include <utility>
 
 #include "git.hpp"
 
@@ -51,6 +52,13 @@ std::vector<ResolvedDependency> resolveAll(const Manifest& rootManifest) {
     std::vector<Track> track;
     std::map<std::string, size_t> indexByName;
     std::set<std::string> descended; // identity keys already checked for their own transitive zlpkg.toml
+    // One clone per unique (url, ref) per run: without this, a diamond (or
+    // a hostile fan-out) pays a full `git clone` for EVERY occurrence of
+    // the same dependency, since each queue item used to fetch.
+    std::map<std::pair<std::string, std::string>, GitFetchResult> fetchMemo;
+    // Manifest version per resolved identity, so a repeat occurrence can
+    // still enforce its own version pin without reloading the manifest.
+    std::map<std::string, std::string> versionByIdentity;
 
     std::deque<QueueItem> queue;
     for (const auto& dep : rootManifest.dependencies) {
@@ -82,14 +90,42 @@ std::vector<ResolvedDependency> resolveAll(const Manifest& rootManifest) {
             identity = "path:" + absDir.string();
         } else {
             try {
-                GitFetchResult fetched = fetchGit(dep.source, dep.ref, cacheRoot, dep.name);
-                rd.dir = fetched.dir;
-                rd.resolvedRef = fetched.resolvedSha;
+                const auto memoKey = std::make_pair(dep.source, dep.ref);
+                auto memoIt = fetchMemo.find(memoKey);
+                if (memoIt == fetchMemo.end()) {
+                    memoIt = fetchMemo.emplace(memoKey, fetchGit(dep.source, dep.ref, cacheRoot, dep.name)).first;
+                }
+                rd.dir = memoIt->second.dir;
+                rd.resolvedRef = memoIt->second.resolvedSha;
             } catch (const GitError& e) {
                 throw ResolveError("dependency '" + dep.name + "' (via " + item.requesterLabel + "): " +
                                     std::string(e.what()));
             }
             identity = "git:" + dep.source + "@" + rd.resolvedRef;
+        }
+
+        // Dedup BEFORE the manifest work below: the identity is already
+        // known, so a repeat occurrence needs no reloading - only its own
+        // version pin re-checked (a diamond's two edges may pin different
+        // versions of the same content, which must still fail).
+        {
+            auto existingIt = indexByName.find(dep.name);
+            if (existingIt != indexByName.end()) {
+                size_t idx = existingIt->second;
+                if (track[idx].identity != identity) {
+                    throw ResolveError("version conflict for dependency '" + dep.name + "': via " +
+                                        track[idx].requesterLabel + " it resolved to " + describe(results[idx]) +
+                                        ", but via " + item.requesterLabel + " it resolves to " + describe(rd) +
+                                        " - zlpkg does not pick one silently, so this needs to be reconciled " +
+                                        "(pin both requesters to the same ref/path)");
+                }
+                const std::string& actualVersion = versionByIdentity[track[idx].identity];
+                if (!dep.version.empty() && actualVersion != dep.version) {
+                    throw ResolveError("dependency '" + dep.name + "': requested version '" + dep.version +
+                                       "' but package declares version '" + actualVersion + "'");
+                }
+                continue; // identical content already resolved (and already queued for descent, if any)
+            }
         }
 
         // Every resolvable package has an explicit manifest. Its declared name
@@ -117,21 +153,9 @@ std::vector<ResolvedDependency> resolveAll(const Manifest& rootManifest) {
                                "' but package declares version '" + depManifest.version + "'");
         }
 
-        auto existingIt = indexByName.find(dep.name);
-        if (existingIt != indexByName.end()) {
-            size_t idx = existingIt->second;
-            if (track[idx].identity != identity) {
-                throw ResolveError("version conflict for dependency '" + dep.name + "': via " +
-                                    track[idx].requesterLabel + " it resolved to " + describe(results[idx]) +
-                                    ", but via " + item.requesterLabel + " it resolves to " + describe(rd) +
-                                    " - zlpkg does not pick one silently, so this needs to be reconciled "
-                                    "(pin both requesters to the same ref/path)");
-            }
-            continue; // identical content already resolved (and already queued for descent, if any)
-        }
-
         indexByName[dep.name] = results.size();
         track.push_back({identity, item.requesterLabel});
+        versionByIdentity[identity] = rd.packageVersion;
         results.push_back(rd);
 
         if (descended.insert(identity).second) {

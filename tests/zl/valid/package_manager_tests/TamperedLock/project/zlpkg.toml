@@ -1,0 +1,11 @@
+[package]
+name = "tamperedlock"
+version = "0.1.0"
+
+# NOTE: project/zlpkg.lock.committed carries a manifest fingerprint of this
+# file alongside a tampered `source` (../evil). If you edit the manifest
+# below, regenerate the committed lock: run `zlpkg install`, then retarget
+# the lock's `source` at ../evil again so the tamper stays covered.
+
+[dependencies]
+mathlib = { path = "../mathlib", version = "0.1.0" }

@@ -24,22 +24,25 @@ struct GitFetchResult {
 // Clones `url` (optionally checking out `ref` - a tag, branch, or commit;
 // empty means "leave it on the default branch") into a fresh directory
 // under cacheRoot/depName/<resolved-sha>/, resolves the SHA actually
-// checked out, and returns both. If that exact sha's directory already
-// exists from a previous fetch, the existing directory is reused as-is
-// (no re-clone) and its sha is returned - this is what makes repeated
-// `zlpkg install` calls fast and exact-reproducible.
+// checked out, and returns both. When `ref` is already a commit sha whose
+// cache directory exists and verifies, the clone is skipped and the cache
+// entry is reused - this is what makes repeated resolves of pinned
+// dependencies fast. Anything else always re-clones (a branch or tag may
+// have moved since the last fetch), with an already-cached sha directory
+// simply kept instead of the fresh clone.
 //
 // Throws GitError (including git's own stderr) if the clone or checkout
 // fails - e.g. an unreachable URL, or a ref that doesn't exist.
 GitFetchResult fetchGit(const std::string& url, const std::string& ref,
                          const std::filesystem::path& cacheRoot, const std::string& depName);
 
-// Re-materializes a previously resolved (name, sha) pin exactly - used by
-// `zlpkg install` when a lock file already pins an exact commit but the
-// local .zlpkg/ cache for it is missing (e.g. after a clean checkout).
-// Equivalent to fetchGit(url, sha, cacheRoot, depName) but phrased for the
-// "restore a pin" call site.
-GitFetchResult restoreGitPin(const std::string& url, const std::string& sha,
-                              const std::filesystem::path& cacheRoot, const std::string& depName);
+// True when `dir` is a pristine git checkout of exactly `sha` (hex,
+// 4..64 chars): HEAD matches AND the worktree is clean, so neither a
+// checked-out-elsewhere cache nor uncommitted edits/dropped-in files pass.
+// Purely local - no network - and never throws: anything unexpected
+// (missing dir, missing git binary, unparseable output) is simply "not
+// verified". Used to revalidate cached git dependencies before trusting
+// them.
+bool verifyGitCache(const std::filesystem::path& dir, const std::string& sha);
 
 } // namespace zlpkg
