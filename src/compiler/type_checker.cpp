@@ -488,7 +488,127 @@ std::string TypeChecker::instantiateGenericClass(const std::string& genericName,
     return typeResolver_.instantiateGenericClass(genericName, typeArgs, line);
 }
 
+ClassMethodInfo TypeChecker::instantiateGenericMethod(const ClassMethodInfo& method,
+                                                       const std::vector<ResolvedTypeArg>& typeArgs,
+                                                       std::size_t line) {
+    if (method.typeParams.size() != typeArgs.size()) {
+        typeError("generic method takes " + std::to_string(method.typeParams.size()) +
+                  " type argument(s), got " + std::to_string(typeArgs.size()), line);
+    }
+    std::unordered_map<std::string, std::string> bindings;
+    for (std::size_t i = 0; i < method.typeParams.size(); ++i) {
+        const auto& arg = typeArgs[i];
+        bindings[method.typeParams[i]] = arg.className.empty() ? zlTypeName(arg.type) : arg.className;
+    }
+    auto substituteNamed = [&](ZlType type, const std::string& className) {
+        const std::string source = className.empty() ? zlTypeName(type) : className;
+        const std::string substituted = substituteTypeParams(source, bindings);
+        std::string outClass;
+        const ZlType outType = resolveType(typeAnnotationFromName(parseTypeName(substituted)), &outClass);
+        return std::pair<ZlType, std::string>{outType, outClass};
+    };
 
+    ClassMethodInfo out = method;
+    {
+        auto [t, n] = substituteNamed(out.returnType, out.returnClassName);
+        out.returnType = t;
+        out.returnClassName = n;
+    }
+    for (std::size_t i = 0; i < out.paramTypes.size(); ++i) {
+        const std::string cls = i < out.paramClassNames.size() ? out.paramClassNames[i] : std::string();
+        auto [t, n] = substituteNamed(out.paramTypes[i], cls);
+        out.paramTypes[i] = t;
+        if (i < out.paramClassNames.size()) out.paramClassNames[i] = n;
+        else out.paramClassNames.push_back(n);
+    }
+    // paramIsGeneric stays as on the unsubstituted original so dispatch remains GENERIC_OBJECT.
+    for (std::size_t i = 0; i < out.functionParamTypes.size(); ++i) {
+        for (std::size_t p = 0; p < out.functionParamTypes[i].size(); ++p) {
+            const std::string cls = (i < out.functionParamClassNames.size() &&
+                                     p < out.functionParamClassNames[i].size())
+                ? out.functionParamClassNames[i][p] : std::string();
+            auto [t, n] = substituteNamed(out.functionParamTypes[i][p], cls);
+            out.functionParamTypes[i][p] = t;
+            if (i < out.functionParamClassNames.size() && p < out.functionParamClassNames[i].size())
+                out.functionParamClassNames[i][p] = n;
+        }
+        if (i < out.functionReturnTypes.size()) {
+            const std::string cls = i < out.functionReturnClassNames.size()
+                ? out.functionReturnClassNames[i] : std::string();
+            auto [t, n] = substituteNamed(out.functionReturnTypes[i], cls);
+            out.functionReturnTypes[i] = t;
+            if (i < out.functionReturnClassNames.size()) out.functionReturnClassNames[i] = n;
+        }
+    }
+    if (out.returnFunctionHasSignature) {
+        for (std::size_t i = 0; i < out.returnFunctionParamTypes.size(); ++i) {
+            const std::string cls = i < out.returnFunctionParamClassNames.size()
+                ? out.returnFunctionParamClassNames[i] : std::string();
+            auto [t, n] = substituteNamed(out.returnFunctionParamTypes[i], cls);
+            out.returnFunctionParamTypes[i] = t;
+            if (i < out.returnFunctionParamClassNames.size()) out.returnFunctionParamClassNames[i] = n;
+        }
+        auto [t, n] = substituteNamed(out.returnFunctionReturnType, out.returnFunctionReturnClassName);
+        out.returnFunctionReturnType = t;
+        out.returnFunctionReturnClassName = n;
+    }
+    return out;
+}
+
+TypeChecker::PreparedGenericOverloads TypeChecker::prepareGenericOverloads(
+        const std::vector<std::pair<std::string, ClassMethodInfo>>& candidates,
+        const std::vector<TypeAnnotation>& typeArgs,
+        const std::string& methodName,
+        std::size_t line) {
+    PreparedGenericOverloads prepared;
+    const bool hasTypeArgs = !typeArgs.empty();
+    std::vector<ResolvedTypeArg> resolved;
+    if (hasTypeArgs) {
+        resolved.reserve(typeArgs.size());
+        for (const auto& ann : typeArgs) {
+            std::string className;
+            const ZlType type = resolveType(ann, &className);
+            resolved.push_back(ResolvedTypeArg{type, className});
+            prepared.resolvedTypeArgNames.push_back(className.empty() ? zlTypeName(type) : className);
+        }
+    }
+    bool sawGeneric = false;
+    for (const auto& candidate : candidates) {
+        const bool isGeneric = !candidate.second.typeParams.empty();
+        if (isGeneric) sawGeneric = true;
+        if (hasTypeArgs) {
+            if (!isGeneric) continue;
+            if (candidate.second.typeParams.size() != typeArgs.size()) continue;
+            prepared.originals.push_back(&candidate.second);
+            prepared.candidates.emplace_back(
+                candidate.first, instantiateGenericMethod(candidate.second, resolved, line));
+        } else if (!isGeneric) {
+            prepared.originals.push_back(&candidate.second);
+            prepared.candidates.push_back(candidate);
+        }
+    }
+    if (prepared.candidates.empty()) {
+        if (hasTypeArgs) {
+            typeError("no matching generic overload of '" + methodName +
+                      "' for the given type arguments", line);
+        }
+        if (sawGeneric) {
+            typeError("generic method '" + methodName + "' requires explicit type arguments", line);
+        }
+    }
+    return prepared;
+}
+
+void TypeChecker::mergeMethodTypeParams(const std::vector<std::string>& methodParams, std::size_t line) {
+    for (const auto& name : methodParams) {
+        if (std::find(currentClassTypeParams_.begin(), currentClassTypeParams_.end(), name)
+            != currentClassTypeParams_.end()) {
+            typeError("method type parameter '" + name +
+                      "' collides with class type parameter '" + name + "'", line);
+        }
+        currentClassTypeParams_.push_back(name);
+    }
+}
 
 bool TypeChecker::isCurrentGenericTypeParam(const std::string& name) const {
     return typeResolver_.isCurrentGenericTypeParam(name, currentClassTypeParams_);
@@ -1065,6 +1185,9 @@ void TypeChecker::check(const Program& program, bool requireMain) {
         for (const auto& member : members) {
             if (!member || member->kind != NodeKind::FunctionDecl) continue;
             const auto* fn = static_cast<const FunctionDecl*>(member.get());
+            const auto savedFixupParams = currentClassTypeParams_;
+            currentClassTypeParams_.insert(currentClassTypeParams_.end(),
+                                           fn->typeParams.begin(), fn->typeParams.end());
             const std::size_t index = (fn->isConstructor ? ctorIndex : methodIndex)[fn->name]++;
             ClassMethodInfo* target = nullptr;
             if (fn->isConstructor) {
@@ -1074,7 +1197,10 @@ void TypeChecker::check(const Program& program, bool requireMain) {
                 if (overloads != classIt->methods.end() && index < overloads->second.size())
                     target = &overloads->second[index];
             }
-            if (!target) continue;
+            if (!target) {
+                currentClassTypeParams_ = savedFixupParams;
+                continue;
+            }
             std::string returnClassName;
             const ZlType returnType = resolveType(fn->returnType, &returnClassName);
             if (target->returnType == ZlType::UNKNOWN && target->returnClassName.empty() &&
@@ -1091,6 +1217,7 @@ void TypeChecker::check(const Program& program, bool requireMain) {
                     target->paramClassNames[i] = paramClassName;
                 }
             }
+            currentClassTypeParams_ = savedFixupParams;
         }
     }
     currentClassName_ = savedClassName;
@@ -1254,6 +1381,7 @@ void TypeChecker::registerClassShape(const ClassDecl* node) {
     // don't exist here today but might later - RAII would be nicer, but a
     // single well-scoped clear at the end matches the rest of this codebase's
     // existing style (e.g. checkFunctionDecl's currentClassName_/inConstructor_).
+    currentClassName_ = node->name;
     currentClassTypeParams_ = node->typeParams;
 
     for (const auto& member : node->members) {
@@ -1284,6 +1412,9 @@ void TypeChecker::registerClassShape(const ClassDecl* node) {
         const auto* fn = static_cast<const FunctionDecl*>(member.get());
 
         ClassMethodInfo m;
+        m.typeParams = fn->typeParams;
+        const auto savedMethodParams = currentClassTypeParams_;
+        mergeMethodTypeParams(fn->typeParams, fn->line);
         std::string returnClassName;
         m.returnType = resolveType(fn->returnType, &returnClassName);
         m.returnClassName = returnClassName;
@@ -1339,10 +1470,11 @@ void TypeChecker::registerClassShape(const ClassDecl* node) {
             // (e.g. "T"), which is how it's distinguished from an ordinary
             // object-typed parameter (paramClassName would be a real,
             // registered class name there instead).
-            const bool isGeneric = std::find(node->typeParams.begin(), node->typeParams.end(), paramClassName) != node->typeParams.end() ||
-                (paramType == ZlType::UNION && containsTypeParameter(p.type, node->typeParams));
+            const bool isGeneric = std::find(currentClassTypeParams_.begin(), currentClassTypeParams_.end(), paramClassName) != currentClassTypeParams_.end() ||
+                (paramType == ZlType::UNION && containsTypeParameter(p.type, currentClassTypeParams_));
             m.paramIsGeneric.push_back(isGeneric);
         }
+        currentClassTypeParams_ = savedMethodParams;
 
         if (fn->isConstructor && fn->isStatic) {
             typeError("constructor '" + node->name + "' cannot be static", fn->line);
@@ -1368,6 +1500,7 @@ void TypeChecker::registerClassShape(const ClassDecl* node) {
     }
 
     semanticModel_.defineClass(std::move(info));
+    currentClassName_.clear();
     currentClassTypeParams_.clear();
 }
 
@@ -1419,6 +1552,9 @@ void TypeChecker::registerDataShape(const DataDecl* node) {
         }
 
         ClassMethodInfo m;
+        m.typeParams = fn->typeParams;
+        const auto savedMethodParams = currentClassTypeParams_;
+        mergeMethodTypeParams(fn->typeParams, fn->line);
         std::string returnClassName;
         m.returnType = resolveType(fn->returnType, &returnClassName);
         m.returnClassName = returnClassName;
@@ -1441,7 +1577,9 @@ void TypeChecker::registerDataShape(const DataDecl* node) {
             const ZlType pt = resolveType(param.type, &cls);
             m.paramTypes.push_back(pt);
             m.paramClassNames.push_back(cls);
-            m.paramIsGeneric.push_back(false);
+            const bool isGeneric = std::find(currentClassTypeParams_.begin(), currentClassTypeParams_.end(), cls) != currentClassTypeParams_.end() ||
+                (pt == ZlType::UNION && containsTypeParameter(param.type, currentClassTypeParams_));
+            m.paramIsGeneric.push_back(isGeneric);
             if (pt == ZlType::FUNCTION) {
                 std::vector<ZlType> fpTypes;
                 std::vector<std::string> fpClasses;
@@ -1466,6 +1604,7 @@ void TypeChecker::registerDataShape(const DataDecl* node) {
                 m.functionParamHasSignature.push_back(false);
             }
         }
+        currentClassTypeParams_ = savedMethodParams;
         auto& overloads = info.methods[fn->name];
         for (const auto& existing : overloads) {
             if (methodParamSignature(existing) == methodParamSignature(m))
@@ -1514,6 +1653,9 @@ void TypeChecker::registerInterfaceShape(const InterfaceDecl* node) {
     info.extendsNames = node->extendsNames;
     for (const auto& sig : node->methods) {
         ClassMethodInfo m;
+        m.typeParams = sig.typeParams;
+        const auto savedMethodParams = currentClassTypeParams_;
+        mergeMethodTypeParams(sig.typeParams, sig.line);
         std::string returnClassName;
         m.returnType = resolveType(sig.returnType, &returnClassName);
         m.returnClassName = returnClassName;
@@ -1523,7 +1665,9 @@ void TypeChecker::registerInterfaceShape(const InterfaceDecl* node) {
             const ZlType paramType = resolveType(p.type, &paramClassName);
             m.paramTypes.push_back(paramType);
             m.paramClassNames.push_back(paramClassName);
-            m.paramIsGeneric.push_back(false);
+            const bool isGeneric = std::find(currentClassTypeParams_.begin(), currentClassTypeParams_.end(), paramClassName) != currentClassTypeParams_.end() ||
+                (paramType == ZlType::UNION && containsTypeParameter(p.type, currentClassTypeParams_));
+            m.paramIsGeneric.push_back(isGeneric);
             if (paramType == ZlType::FUNCTION) {
                 std::vector<ZlType> nestedTypes;
                 std::vector<std::string> nestedClasses;
@@ -1562,6 +1706,7 @@ void TypeChecker::registerInterfaceShape(const InterfaceDecl* node) {
                                                          &m.returnFunctionReturnClassName);
             }
         }
+        currentClassTypeParams_ = savedMethodParams;
         auto existing = info.ownMethods.find(sig.name);
         if (existing != info.ownMethods.end() &&
             paramTypesSuffix(existing->second.paramTypes) == paramTypesSuffix(m.paramTypes)) {
@@ -1836,6 +1981,8 @@ void TypeChecker::checkFunctionDecl(const FunctionDecl* node) {
     bool previousFunctionIsAsync = currentFunctionIsAsync_;
     currentFunctionIsStatic_ = node->isStatic;
     currentFunctionIsAsync_ = node->isAsync;
+    std::vector<std::string> previousTypeParams = currentClassTypeParams_;
+    mergeMethodTypeParams(node->typeParams, node->line);
     currentReturnType_ = resolveType(node->returnType, &currentReturnClassName_);
     currentReturnFunctionParamTypes_.clear();
     currentReturnFunctionParamClassNames_.clear();
@@ -1945,6 +2092,7 @@ void TypeChecker::checkFunctionDecl(const FunctionDecl* node) {
 
     symbols_.popScope();
     namedFunctionBindings_.clear();
+    currentClassTypeParams_ = std::move(previousTypeParams);
     currentClassName_.clear();
     inConstructor_ = false;
     functionSuppressesDeprecation_ = previousFunctionSuppresses;
@@ -3903,13 +4051,22 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                     if (method.isStatic) candidates.push_back({node->namespaceName, method});
                 }
                 if (!candidates.empty()) {
+                    const auto prepared = prepareGenericOverloads(candidates, node->typeArgs, node->calleeName, node->line);
                     const auto args = inferArguments(node->arguments);
                     std::string owner;
                     const ClassMethodInfo* method = resolveOverload(
-                        candidates, args.types, args.classNames, node->calleeName, node->line, &owner);
+                        prepared.candidates, args.types, args.classNames, node->calleeName, node->line, &owner);
+                    const ClassMethodInfo* original = method;
+                    for (std::size_t i = 0; i < prepared.candidates.size(); ++i) {
+                        if (&prepared.candidates[i].second == method) {
+                            original = prepared.originals[i];
+                            break;
+                        }
+                    }
                     checkAccess(owner, node->calleeName, method->access, /*isMethod=*/true, node->line);
                     warnIfDeprecatedMethod(*method, owner, node->calleeName, node->line);
-                    node->resolvedDispatch = dispatchSignature(node->calleeName, *method);
+                    node->resolvedDispatch = dispatchSignature(node->calleeName, *original);
+                    node->resolvedTypeArgNames = prepared.resolvedTypeArgNames;
                     if (method->isAsync) {
                         InferredType task(ZlType::TASK);
                         task.taskValueType = method->returnType;
@@ -4129,13 +4286,22 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
             // picked (that's the whole point of overload resolution), so
             // infer every argument up front rather than per-parameter
             // against a single already-known signature like before.
+            const auto prepared = prepareGenericOverloads(candidates, node->typeArgs, node->calleeName, node->line);
             const auto args = inferArguments(node->arguments);
 
             std::string owner;
             const ClassMethodInfo* method =
-                resolveOverload(candidates, args.types, args.classNames, node->calleeName, node->line, &owner);
+                resolveOverload(prepared.candidates, args.types, args.classNames, node->calleeName, node->line, &owner);
+            const ClassMethodInfo* original = method;
+            for (std::size_t i = 0; i < prepared.candidates.size(); ++i) {
+                if (&prepared.candidates[i].second == method) {
+                    original = prepared.originals[i];
+                    break;
+                }
+            }
             warnIfDeprecatedMethod(*method, owner, node->calleeName, node->line);
-            node->resolvedDispatch = dispatchSignature(node->calleeName, *method);
+            node->resolvedDispatch = dispatchSignature(node->calleeName, *original);
+            node->resolvedTypeArgNames = prepared.resolvedTypeArgNames;
             for (std::size_t i = 0; i < method->paramTypes.size() && i < args.types.size(); ++i) {
                 if (method->paramTypes[i] != ZlType::FUNCTION || i >= method->functionParamTypes.size()) continue;
                 if (i < method->functionParamHasSignature.size() && !method->functionParamHasSignature[i]) continue;
@@ -4397,7 +4563,7 @@ ZlType TypeChecker::inferCollectionLiteralExpected(const CollectionLiteral* node
         std::string elemClass;
         ZlType elemType = resolveType(expectedAnnotation.typeArgs[0], &elemClass);
         node->targetCollectionKind = "array";
-        node->targetDispatch = dispatchSignature("", ClassMethodInfo{{elemType}, {elemClass}, {}, ZlType::VOID_TYPE, "", AccessModifier::PUBLIC});
+        node->targetDispatch = dispatchSignature("", ClassMethodInfo{{}, {elemType}, {elemClass}, {}, ZlType::VOID_TYPE, "", AccessModifier::PUBLIC});
         for (const auto& elem : node->elements) {
             validateCollectionElement(elem.get(), elemType, elemClass, "element", node->line);
         }
@@ -4423,7 +4589,7 @@ ZlType TypeChecker::inferCollectionLiteralExpected(const CollectionLiteral* node
             std::string keyClass, valueClass;
             ZlType keyType = resolveType(expectedAnnotation.typeArgs[0], &keyClass);
             ZlType valueType = resolveType(expectedAnnotation.typeArgs[1], &valueClass);
-            node->targetDispatch = dispatchSignature("", ClassMethodInfo{{keyType, valueType}, {keyClass, valueClass}, {}, ZlType::VOID_TYPE, "", AccessModifier::PUBLIC});
+            node->targetDispatch = dispatchSignature("", ClassMethodInfo{{}, {keyType, valueType}, {keyClass, valueClass}, {}, ZlType::VOID_TYPE, "", AccessModifier::PUBLIC});
             for (const auto& entry : node->entries) {
                 validateCollectionElement(entry.first.get(), keyType, keyClass, "key", node->line);
                 validateCollectionElement(entry.second.get(), valueType, valueClass, "value", node->line);
@@ -4434,7 +4600,7 @@ ZlType TypeChecker::inferCollectionLiteralExpected(const CollectionLiteral* node
             }
             std::string elemClass;
             ZlType elemType = resolveType(expectedAnnotation.typeArgs[0], &elemClass);
-            node->targetDispatch = dispatchSignature("", ClassMethodInfo{{elemType}, {elemClass}, {}, ZlType::VOID_TYPE, "", AccessModifier::PUBLIC});
+            node->targetDispatch = dispatchSignature("", ClassMethodInfo{{}, {elemType}, {elemClass}, {}, ZlType::VOID_TYPE, "", AccessModifier::PUBLIC});
             if (expectedAnnotation.fixedSize &&
                 static_cast<std::size_t>(*expectedAnnotation.fixedSize) != node->elements.size()) {
                 typeError("array literal requires exactly " +
@@ -5110,13 +5276,22 @@ TypeChecker::InferredType TypeChecker::inferMethodCall(const MethodCallExpr* nod
     }
 
     // Argument types have to be known before an overload can be picked.
+    const auto prepared = prepareGenericOverloads(candidates, node->typeArgs, node->methodName, node->line);
     const auto args = inferArguments(node->arguments);
 
     std::string owner;
-    const ClassMethodInfo* method = resolveOverload(candidates, args.types, args.classNames, node->methodName, node->line, &owner);
+    const ClassMethodInfo* method = resolveOverload(prepared.candidates, args.types, args.classNames, node->methodName, node->line, &owner);
+    const ClassMethodInfo* original = method;
+    for (std::size_t i = 0; i < prepared.candidates.size(); ++i) {
+        if (&prepared.candidates[i].second == method) {
+            original = prepared.originals[i];
+            break;
+        }
+    }
     checkAccess(owner, node->methodName, method->access, /*isMethod=*/true, node->line);
     warnIfDeprecatedMethod(*method, owner, node->methodName, node->line);
-    node->resolvedDispatch = dispatchSignature(node->methodName, *method);
+    node->resolvedDispatch = dispatchSignature(node->methodName, *original);
+    node->resolvedTypeArgNames = prepared.resolvedTypeArgNames;
 
     for (std::size_t i = 0; i < method->paramTypes.size() && i < args.types.size(); ++i) {
         if (method->paramTypes[i] != ZlType::FUNCTION || i >= method->functionParamTypes.size()) continue;
@@ -5180,11 +5355,13 @@ TypeChecker::InferredType TypeChecker::inferThisExpr(const ThisExpr* node) {
     // form (`Map<K,V>`), which is what a self-referential parameter such as
     // `putAll(Map<K,V> other)` resolves to. Reporting the bare template name
     // would make `other.putAll(this)` fail to match its own signature.
-    if (!currentClassTypeParams_.empty() && currentClassName_.find('<') == std::string::npos) {
+    const auto* thisShape = semanticModel_.findClass(currentClassName_);
+    const std::vector<std::string>& classParams = thisShape ? thisShape->typeParams : currentClassTypeParams_;
+    if (!classParams.empty() && currentClassName_.find('<') == std::string::npos) {
         std::string self = currentClassName_ + "<";
-        for (std::size_t i = 0; i < currentClassTypeParams_.size(); ++i) {
+        for (std::size_t i = 0; i < classParams.size(); ++i) {
             if (i) self += ",";
-            self += currentClassTypeParams_[i];
+            self += classParams[i];
         }
         self += ">";
         if (semanticModel_.findClass(self)) return InferredType(ZlType::OBJECT, self);
@@ -5245,12 +5422,21 @@ TypeChecker::InferredType TypeChecker::inferSuperMethodCallExpr(const SuperMetho
         typeError("no method '" + node->methodName + "' found on '" + parentName + "' or its ancestors", node->line);
     }
 
+    const auto prepared = prepareGenericOverloads(candidates, node->typeArgs, node->methodName, node->line);
     const auto args = inferArguments(node->arguments);
 
     std::string owner;
-    const ClassMethodInfo* method = resolveOverload(candidates, args.types, args.classNames, node->methodName, node->line, &owner);
+    const ClassMethodInfo* method = resolveOverload(prepared.candidates, args.types, args.classNames, node->methodName, node->line, &owner);
+    const ClassMethodInfo* original = method;
+    for (std::size_t i = 0; i < prepared.candidates.size(); ++i) {
+        if (&prepared.candidates[i].second == method) {
+            original = prepared.originals[i];
+            break;
+        }
+    }
     checkAccess(owner, node->methodName, method->access, /*isMethod=*/true, node->line);
-    node->resolvedDispatch = dispatchSignature(node->methodName, *method);
+    node->resolvedDispatch = dispatchSignature(node->methodName, *original);
+    node->resolvedTypeArgNames = prepared.resolvedTypeArgNames;
 
     for (std::size_t i = 0; i < method->paramTypes.size() && i < args.types.size(); ++i) {
         if (method->paramTypes[i] != ZlType::FUNCTION || i >= method->functionParamTypes.size()) continue;

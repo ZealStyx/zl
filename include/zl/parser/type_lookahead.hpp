@@ -23,6 +23,12 @@ public:
     // stays a plain token boundary the parser can compare against.
     [[nodiscard]] long scanAnnotation(std::size_t pos) const;
 
+    // True when tokens starting at `from` are a generic call-site argument
+    // list that is immediately followed by '(': `firstOf<int>(...)`,
+    // `items.map<string>(...)`. Used to intercept '<' before Pratt treats it
+    // as less-than. The scan is non-mutating.
+    [[nodiscard]] bool looksLikeGenericCallArgs(std::size_t from) const;
+
 private:
     // A scan position plus the number of '>' characters still unconsumed
     // inside a fused `>>` / `>>>` token at `pos`. `pending > 0` means the

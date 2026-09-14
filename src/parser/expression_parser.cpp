@@ -194,6 +194,21 @@ NodePtr ExpressionParser::parsePratt(int minBindingPower) {
     return left;
 }
 
+std::vector<TypeAnnotation> ExpressionParser::parseOptionalCallTypeArgs() {
+    if (!(parser_.check(TokenType::LT) &&
+          parser_.typeLookahead_.looksLikeGenericCallArgs(parser_.pos_))) {
+        return {};
+    }
+    parser_.advance(); // consume '<'
+    std::vector<TypeAnnotation> args;
+    args.push_back(parser_.parseTypeAnnotation());
+    while (parser_.match({TokenType::COMMA})) {
+        args.push_back(parser_.parseTypeAnnotation());
+    }
+    parser_.expectTypeAngleClose("Expected '>' to close type argument list");
+    return args;
+}
+
 NodePtr ExpressionParser::parseCall() {
     // Save on entry: the loop below folds flat operator chains iteratively
     // and must count those folds against the same budget (see below).
@@ -225,7 +240,8 @@ NodePtr ExpressionParser::parseCall() {
             } else {
                 nameTok = parser_.expect(TokenType::IDENTIFIER, "Expected property name after '.'");
             }
-            
+
+            std::vector<TypeAnnotation> typeArgs = parseOptionalCallTypeArgs();
             if (parser_.check(TokenType::LPAREN)) {
                 // Method call: obj.method(args) - UNLESS `expr` is a bare
                 // Identifier starting with an uppercase letter, in which case
@@ -246,6 +262,7 @@ NodePtr ExpressionParser::parseCall() {
                     call->line = dotTok.line;
                     call->namespaceName = static_cast<Identifier*>(expr.get())->name;
                     call->calleeName = nameTok.lexeme;
+                    call->typeArgs = std::move(typeArgs);
                     if (!parser_.check(TokenType::RPAREN)) {
                         call->arguments.push_back(parseExpression());
                         while (parser_.match({TokenType::COMMA})) {
@@ -259,6 +276,7 @@ NodePtr ExpressionParser::parseCall() {
                     node->line = dotTok.line;
                     node->object = std::move(expr);
                     node->methodName = nameTok.lexeme;
+                    node->typeArgs = std::move(typeArgs);
                     if (!parser_.check(TokenType::RPAREN)) {
                         node->arguments.push_back(parseExpression());
                         while (parser_.match({TokenType::COMMA})) {
@@ -291,14 +309,19 @@ NodePtr ExpressionParser::parseCall() {
             }
             parser_.expect(TokenType::RBRACE, "Expected '}' after 'with' update");
             expr = std::move(node);
-        } else if (parser_.check(TokenType::LPAREN)) {
-            // Function call: func(args)
+        } else if (parser_.check(TokenType::LPAREN) ||
+                   (parser_.check(TokenType::LT) &&
+                    parser_.typeLookahead_.looksLikeGenericCallArgs(parser_.pos_))) {
+            // Function call: func(args) or func<T>(args). Intercept '<' here
+            // so Pratt does not treat it as less-than (`firstOf<int>(...)`).
+            std::vector<TypeAnnotation> typeArgs = parseOptionalCallTypeArgs();
             Token parenTok = parser_.advance(); // consume '('
 
             if (expr->kind == NodeKind::Identifier) {
                 auto call = std::make_unique<CallExpr>();
                 call->line = parenTok.line;
                 call->calleeName = static_cast<Identifier*>(expr.get())->name;
+                call->typeArgs = std::move(typeArgs);
                 if (!parser_.check(TokenType::RPAREN)) {
                     call->arguments.push_back(parseExpression());
                     while (parser_.match({TokenType::COMMA})) {
@@ -410,10 +433,12 @@ NodePtr ExpressionParser::parsePrimary() {
         }
         parser_.expect(TokenType::DOT, "Expected '(' or '.' after 'super'");
         Token methodTok = parser_.expect(TokenType::IDENTIFIER, "Expected a method name after 'super.'");
+        std::vector<TypeAnnotation> typeArgs = parseOptionalCallTypeArgs();
         parser_.expect(TokenType::LPAREN, "Expected '(' after 'super." + methodTok.lexeme + "'");
         auto node = std::make_unique<SuperMethodCallExpr>();
         node->line = superTok.line;
         node->methodName = methodTok.lexeme;
+        node->typeArgs = std::move(typeArgs);
         if (!parser_.check(TokenType::RPAREN)) {
             node->arguments.push_back(parseExpression());
             while (parser_.match({TokenType::COMMA})) {

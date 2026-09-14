@@ -666,11 +666,13 @@ var a = 1;
 `count(T item)` and returns the number of occurrences of a value; the predicate
 versions are `any`, `all`, and `filter`.
 
-### O16 - Generic methods are not supported
+### O16 - Generic methods are not supported **(fixed)**
 
-`static func firstOf<T>(List<T> items, T fallback): T` is a syntax error
-(`Expected '(' after func name -- got "<"`). Only generic *classes* exist, so
-`Generics.zl` writes the helper per element type.
+`static func firstOf<T>(List<T> items, T fallback): T` used to be a syntax error
+(`Expected '(' after func name -- got "<"`). Method-level type parameters now
+parse, type-check, and run; call sites write the type arguments explicitly
+(`Helpers.firstOf<int>(nums, 0)`). Covered by
+`tests/zl/valid/language_hardening_tests/GenericMethods.zl`.
 
 ### O17 - The legacy regression corpus is missing **(fixed)**
 
