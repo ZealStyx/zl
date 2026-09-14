@@ -28,6 +28,8 @@
 //   kind = "path"
 //   source = "../geom"
 //   ref = "local"
+//   package_version = "0.1.0"
+//   deps_sha = "4d2e08c1aa7f33b9"
 //   dir = "/abs/path/to/geom"
 //
 //   [dependency.ecs]
@@ -58,6 +60,12 @@ struct LockFile {
 // not invalidate the lock and trigger a spurious (network-touching)
 // re-resolve.
 std::string lockManifestFingerprint(const Manifest& manifest);
+
+// Same hash restricted to the [dependencies] list (no package name or
+// version): recorded per lock entry for the dependency's OWN manifest, so
+// an edit to any transitive manifest's edges invalidates the lock while a
+// mere version bump of a live path tree does not.
+std::string lockDepsFingerprint(const Manifest& manifest);
 
 void writeLockFile(const std::filesystem::path& lockPath, const std::vector<ResolvedDependency>& deps,
                    const std::string& manifestSha);

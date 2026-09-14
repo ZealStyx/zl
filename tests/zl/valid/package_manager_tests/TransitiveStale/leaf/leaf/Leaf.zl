@@ -1,0 +1,5 @@
+class Leaf {
+    public static func value(): int {
+        return 99
+    }
+}

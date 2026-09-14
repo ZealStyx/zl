@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "git.hpp"
+#include "lockfile.hpp"
 
 namespace zlpkg {
 
@@ -148,6 +149,7 @@ std::vector<ResolvedDependency> resolveAll(const Manifest& rootManifest) {
                                depManifest.name + "'");
         }
         rd.packageVersion = depManifest.version;
+        rd.depsFingerprint = lockDepsFingerprint(depManifest);
         if (!dep.version.empty() && depManifest.version != dep.version) {
             throw ResolveError("dependency '" + dep.name + "': requested version '" + dep.version +
                                "' but package declares version '" + depManifest.version + "'");

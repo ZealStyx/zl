@@ -185,7 +185,16 @@ std::optional<std::vector<ResolvedDependency>> tryUseLock(const Manifest& manife
                      depManifest.version + "'";
             return std::nullopt;
         }
+        // The dependency's own manifest must still declare the same edges
+        // it did at resolve time - otherwise the transitive graph changed
+        // under the lock (an edge added, removed, or retargeted) and the
+        // whole graph must be re-resolved.
+        if (d.depsFingerprint.empty() || lockDepsFingerprint(depManifest) != d.depsFingerprint) {
+            reason = "locked dependency '" + d.name + "': its manifest changed since the lock was written";
+            return std::nullopt;
+        }
         rd.packageVersion = depManifest.version;
+        rd.depsFingerprint = d.depsFingerprint;
         if (rd.packageVersion != d.packageVersion) changed = true; // live tree moved under a fresh lock; rewrite
         rd.dir = dir;
         depManifests[d.name] = std::move(depManifest);

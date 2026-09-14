@@ -84,6 +84,14 @@ version-conflict error naming both requesters rather than silently picking one.
 to be committed, like `Cargo.lock`. Only the `.zlpkg/` cache directory it populates
 should be gitignored.
 
+The lock is a cache, not an authority: every `install`/`run` validates it against the
+current manifests (a fingerprint of the project's own manifest plus each dependency's
+dependency list) and reuses it only when everything still matches. If any manifest
+changed - or an entry no longer checks out (missing directory, wrong package, cache
+that fails verification) - the lock is treated as stale: it is re-resolved from
+scratch and rewritten, with a notice saying why. `zlpkg install --update` forces that
+re-resolve even when the lock is fresh.
+
 Dependencies are fetched over git by shelling out to the system `git` CLI. No registry
 or index exists yet, so every dependency must state exactly where it comes from —
 `path` or `git`, never a bare version number.

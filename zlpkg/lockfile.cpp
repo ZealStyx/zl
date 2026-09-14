@@ -82,10 +82,7 @@ void hashMix(uint64_t& h, const std::string& s) {
 
 } // namespace
 
-std::string lockManifestFingerprint(const Manifest& manifest) {
-    uint64_t h = 14695981039346656037ULL;
-    hashMix(h, manifest.name);
-    hashMix(h, manifest.version);
+void hashDeps(uint64_t& h, const Manifest& manifest) {
     for (const auto& dep : manifest.dependencies) {
         hashMix(h, dep.name);
         hashMix(h, dep.kind == Dependency::Kind::Git ? "git" : "path");
@@ -93,9 +90,26 @@ std::string lockManifestFingerprint(const Manifest& manifest) {
         hashMix(h, dep.ref);
         hashMix(h, dep.version);
     }
+}
+
+std::string hexHash(uint64_t h) {
     std::ostringstream oss;
     oss << std::hex << h;
     return oss.str();
+}
+
+std::string lockManifestFingerprint(const Manifest& manifest) {
+    uint64_t h = 14695981039346656037ULL;
+    hashMix(h, manifest.name);
+    hashMix(h, manifest.version);
+    hashDeps(h, manifest);
+    return hexHash(h);
+}
+
+std::string lockDepsFingerprint(const Manifest& manifest) {
+    uint64_t h = 14695981039346656037ULL;
+    hashDeps(h, manifest);
+    return hexHash(h);
 }
 
 void writeLockFile(const std::filesystem::path& lockPath, const std::vector<ResolvedDependency>& deps,
@@ -116,6 +130,7 @@ void writeLockFile(const std::filesystem::path& lockPath, const std::vector<Reso
         out << "source = " << quote(d.source) << "\n";
         out << "ref = " << quote(d.resolvedRef) << "\n";
         out << "package_version = " << quote(d.packageVersion) << "\n";
+        out << "deps_sha = " << quote(d.depsFingerprint) << "\n";
         if (!d.declaredRef.empty()) out << "declared_ref = " << quote(d.declaredRef) << "\n";
         out << "dir = " << quote(d.dir.string()) << "\n";
     }
@@ -185,6 +200,7 @@ LockFile readLockFile(const std::filesystem::path& lockPath) {
         else if (key == "source") current->source = value;
         else if (key == "ref") current->resolvedRef = value;
         else if (key == "package_version") current->packageVersion = value;
+        else if (key == "deps_sha") current->depsFingerprint = value;
         else if (key == "declared_ref") current->declaredRef = value;
         else if (key == "dir") current->dir = value;
         // Unknown keys are ignored, same forward-compatibility reasoning

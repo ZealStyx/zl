@@ -1,0 +1,6 @@
+[package]
+name = "tstale"
+version = "0.1.0"
+
+[dependencies]
+mid = { path = "../mid", version = "0.1.0" }

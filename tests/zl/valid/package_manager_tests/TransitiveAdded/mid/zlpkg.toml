@@ -1,0 +1,10 @@
+[package]
+name = "mid"
+version = "0.1.0"
+
+# NOTE: project/zlpkg.lock.committed was generated when mid had NO
+# dependencies. The leaf edge below makes the committed lock stale by
+# design: zlpkg must re-resolve (picking up leaf) instead of trusting
+# the lock and failing the import.
+[dependencies]
+leaf = { path = "../leaf", version = "0.1.0" }
