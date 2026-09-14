@@ -33,6 +33,19 @@ std::string formatStackTrace(const ExecutionState* state, const char* fallback) 
     return trace.empty() ? std::string(fallback) : trace;
 }
 
+// Doubles are fail-closed like ints: a non-finite result is a catchable
+// arithmetic error, never a silent inf/NaN - the language has neither
+// value. Overflow of + - * / on finite inputs can only produce an infinity
+// (never NaN); pow() can additionally return NaN on domain errors, e.g. a
+// negative base with a fractional exponent.
+double checkedDoubleResult(double result, const char* operation) {
+    if (std::isinf(result))
+        throwArithmeticError(std::string("floating-point overflow in ") + operation);
+    if (std::isnan(result))
+        throwArithmeticError(std::string("invalid floating-point result in ") + operation);
+    return result;
+}
+
 // Build a real ZL exception object of `className`, so `catch IndexError e`
 // and friends work against failures raised inside the VM or a native.
 ObjectRef makeRuntimeExceptionObject(const std::string& className, const std::string& message,
@@ -317,7 +330,7 @@ Value VM::binaryArith(OpCode op, const Value& a, const Value& b) const {
             }
             throw std::runtime_error("negative integer exponent requires floating-point result");
         }
-        return std::pow(toDouble(a), toDouble(b));
+        return checkedDoubleResult(std::pow(toDouble(a), toDouble(b)), "exponentiation");
     }
 
     // Whole-number math stays whole-number; if either side is a decimal, both promote to double.
@@ -391,12 +404,12 @@ Value VM::binaryArith(OpCode op, const Value& a, const Value& b) const {
     double x = toDouble(a);
     double y = toDouble(b);
     switch (op) {
-        case OpCode::Add: return x + y;
-        case OpCode::Sub: return x - y;
-        case OpCode::Mul: return x * y;
+        case OpCode::Add: return checkedDoubleResult(x + y, "addition");
+        case OpCode::Sub: return checkedDoubleResult(x - y, "subtraction");
+        case OpCode::Mul: return checkedDoubleResult(x * y, "multiplication");
         case OpCode::Div:
             if (y == 0.0) throwArithmeticError("division by zero");
-            return x / y;
+            return checkedDoubleResult(x / y, "division");
         case OpCode::Mod:
             if (y == 0.0) throwArithmeticError("modulo by zero");
             return std::fmod(x, y);

@@ -191,7 +191,11 @@ std::optional<Constant> foldInstruction(const Module& module, const Instruction&
                 if (!addChecked(a->intValue, b->intValue, result)) return std::nullopt; // raises at runtime
                 return typed(makeInt(result));
             }
-            if (isDouble(*a) && isDouble(*b)) return typed(makeDouble(a->doubleValue + b->doubleValue));
+            if (isDouble(*a) && isDouble(*b)) {
+                const double result = a->doubleValue + b->doubleValue;
+                if (!std::isfinite(result)) return std::nullopt; // raises at runtime
+                return typed(makeDouble(result));
+            }
             // String concatenation. `+` means concat as soon as either side is
             // a string, so both must be strings here (a mixed pair would need
             // the VM's valueToString, which is a formatting contract this
@@ -210,7 +214,11 @@ std::optional<Constant> foldInstruction(const Module& module, const Instruction&
                 if (!subChecked(a->intValue, b->intValue, result)) return std::nullopt;
                 return typed(makeInt(result));
             }
-            if (isDouble(*a) && isDouble(*b)) return typed(makeDouble(a->doubleValue - b->doubleValue));
+            if (isDouble(*a) && isDouble(*b)) {
+                const double result = a->doubleValue - b->doubleValue;
+                if (!std::isfinite(result)) return std::nullopt; // raises at runtime
+                return typed(makeDouble(result));
+            }
             return std::nullopt;
         case Opcode::Mul:
             if (!binary) return std::nullopt;
@@ -219,7 +227,11 @@ std::optional<Constant> foldInstruction(const Module& module, const Instruction&
                 if (!mulChecked(a->intValue, b->intValue, result)) return std::nullopt;
                 return typed(makeInt(result));
             }
-            if (isDouble(*a) && isDouble(*b)) return typed(makeDouble(a->doubleValue * b->doubleValue));
+            if (isDouble(*a) && isDouble(*b)) {
+                const double result = a->doubleValue * b->doubleValue;
+                if (!std::isfinite(result)) return std::nullopt; // raises at runtime
+                return typed(makeDouble(result));
+            }
             return std::nullopt;
         case Opcode::Div:
             if (!binary) return std::nullopt;
@@ -231,7 +243,9 @@ std::optional<Constant> foldInstruction(const Module& module, const Instruction&
             }
             if (isDouble(*a) && isDouble(*b)) {
                 if (b->doubleValue == 0.0) return std::nullopt; // raises
-                return typed(makeDouble(a->doubleValue / b->doubleValue));
+                const double result = a->doubleValue / b->doubleValue;
+                if (!std::isfinite(result)) return std::nullopt; // raises at runtime
+                return typed(makeDouble(result));
             }
             return std::nullopt;
         case Opcode::Mod:
@@ -258,7 +272,11 @@ std::optional<Constant> foldInstruction(const Module& module, const Instruction&
                 if (!powChecked(a->intValue, b->intValue, result)) return std::nullopt;
                 return typed(makeInt(result));
             }
-            if (isDouble(*a) && isDouble(*b)) return typed(makeDouble(std::pow(a->doubleValue, b->doubleValue)));
+            if (isDouble(*a) && isDouble(*b)) {
+                const double result = std::pow(a->doubleValue, b->doubleValue);
+                if (!std::isfinite(result)) return std::nullopt; // raises at runtime
+                return typed(makeDouble(result));
+            }
             return std::nullopt;
         case Opcode::Neg:
             if (!unary) return std::nullopt;

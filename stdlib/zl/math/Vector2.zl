@@ -44,7 +44,10 @@ class Vector2<T, U> {
     }
 
     public func length(): double {
-        return Math.sqrt(this.lengthSquared())
+        // hypot() scales its inputs: unlike sqrt(lengthSquared()), this
+        // cannot overflow on huge components with a finite length. The
+        // `* 1.0` pins the generic components to double for the call.
+        return Math.hypot(this.x * 1.0, this.y * 1.0)
     }
 
     public func normalize(): Vector2<double, double> {
@@ -64,6 +67,6 @@ class Vector2<T, U> {
     }
 
     public func distance(Vector2<T, U> other): double {
-        return Math.sqrt(this.distanceSquared(other))
+        return Math.hypot((this.x - other.x) * 1.0, (this.y - other.y) * 1.0)
     }
 }

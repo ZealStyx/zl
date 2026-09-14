@@ -729,9 +729,9 @@ CompileResult emitMirFunction(const zl::ir::Function& fn, const std::unordered_m
                     if (resultType == "std::int64_t" && lhsType == "std::int64_t" && rhsType == "std::int64_t" && op == "pow") {
                         out << "    v" << ins.result << " = zl_safe_pow_i64(v" << ins.operand0 << ", v" << ins.operand1 << ");\n";
                     } else if (resultType == "double" && op == "pow") {
-                        out << "    v" << ins.result << " = std::pow(static_cast<double>(v" << ins.operand0 << "), static_cast<double>(v" << ins.operand1 << "));\n";
+                        out << "    v" << ins.result << " = zl_safe_pow_f64(static_cast<double>(v" << ins.operand0 << "), static_cast<double>(v" << ins.operand1 << "));\n";
                     } else if (resultType == "double" && lhsType == "double" && rhsType == "double" && op == "%") {
-                        out << "    v" << ins.result << " = std::fmod(v" << ins.operand0 << ", v" << ins.operand1 << ");\n";
+                        out << "    v" << ins.result << " = zl_safe_mod_f64(v" << ins.operand0 << ", v" << ins.operand1 << ");\n";
                     } else if (resultType == "std::int64_t" && lhsType == "std::int64_t" && rhsType == "std::int64_t") {
                         std::string helper;
                         if (op == "+") helper = "zl_safe_add_i64";
@@ -752,6 +752,19 @@ CompileResult emitMirFunction(const zl::ir::Function& fn, const std::unordered_m
                         } else {
                             out << "    v" << ins.result << " = (v" << ins.operand0 << " " << op << " v" << ins.operand1 << ");\n";
                         }
+                    } else if ((op == "+" || op == "-" || op == "*" || op == "/" || op == "%") &&
+                               (resultType == "double" || lhsType == "double" || rhsType == "double")) {
+                        // Double (or mixed double/int) arithmetic raises where the VM
+                        // does. The casts also fix mixed `%`, which C++ would reject
+                        // outright as `int64 % double`. Comparisons and && / || stay
+                        // on the raw path below: C++ promotion matches the VM there.
+                        std::string f64helper;
+                        if (op == "+") f64helper = "zl_safe_add_f64";
+                        else if (op == "-") f64helper = "zl_safe_sub_f64";
+                        else if (op == "*") f64helper = "zl_safe_mul_f64";
+                        else if (op == "/") f64helper = "zl_safe_div_f64";
+                        else f64helper = "zl_safe_mod_f64";
+                        out << "    v" << ins.result << " = " << f64helper << "(static_cast<double>(v" << ins.operand0 << "), static_cast<double>(v" << ins.operand1 << "));\n";
                     } else {
                         out << "    v" << ins.result << " = (v" << ins.operand0 << " " << op << " v" << ins.operand1 << ");\n";
                     }
@@ -907,6 +920,17 @@ CompileResult emitMirCpp(const Program& program) {
     out << "ZL_NATIVE_ALWAYS_INLINE std::int64_t zl_safe_shr_i64(std::int64_t a, std::int64_t b) { if (b < 0 || b >= 64) throw std::runtime_error(\"shift count must be in the range 0..63\"); const auto s = static_cast<unsigned>(b); const auto ux = static_cast<std::uint64_t>(a); std::uint64_t v = ux >> s; if (a < 0 && s != 0) v |= (~std::uint64_t{0}) << (64 - s); return static_cast<std::int64_t>(v); }\n";
     out << "ZL_NATIVE_ALWAYS_INLINE std::int64_t zl_safe_ushr_i64(std::int64_t a, std::int64_t b) { if (b < 0 || b >= 64) throw std::runtime_error(\"shift count must be in the range 0..63\"); return static_cast<std::int64_t>(static_cast<std::uint64_t>(a) >> static_cast<unsigned>(b)); }\n";
     out << "ZL_NATIVE_ALWAYS_INLINE std::int64_t zl_safe_pow_i64(std::int64_t base, std::int64_t exponent) { if (exponent < 0) throw std::runtime_error(\"negative integer exponent requires floating-point result\"); std::int64_t result = 1; std::int64_t factor = base; std::uint64_t n = static_cast<std::uint64_t>(exponent); while (n != 0) { if (n & 1u) result = zl_safe_mul_i64(result, factor); n >>= 1u; if (n != 0) factor = zl_safe_mul_i64(factor, factor); } return result; }\n\n";
+    // Double arithmetic raises exactly where the VM does: a non-finite
+    // result is an error, never a silent inf/NaN (see checkedDoubleResult
+    // in src/vm/vm.cpp - the messages below must stay identical to the
+    // VM's). fmod cannot overflow on finite inputs, so it only needs the
+    // zero check.
+    out << "ZL_NATIVE_ALWAYS_INLINE double zl_safe_add_f64(double a, double b) { const double r = a + b; if (std::isinf(r)) zl_native_overflow(\"floating-point overflow in addition\"); if (std::isnan(r)) zl_native_overflow(\"invalid floating-point result in addition\"); return r; }\n";
+    out << "ZL_NATIVE_ALWAYS_INLINE double zl_safe_sub_f64(double a, double b) { const double r = a - b; if (std::isinf(r)) zl_native_overflow(\"floating-point overflow in subtraction\"); if (std::isnan(r)) zl_native_overflow(\"invalid floating-point result in subtraction\"); return r; }\n";
+    out << "ZL_NATIVE_ALWAYS_INLINE double zl_safe_mul_f64(double a, double b) { const double r = a * b; if (std::isinf(r)) zl_native_overflow(\"floating-point overflow in multiplication\"); if (std::isnan(r)) zl_native_overflow(\"invalid floating-point result in multiplication\"); return r; }\n";
+    out << "ZL_NATIVE_ALWAYS_INLINE double zl_safe_div_f64(double a, double b) { if (b == 0.0) throw std::runtime_error(\"division by zero\"); const double r = a / b; if (std::isinf(r)) zl_native_overflow(\"floating-point overflow in division\"); if (std::isnan(r)) zl_native_overflow(\"invalid floating-point result in division\"); return r; }\n";
+    out << "ZL_NATIVE_ALWAYS_INLINE double zl_safe_mod_f64(double a, double b) { if (b == 0.0) throw std::runtime_error(\"modulo by zero\"); return std::fmod(a, b); }\n";
+    out << "ZL_NATIVE_ALWAYS_INLINE double zl_safe_pow_f64(double a, double b) { const double r = std::pow(a, b); if (std::isinf(r)) zl_native_overflow(\"floating-point overflow in exponentiation\"); if (std::isnan(r)) zl_native_overflow(\"invalid floating-point result in exponentiation\"); return r; }\n";
     out << "#include \"zl/compiler/native_abi.hpp\"\n\n";
     std::size_t emitted = 0;
     // Emit prototypes first so MIR calls can target functions declared later.

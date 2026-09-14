@@ -60,7 +60,9 @@ const Chunk* nativeChunk() { return g_currentNativeVm ? g_currentNativeVm->activ
 // --- Math ---
 
 Value mathSqrt(const std::vector<Value>& args) {
-    return std::sqrt(toDouble(args[0]));
+    const double x = toDouble(args[0]);
+    if (!(x >= 0.0)) throw std::runtime_error("Math.sqrt: domain error; expected a non-negative value");
+    return std::sqrt(x);
 }
 
 Value mathAbs(const std::vector<Value>& args) {
@@ -73,7 +75,18 @@ Value mathAbs(const std::vector<Value>& args) {
 }
 
 Value mathPow(const std::vector<Value>& args) {
-    return std::pow(toDouble(args[0]), toDouble(args[1]));
+    const double x = toDouble(args[0]);
+    const double y = toDouble(args[1]);
+    const double result = std::pow(x, y);
+    // Like Math.exp: a non-finite result from finite inputs is an error,
+    // not a silent inf/NaN. pow() overflows to infinity on huge results
+    // and returns NaN on domain errors (a negative base with a
+    // non-integer exponent).
+    if (std::isinf(result) && std::isfinite(x) && std::isfinite(y))
+        throw std::runtime_error("Math.pow: result overflow");
+    if (std::isnan(result) && std::isfinite(x) && std::isfinite(y))
+        throw std::runtime_error("Math.pow: domain error; expected a non-negative base or an integer exponent");
+    return result;
 }
 
 Value mathFloor(const std::vector<Value>& args) {

@@ -81,15 +81,12 @@ Available operations:
 - `lerp`, `degrees`, `radians`
 - `random`, `randomInt(min, max)`, `randomFloat(min, max)`
 
-Domain errors are reported for `asin`/`acos` outside `[-1, 1]` and for `log`/`log10` on
-non-positive inputs. `Math.exp` reports finite-input overflow. `Math.clamp`,
-`Math.randomInt`, and `Math.randomFloat` reject a minimum greater than the maximum. The
-random functions use a process-local pseudorandom generator and are **not**
-cryptographically secure.
-
-`sqrt` is the exception to the domain-error rule above: it is **not** checked, so
-`Math.sqrt(-1.0)` returns `nan` rather than throwing. Check for a negative argument
-yourself if you need an error.
+Domain errors are reported for `asin`/`acos` outside `[-1, 1]`, for `log`/`log10` on
+non-positive inputs, for `sqrt` on a negative input, and for `pow` with a negative
+base and a fractional exponent. `Math.exp` and `Math.pow` report finite-input
+overflow. `Math.clamp`, `Math.randomInt`, and `Math.randomFloat` reject a minimum
+greater than the maximum. The random functions use a process-local pseudorandom
+generator and are **not** cryptographically secure.
 
 High-level helpers (`clamp`, `sign`, `lerp`, `degrees`, `radians`) are ZL-owned static
 methods; genuinely primitive operations (`sqrt`, `sin`, `cbrt`, random generation) stay

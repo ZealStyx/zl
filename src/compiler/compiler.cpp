@@ -818,7 +818,11 @@ std::optional<Value> tryFoldBinaryLiterals(const BinaryExpr* node) {
                     if (y != 0 && !(x == std::numeric_limits<std::int64_t>::min() && y == -1)) return Value{x / y};
                     break;
                 case TokenType::PERCENT:
-                    if (y != 0) return Value{x % y};
+                    if (y != 0) {
+                        // The VM defines the one case C++ leaves undefined.
+                        if (x == std::numeric_limits<std::int64_t>::min() && y == -1) return Value{std::int64_t{0}};
+                        return Value{x % y};
+                    }
                     break;
                 case TokenType::BIT_AND: return Value{x & y};
                 case TokenType::BIT_OR:  return Value{x | y};
@@ -853,10 +857,13 @@ std::optional<Value> tryFoldBinaryLiterals(const BinaryExpr* node) {
         const double a = *leftDouble;
         const double b = *rightDouble;
         switch (node->op) {
-            case TokenType::PLUS: return Value{a + b};
-            case TokenType::MINUS: return Value{a - b};
-            case TokenType::STAR: return Value{a * b};
-            case TokenType::SLASH: if (b != 0.0) return Value{a / b}; break;
+            // A non-finite double result raises at runtime, so it stays
+            // unfolded (like an overflowing int fold above): folding it
+            // would bake a silent inf into the chunk instead of raising.
+            case TokenType::PLUS: if (std::isfinite(a + b)) return Value{a + b}; break;
+            case TokenType::MINUS: if (std::isfinite(a - b)) return Value{a - b}; break;
+            case TokenType::STAR: if (std::isfinite(a * b)) return Value{a * b}; break;
+            case TokenType::SLASH: if (b != 0.0 && std::isfinite(a / b)) return Value{a / b}; break;
             case TokenType::PERCENT: if (b != 0.0) return Value{std::fmod(a, b)}; break;
             case TokenType::LT: return Value{a < b};
             case TokenType::GT: return Value{a > b};

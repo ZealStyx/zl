@@ -39,7 +39,11 @@ class Vector3<T, U, V> {
     }
 
     public func length(): double {
-        return Math.sqrt(this.lengthSquared())
+        // Nested hypot() stays scaled at both levels: unlike
+        // sqrt(lengthSquared()), this cannot overflow on huge components
+        // with a finite length. The `* 1.0` pins the generic components
+        // to double for the calls.
+        return Math.hypot(Math.hypot(this.x * 1.0, this.y * 1.0), this.z * 1.0)
     }
 
     public func normalize(): Vector3<double, double, double> {
@@ -66,6 +70,6 @@ class Vector3<T, U, V> {
     }
 
     public func distance(Vector3<T, U, V> other): double {
-        return Math.sqrt(this.distanceSquared(other))
+        return Math.hypot(Math.hypot((this.x - other.x) * 1.0, (this.y - other.y) * 1.0), (this.z - other.z) * 1.0)
     }
 }
