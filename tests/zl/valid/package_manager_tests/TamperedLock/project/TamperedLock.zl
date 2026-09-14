@@ -1,0 +1,16 @@
+// Entry point for the TamperedLock package-manager fixture. `import
+// mathlib.MathUtil` resolves through the --root that zlpkg passes for the
+// resolved path dependency.
+import mathlib.MathUtil
+
+class TamperedLock {
+    func main(): void {
+        log(MathUtil.triple(14))
+        log(MathUtil.greet("zlpkg"))
+        log(TamperedLock.check(2, 5))
+    }
+
+    static func check(int a, int b): bool {
+        return MathUtil.triple(a) < MathUtil.triple(b)
+    }
+}

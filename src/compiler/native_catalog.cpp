@@ -162,6 +162,7 @@ std::vector<NativeSignature> buildSignatureTable() {
     sigs.push_back({NativeId::STRING_COMPAREIGNORECASE, "String.compareIgnoreCase", {ZlType::STRING, ZlType::STRING}, ZlType::INT});
     sigs.push_back({NativeId::STRING_CODEPOINTAT, "String.codePointAt", {ZlType::STRING, ZlType::INT}, ZlType::INT});
     sigs.push_back({NativeId::STRING_FROMCODEPOINT, "String.fromCodePoint", {ZlType::INT}, ZlType::STRING});
+    sigs.push_back({NativeId::STRING_REPEAT, "String.repeatText", {ZlType::STRING, ZlType::INT}, ZlType::STRING});
     sigs.push_back({NativeId::FILESYSTEM_READFILE, "FileSystem.readFile",   {ZlType::STRING},                      ZlType::STRING});
     sigs.push_back({NativeId::FILESYSTEM_WRITEFILE, "FileSystem.writeFile",  {ZlType::STRING, ZlType::STRING},      ZlType::VOID_TYPE});
     sigs.push_back({NativeId::FILESYSTEM_APPENDFILE, "FileSystem.appendFile", {ZlType::STRING, ZlType::STRING},      ZlType::VOID_TYPE});

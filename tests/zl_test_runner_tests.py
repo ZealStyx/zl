@@ -46,10 +46,13 @@ class ZlTestRunnerTests(unittest.TestCase):
             invalid.mkdir(parents=True)
             (valid / "Ok.zl").write_text("class Ok { static func main(): void {} }\n", encoding="utf-8")
             (invalid / "Bad.zl").write_text("class Bad { static func main(): void {} }\n", encoding="utf-8")
+            (valid / "Boom.zl").write_text("class Boom { static func main(): void {} }\n", encoding="utf-8")
+            (valid / "Boom.expect-termination").write_text("clean runtime error, exit 1\n", encoding="utf-8")
             cases = zl_test.discover_cases(root, "regressions")
             by_id = {case.id: case for case in cases}
             self.assertEqual(0, by_id["regressions/valid/core_tests/Ok"].expected_exit)
             self.assertEqual(1, by_id["regressions/invalid/type_tests/Bad"].expected_exit)
+            self.assertEqual(1, by_id["regressions/valid/core_tests/Boom"].expected_exit)
 
     def test_cli_list_json(self):
         proc = subprocess.run(

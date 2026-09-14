@@ -1,0 +1,15 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - ShiftCountRange
+//
+// A shift count outside 0..63 must fail as a clean runtime error (exit 1),
+// not wrap the count or trap. The .expect-termination marker next to this
+// file tells the regression runner that a nonzero exit here is expected.
+// ============================================================================
+
+class ShiftCountRange {
+    func main(): void {
+        log("about to shift")
+        var x = 1 << 64
+        log("shifted " + x)
+    }
+}

@@ -1,0 +1,10 @@
+import leaf.Leaf
+
+class TransitiveStale {
+    func main(): void {
+        if (Leaf.value() != 100) {
+            throw new Exception("stale leaf: expected 100, got " + Leaf.value())
+        }
+        log("ok")
+    }
+}

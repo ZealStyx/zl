@@ -121,6 +121,25 @@ def find_manifest(case_dir: Path) -> Optional[Path]:
     return None
 
 
+def termination_marker_for(location: Path) -> Path:
+    # Mirrors scripts/run_regressions.sh: ${location%.zl}.expect-termination.
+    # For a .zl entry file the marker is a sibling (Foo.zl ->
+    # Foo.expect-termination); for a package project dir it is a sibling of
+    # the directory itself.
+    text = str(location)
+    if text.endswith(".zl"):
+        text = text[: -len(".zl")]
+    return Path(text + ".expect-termination")
+
+
+def expects_termination(location: Path) -> bool:
+    # A hardening case terminates the process with a *clean* runtime error
+    # (exit 1). Anything else is a regression: exit 0 means the fault was
+    # silently swallowed, a timeout means the test hung, and 128+N means the
+    # process died by signal (crash) instead of reporting.
+    return termination_marker_for(location).exists()
+
+
 def list_categories(root: Path) -> Iterable[Path]:
     if not root.exists():
         return []
@@ -148,7 +167,7 @@ def discover_regression_cases(root: Path) -> List[TestCase]:
                                 name=entry.name,
                                 kind="pkg",
                                 path=str(project_dir.relative_to(root)),
-                                expected_exit=expected,
+                                expected_exit=1 if expects_termination(project_dir) else expected,
                             )
                         )
                         continue
@@ -162,7 +181,7 @@ def discover_regression_cases(root: Path) -> List[TestCase]:
                                 name=entry.name,
                                 kind="zl",
                                 path=str(case_entry.relative_to(root)),
-                                expected_exit=expected,
+                                expected_exit=1 if expects_termination(case_entry) else expected,
                             )
                         )
                 elif entry.suffix == ".zl" and has_main(entry):
@@ -174,7 +193,7 @@ def discover_regression_cases(root: Path) -> List[TestCase]:
                             name=entry.stem,
                             kind="zl",
                             path=str(entry.relative_to(root)),
-                            expected_exit=expected,
+                            expected_exit=1 if expects_termination(entry) else expected,
                         )
                     )
     return cases

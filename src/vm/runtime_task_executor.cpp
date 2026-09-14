@@ -1,4 +1,5 @@
 #include "zl/vm/runtime_task_executor.hpp"
+#include "zl/vm/runtime_thread.hpp"
 
 #include <algorithm>
 #include <stdexcept>
@@ -34,12 +35,22 @@ void RuntimeTaskExecutor::enqueue(std::function<void()> work) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_) throw std::runtime_error("CPU task executor is shutting down");
+        // Count the task while holding the queue mutex, before the push it
+        // guards: a channel operation on the spawner must observe the queued
+        // task before any pool thread could pop and finish it, or a 0 would
+        // turn a legitimate block into a false deadlock report. Balanced by
+        // the matching decrement when the popped task completes below.
+        gAliveWorkerThreads.fetch_add(1, std::memory_order_release);
         queue_.push(std::move(work));
     }
     condition_.notify_one();
 }
 
 void RuntimeTaskExecutor::workerLoop() {
+    // Pool threads are worker threads: other threads (e.g. main) may still
+    // make progress while one blocks, so channel deadlock detection stays
+    // disabled here exactly as on Thread.start workers.
+    gIsWorkerThread = true;
     while (true) {
         std::function<void()> work;
         {
@@ -55,6 +66,7 @@ void RuntimeTaskExecutor::workerLoop() {
             // Individual task work is responsible for translating failures into
             // Task state. Never let a worker exception escape the OS thread.
         }
+        gAliveWorkerThreads.fetch_sub(1, std::memory_order_release);
     }
 }
 

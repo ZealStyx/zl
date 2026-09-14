@@ -37,7 +37,10 @@ bool TypeLookahead::consumeAngleClose(Cursor& cursor) const {
     }
 }
 
-bool TypeLookahead::scanTermCursor(Cursor& cursor) const {
+bool TypeLookahead::scanTermCursor(Cursor& cursor, int depth) const {
+    // Fail (don't recurse forever): the caller treats a failed scan exactly
+    // like non-type input and falls back to expression parsing.
+    if (depth > kMaxScanDepth) return false;
     if (!cursor.atTokenBoundary() || cursor.pos >= tokens_.size()) return false;
     const TokenType type = tokens_[cursor.pos].type;
 
@@ -50,10 +53,10 @@ bool TypeLookahead::scanTermCursor(Cursor& cursor) const {
             if (!consume(cursor, TokenType::RBRACKET)) return false;
         }
         if (!consume(cursor, TokenType::LT)) return false;
-        if (!scanAnnotationCursor(cursor)) return false;
+        if (!scanAnnotationCursor(cursor, depth + 1)) return false;
         if (type == TokenType::KW_MAP) {
             if (!consume(cursor, TokenType::COMMA)) return false;
-            if (!scanAnnotationCursor(cursor)) return false;
+            if (!scanAnnotationCursor(cursor, depth + 1)) return false;
         }
         return consumeAngleClose(cursor);
     }
@@ -72,14 +75,14 @@ bool TypeLookahead::scanTermCursor(Cursor& cursor) const {
         if (!matches(cursor, TokenType::LPAREN)) return true;
         ++cursor.pos;
         if (!matches(cursor, TokenType::RPAREN)) {
-            if (!scanAnnotationCursor(cursor)) return false;
+            if (!scanAnnotationCursor(cursor, depth + 1)) return false;
             while (consume(cursor, TokenType::COMMA)) {
-                if (!scanAnnotationCursor(cursor)) return false;
+                if (!scanAnnotationCursor(cursor, depth + 1)) return false;
             }
         }
         if (!consume(cursor, TokenType::RPAREN)) return false;
         if (consume(cursor, TokenType::COLON)) {
-            if (!scanAnnotationCursor(cursor)) return false;
+            if (!scanAnnotationCursor(cursor, depth + 1)) return false;
         }
         return true;
     }
@@ -88,26 +91,26 @@ bool TypeLookahead::scanTermCursor(Cursor& cursor) const {
     ++cursor.pos;
     if (matches(cursor, TokenType::LT)) {
         ++cursor.pos;
-        if (!scanAnnotationCursor(cursor)) return false;
+        if (!scanAnnotationCursor(cursor, depth + 1)) return false;
         while (consume(cursor, TokenType::COMMA)) {
-            if (!scanAnnotationCursor(cursor)) return false;
+            if (!scanAnnotationCursor(cursor, depth + 1)) return false;
         }
         return consumeAngleClose(cursor);
     }
     return true;
 }
 
-bool TypeLookahead::scanAnnotationCursor(Cursor& cursor) const {
-    if (!scanTermCursor(cursor)) return false;
+bool TypeLookahead::scanAnnotationCursor(Cursor& cursor, int depth) const {
+    if (!scanTermCursor(cursor, depth)) return false;
     while (consume(cursor, TokenType::BIT_OR)) {
-        if (!scanTermCursor(cursor)) return false;
+        if (!scanTermCursor(cursor, depth)) return false;
     }
     return true;
 }
 
 long TypeLookahead::scanAnnotation(std::size_t pos) const {
     Cursor cursor{pos, 0};
-    if (!scanAnnotationCursor(cursor)) return -1;
+    if (!scanAnnotationCursor(cursor, 0)) return -1;
     // A boundary inside a fused shift token is not a usable token index; the
     // parser splits such tokens itself when it really parses the annotation.
     if (!cursor.atTokenBoundary()) return -1;

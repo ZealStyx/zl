@@ -611,11 +611,17 @@ storage they delegate to, and the encoder walked object fields blindly. It now
 looks through `List`/`Map`/`Set` wrappers and encodes the payload, so both
 collection spellings produce the same JSON. See `JsonLib.zl`.
 
-### O12 - `Math.sqrt(-1.0)` returns `nan` instead of throwing
+### O12 - `Math.sqrt(-1.0)` returns `nan` instead of throwing (fixed here)
 
 `docs/stdlib.md` says domain errors are reported. They are for `log`/`log10`,
 `asin`/`acos`, and out-of-order `clamp`/`random` ranges - but `sqrt` returns
 `nan`. `MathLib.zl` shows both behaviours.
+
+Fixed: `sqrt` now throws on a negative argument, `pow` throws on domain errors
+and finite-input overflow, and double `+ - * / ^^` raise on overflow - the
+language no longer produces `nan`/infinities anywhere. `MathLib.zl` and
+`docs/stdlib.md` show the new contract, locked in by the `DoubleArithmetic`
+regression fixture.
 
 ### O13 - The README's headline example did not run (fixed here)
 

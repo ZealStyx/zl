@@ -70,6 +70,9 @@ NodePtr ExpressionParser::parseExpression() {
 }
 
 NodePtr ExpressionParser::parsePratt(int minBindingPower) {
+    // Save on entry: the loop below folds flat operator chains iteratively
+    // and must count those folds against the same budget (see below).
+    const int savedDepth = parser_.expressionDepth_;
     // Every nested expression (parens, unary chains, right operands, call
     // arguments, collection literals, lambdas, match arms) funnels through
     // here, so counting entries bounds the parser's C++ recursion depth.
@@ -96,11 +99,31 @@ NodePtr ExpressionParser::parsePratt(int minBindingPower) {
         // -(2^^2), while the right-hand side of power can still begin with a
         // unary expression such as 2^^-2.
         NodePtr operand = parsePratt(110);
-        auto node = std::make_unique<UnaryExpr>();
-        node->op = op.type;
-        node->operand = std::move(operand);
-        node->line = op.line;
-        left = std::move(node);
+        // Fold -9223372036854775808 (INT64_MIN) into a single literal. It is
+        // the only int whose positive half exceeds INT64_MAX, so without this
+        // fold the literal range check rejects the only possible spelling of
+        // the most-negative int64. Nothing else folds: every other negative
+        // number keeps its UnaryExpr shape exactly as before.
+        if (op.type == TokenType::MINUS && operand->kind == NodeKind::Literal) {
+            auto* literal = static_cast<Literal*>(operand.get());
+            if (literal->literalType == TokenType::INT_LITERAL && literal->raw == "9223372036854775808") {
+                literal->raw = "-9223372036854775808";
+                literal->line = op.line;
+                left = std::move(operand);
+            } else {
+                auto node = std::make_unique<UnaryExpr>();
+                node->op = op.type;
+                node->operand = std::move(operand);
+                node->line = op.line;
+                left = std::move(node);
+            }
+        } else {
+            auto node = std::make_unique<UnaryExpr>();
+            node->op = op.type;
+            node->operand = std::move(operand);
+            node->line = op.line;
+            left = std::move(node);
+        }
     } else {
         left = parseCall();
     }
@@ -142,18 +165,39 @@ NodePtr ExpressionParser::parsePratt(int minBindingPower) {
                 node->value = std::move(value);
                 left = std::move(node);
             }
+            // Flat chains (`a+b+c+...`) fold iteratively: without counting each
+            // fold, a 100k-term chain parses fine and then overflows the stack in
+            // the checker/compiler that walks the left-nested AST recursively.
+            // Save/restore (not ++/--) keeps sibling sub-expressions from
+            // consuming each other's budget.
+            if (++parser_.expressionDepth_ > Parser::kMaxExpressionDepth) {
+                parser_.error("expression nesting exceeds the maximum depth of " +
+                              std::to_string(Parser::kMaxExpressionDepth));
+            }
             continue;
         }
 
         NodePtr right = parsePratt(binding->rightBindingPower);
         left = makeBinary(type, std::move(left), std::move(right), op.line);
+        // Flat chains (`a+b+c+...`) fold iteratively: without counting each
+        // fold, a 100k-term chain parses fine and then overflows the stack in
+        // the checker/compiler that walks the left-nested AST recursively.
+        // Save/restore (not ++/--) keeps sibling sub-expressions from
+        // consuming each other's budget.
+        if (++parser_.expressionDepth_ > Parser::kMaxExpressionDepth) {
+            parser_.error("expression nesting exceeds the maximum depth of " +
+                          std::to_string(Parser::kMaxExpressionDepth));
+        }
     }
 
-    --parser_.expressionDepth_;
+    parser_.expressionDepth_ = savedDepth;
     return left;
 }
 
 NodePtr ExpressionParser::parseCall() {
+    // Save on entry: the loop below folds flat operator chains iteratively
+    // and must count those folds against the same budget (see below).
+    const int savedDepth = parser_.expressionDepth_;
     NodePtr expr = parsePrimary();
 
     while (true) {
@@ -269,7 +313,13 @@ NodePtr ExpressionParser::parseCall() {
         } else {
             break;
         }
+        // Every iteration that didn't break wrapped `expr` one level deeper.
+        if (++parser_.expressionDepth_ > Parser::kMaxExpressionDepth) {
+            parser_.error("expression nesting exceeds the maximum depth of " +
+                          std::to_string(Parser::kMaxExpressionDepth));
+        }
     }
+    parser_.expressionDepth_ = savedDepth;
     return expr;
 }
 
@@ -460,7 +510,25 @@ NodePtr ExpressionParser::parseMatchExpr() {
     parser_.expect(TokenType::LBRACE, "Expected '{' after match subject");
     if (parser_.check(TokenType::RBRACE)) parser_.error("match requires at least one arm");
 
+    // Match patterns nest (List[...] of List[...] of ..., map{...}, data
+    // patterns) through direct recursion that never passes through
+    // parsePratt, so they need their own depth budget - hostile input is
+    // otherwise a stack overflow (SIGSEGV). RAII-scoped: the many early
+    // returns below make a manual decrement infeasible. (A ParseError
+    // discards the whole parser, so the counter needs no unwind discipline
+    // beyond the guard.)
+    int patternDepth = 0;
+    struct PatternDepthGuard {
+        int& depth;
+        ~PatternDepthGuard() { --depth; }
+    };
+    static constexpr int kMaxPatternDepth = 500;
     std::function<std::unique_ptr<MatchExpr::Pattern>()> parsePattern = [&]() -> std::unique_ptr<MatchExpr::Pattern> {
+        if (++patternDepth > kMaxPatternDepth) {
+            parser_.error("match pattern nesting exceeds the maximum depth of " +
+                          std::to_string(kMaxPatternDepth));
+        }
+        PatternDepthGuard patternGuard{patternDepth};
         auto pattern = std::make_unique<MatchExpr::Pattern>();
         pattern->line = parser_.peek().line;
         if (parser_.check(TokenType::IDENTIFIER) && parser_.peek().lexeme == "_") {

@@ -254,6 +254,29 @@ void testMirEmitsNativeFunctions() {
             "integer multiplication uses the overflow-checked helper");
 }
 
+void testMirKeepsOverflowingPowChecked() {
+    const auto result = emitMir(
+        "class Pow {\n"
+        "    @native\n"
+        "    static func big(int n): int {\n"
+        "        return (2 ^^ 63) + n\n"
+        "    }\n"
+        "    @native\n"
+        "    static func small(int n): int {\n"
+        "        return (2 ^^ 10) + n\n"
+        "    }\n"
+        "}\n");
+    require(result.success, "the pow cases compile: " + result.error);
+    if (!result.success) return;
+    require(result.source.find("1024") != std::string::npos,
+            "an exact integer power still folds at compile time (2 ^^ 10 == 1024)");
+    // NOTE: match "= zl_safe_pow_i64(v" (a call site), not the bare helper
+    // name: the helper's own definition is always emitted into the preamble.
+    require(result.source.find("= zl_safe_pow_i64(v") != std::string::npos,
+            "an overflowing integer power stays a checked runtime call (2 ^^ 63 "
+            "must raise, not fold to a double)");
+}
+
 void testMirRejectsCallsOutOfTheNativeSet() {
     const auto result = emitMir(
         "class Caller {\n"
@@ -321,6 +344,7 @@ int main() {
     testSimpleUnrollsBoundedLoops();
     testSimpleRejections();
     testMirEmitsNativeFunctions();
+    testMirKeepsOverflowingPowChecked();
     testMirRejectsCallsOutOfTheNativeSet();
     testMirRejectsEmptyModule();
     testSimpleIgnoresNonNativeFunctions();

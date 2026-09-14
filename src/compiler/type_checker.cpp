@@ -4,6 +4,7 @@
 #include "zl/compiler/generic_instantiation.hpp"
 #include "zl/compiler/thread_capture.hpp"
 #include "zl/parser/type_annotation.hpp"
+#include "zl/vm/native.hpp"
 
 #include <functional>
 #include <algorithm>
@@ -1040,6 +1041,14 @@ void TypeChecker::check(const Program& program, bool requireMain) {
     // resolution and interface-implementation matching, and a stale UNKNOWN
     // silently degrades all three (the call lowers to nothing and the
     // bytecode backend then drops it from the compiled body).
+    // NOTE: member signatures are resolved in their OWNING class's context
+    // (type parameters in scope). Resolving them at global scope misreads a
+    // bare type-parameter reference (e.g. builtin Result<T, E>'s `unwrapErr(): E`)
+    // as a class name - and if the user declares a generic class with that
+    // same name, resolution fails with a bogus "requires N type arguments"
+    // error pointing at an unrelated line.
+    const std::string savedClassName = currentClassName_;
+    const std::vector<std::string> savedClassTypeParams = currentClassTypeParams_;
     for (const auto& decl : program.declarations) {
         if (decl->kind != NodeKind::ClassDecl && decl->kind != NodeKind::DataDecl) continue;
         const std::string className = decl->kind == NodeKind::ClassDecl
@@ -1047,6 +1056,8 @@ void TypeChecker::check(const Program& program, bool requireMain) {
             : static_cast<const DataDecl*>(decl.get())->name;
         auto* classIt = semanticModel_.findClass(className);
         if (!classIt) continue;
+        currentClassName_ = className;
+        currentClassTypeParams_ = classIt->typeParams;
         const auto& members = decl->kind == NodeKind::ClassDecl
             ? static_cast<const ClassDecl*>(decl.get())->members
             : static_cast<const DataDecl*>(decl.get())->members;
@@ -1082,6 +1093,8 @@ void TypeChecker::check(const Program& program, bool requireMain) {
             }
         }
     }
+    currentClassName_ = savedClassName;
+    currentClassTypeParams_ = savedClassTypeParams;
 
     // Pass 0c: link `extends` parents for classes and data records. Record
     // inheritance is deliberately restricted to data -> data so value
@@ -2125,11 +2138,14 @@ TypeChecker::InferredType TypeChecker::inferIndexAccess(const IndexAccessExpr* n
         }
     }
     const InferredType index = inferExpr(node->index.get());
-    if (index.type != ZlType::INT && index.type != ZlType::UNKNOWN) {
-        typeError("list index must be an int", node->line);
-    }
+    // Check the object first: indexing a Map (or anything else) with a string
+    // key used to report "list index must be an int", blaming the key when the
+    // real problem is that [] only works on List<T>.
     if (object.type != ZlType::OBJECT || object.className.rfind("List<", 0) != 0 || object.className.back() != '>') {
         typeError("indexed access requires a List<T>", node->line);
+    }
+    if (index.type != ZlType::INT && index.type != ZlType::UNKNOWN) {
+        typeError("list index must be an int", node->line);
     }
     InferredType result;
     result.ownership = OwnershipKind::GC;
@@ -4032,6 +4048,31 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                 return result;
             }
             return InferredType(sig->returnType, sig->returnClassName);
+        }
+        // --- runtime-registered extension native (zl-bind output) ---
+        // Extensions have no catalog signature, so the check above cannot see
+        // them - but they are real, callable natives once linked in. Their
+        // declared arity is validated here exactly like the catalog's, and the
+        // call is dynamically typed: the binding converts and validates each
+        // argument at runtime and throws a clean, function-specific error on
+        // mismatch. Without this fallback every extension native is
+        // unreachable from ZL.
+        if (const auto extIdx = findNativeFunctionByName(qualifiedName)) {
+            const NativeFunction& ext = nativeFunctionTable()[*extIdx];
+            std::size_t extArity = 0;
+            try {
+                extArity = ext.arity();
+            } catch (const std::logic_error&) {
+                typeError("'" + qualifiedName + "' is registered without a declared arity", node->line);
+            }
+            if (extArity != node->arguments.size()) {
+                typeError("'" + qualifiedName + "' expects " + std::to_string(extArity) +
+                          " argument(s), got " + std::to_string(node->arguments.size()),
+                          node->line);
+            }
+            const auto extArgs = inferArguments(node->arguments);
+            (void)extArgs;
+            return ZlType::UNKNOWN;
         }
         typeError("unknown qualified func '" + qualifiedName + "'", node->line);
         return ZlType::UNKNOWN; // unreachable

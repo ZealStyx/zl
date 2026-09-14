@@ -14,7 +14,10 @@
 #     `zlpkg run <main()-file found within that project dir>`, from within
 #     the project dir, so dependencies declared in its zlpkg.toml get
 #     resolved. Its generated .zlpkg/ cache and zlpkg.lock are removed
-#     again after each run, so repeated runs stay deterministic. zlpkg is
+#     again after each run, so repeated runs stay deterministic - except
+#     that a committed zlpkg.lock.committed is copied into place as
+#     zlpkg.lock before the run (and removed again after), so lockfile
+#     fixtures exercise a known lock state deterministically. zlpkg is
 #     looked for next to the zl_language binary; if it isn't there, these
 #     cases are skipped (not failed) with a note explaining why.
 #
@@ -181,6 +184,9 @@ run_case() {
         fi
         rel_entry="${proj_entry#"$location"/}"
         rm -rf "$location/.zlpkg" "$location/zlpkg.lock"
+        if [[ -f "$location/zlpkg.lock.committed" ]]; then
+            cp "$location/zlpkg.lock.committed" "$location/zlpkg.lock"
+        fi
         out="$(cd "$location" && timeout 20s "$ZLPKG" run "$rel_entry" </dev/null 2>&1)"
         actual=$?
         rm -rf "$location/.zlpkg" "$location/zlpkg.lock"
@@ -200,11 +206,22 @@ run_case() {
 
     local termination_marker="${location%.zl}.expect-termination"
     if [[ -f "$termination_marker" ]]; then
-        if [[ "$actual" -ne 0 && "$actual" -ne 124 ]]; then
-            echo "  PASS  $name  (expected process termination: exit $actual)"
+        # A hardening test terminates the process with a *clean* runtime
+        # error (exit 1). Anything else is a regression: exit 0 means the
+        # fault was silently swallowed, 124 means the test hung, and 128+N
+        # means the process died by signal (crash) instead of reporting.
+        if [[ "$actual" -eq 1 ]]; then
+            echo "  PASS  $name  (expected clean error termination: exit 1)"
             PASS=$((PASS + 1))
             return
         fi
+        echo "  FAIL  $name"
+        echo "        location:      $location  ($( [[ "$kind" == "pkg" ]] && echo "via zlpkg run" || echo "direct" ))"
+        echo "        expected exit: 1  (clean error termination; got $actual)"
+        echo "        actual output:"
+        echo "$out" | sed 's/^/          /'
+        FAIL=$((FAIL + 1))
+        return
     fi
 
     if [[ "$actual" -eq "$expected" ]]; then

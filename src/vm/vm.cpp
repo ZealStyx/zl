@@ -33,6 +33,19 @@ std::string formatStackTrace(const ExecutionState* state, const char* fallback) 
     return trace.empty() ? std::string(fallback) : trace;
 }
 
+// Doubles are fail-closed like ints: a non-finite result is a catchable
+// arithmetic error, never a silent inf/NaN - the language has neither
+// value. Overflow of + - * / on finite inputs can only produce an infinity
+// (never NaN); pow() can additionally return NaN on domain errors, e.g. a
+// negative base with a fractional exponent.
+double checkedDoubleResult(double result, const char* operation) {
+    if (std::isinf(result))
+        throwArithmeticError(std::string("floating-point overflow in ") + operation);
+    if (std::isnan(result))
+        throwArithmeticError(std::string("invalid floating-point result in ") + operation);
+    return result;
+}
+
 // Build a real ZL exception object of `className`, so `catch IndexError e`
 // and friends work against failures raised inside the VM or a native.
 ObjectRef makeRuntimeExceptionObject(const std::string& className, const std::string& message,
@@ -317,7 +330,7 @@ Value VM::binaryArith(OpCode op, const Value& a, const Value& b) const {
             }
             throw std::runtime_error("negative integer exponent requires floating-point result");
         }
-        return std::pow(toDouble(a), toDouble(b));
+        return checkedDoubleResult(std::pow(toDouble(a), toDouble(b)), "exponentiation");
     }
 
     // Whole-number math stays whole-number; if either side is a decimal, both promote to double.
@@ -391,12 +404,12 @@ Value VM::binaryArith(OpCode op, const Value& a, const Value& b) const {
     double x = toDouble(a);
     double y = toDouble(b);
     switch (op) {
-        case OpCode::Add: return x + y;
-        case OpCode::Sub: return x - y;
-        case OpCode::Mul: return x * y;
+        case OpCode::Add: return checkedDoubleResult(x + y, "addition");
+        case OpCode::Sub: return checkedDoubleResult(x - y, "subtraction");
+        case OpCode::Mul: return checkedDoubleResult(x * y, "multiplication");
         case OpCode::Div:
             if (y == 0.0) throwArithmeticError("division by zero");
-            return x / y;
+            return checkedDoubleResult(x / y, "division");
         case OpCode::Mod:
             if (y == 0.0) throwArithmeticError("modulo by zero");
             return std::fmod(x, y);
@@ -559,7 +572,7 @@ int VM::runImpl(const Chunk& chunk, const std::vector<std::string>& programArgs,
     }
     // The process-wide heap must never be collected from just this VM's roots
     // while other VMs/threads are still running.
-    GCSafepointCoordinator::instance().poll(gcParticipantId_, gcRoots());
+    GCSafepointCoordinator::instance().poll(gcParticipantId_, [this] { return gcRoots(); });
     // Final teardown: wait for dropped workers, but never forever - a worker
     // blocked on a channel nobody will serve is abandoned with a diagnostic
     // rather than hanging the process at exit.
@@ -573,6 +586,19 @@ int VM::runImpl(const Chunk& chunk, const std::vector<std::string>& programArgs,
 VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stopAtReturn,
                 const std::vector<std::string>& programArgs, Value* returnValue,
                 std::shared_ptr<const Chunk> owner) {
+    // Re-entry budget (see nestedExecuteDepth_): nested callbacks otherwise
+    // overflow the C++ stack thousands of levels below the 100k ZL-frame cap.
+    // RAII-scoped decrement: execute() has many exits (returns and throws).
+    if (++nestedExecuteDepth_ > kMaxNestedExecuteDepth) {
+        --nestedExecuteDepth_;
+        throwStackOverflowError("stack overflow: maximum nested-execution depth (" +
+                                std::to_string(kMaxNestedExecuteDepth) + ") exceeded");
+    }
+    struct NestedExecuteGuard {
+        std::size_t& depth;
+        ~NestedExecuteGuard() { --depth; }
+    };
+    NestedExecuteGuard nestedGuard{nestedExecuteDepth_};
     // Re-entrant native callbacks must retain both the callee's program and
     // their caller's program; neither is an independent global GC pin.
     ProgramScope program(*this, chunk, std::move(owner));
@@ -584,7 +610,11 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
       try {
         drainThreadJoins();
         if (++instructionsSinceSafePoint >= 128 || TracingGC::instance().shouldCollect()) {
-            GCSafepointCoordinator::instance().poll(gcParticipantId_, gcRoots());
+            // The snapshot is provided lazily: building it walks the whole
+            // call stack, and doing that at every safepoint made deep
+            // recursion O(n^2). poll() invokes the provider only when a
+            // collection rendezvous actually needs these roots.
+            GCSafepointCoordinator::instance().poll(gcParticipantId_, [this] { return gcRoots(); });
             instructionsSinceSafePoint = 0;
         }
         if (ip >= chunk.code.size()) throw std::runtime_error("VM: instruction pointer out of bounds");

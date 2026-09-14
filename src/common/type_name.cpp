@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <functional>
+#include <iterator>
 
 namespace zl {
 namespace {
@@ -29,11 +30,11 @@ private:
             members.push_back(parsePrimary());
             skipWhitespace();
         }
-        if (members.size() == 1) return members.front();
+        if (members.size() == 1) return std::move(members.front());
         std::vector<TypeName> flattened;
         for (auto& member : members) {
             if (member.unionMembers.empty()) flattened.push_back(std::move(member));
-            else flattened.insert(flattened.end(), member.unionMembers.begin(), member.unionMembers.end());
+            else flattened.insert(flattened.end(), std::make_move_iterator(member.unionMembers.begin()), std::make_move_iterator(member.unionMembers.end()));
         }
         std::sort(flattened.begin(), flattened.end(), [](const auto& a, const auto& b) { return unionMemberName(a) < unionMemberName(b); });
         flattened.erase(std::unique(flattened.begin(), flattened.end(), typeNamesEqual), flattened.end());
@@ -48,14 +49,15 @@ private:
         skipWhitespace();
         if (consume('(')) {
             auto grouped = parseUnion();
-            return consume(')') ? grouped : invalid();
+            if (consume(')')) return grouped;
+            return invalid();
         }
         const std::size_t start = pos_;
         while (pos_ < text_.size() && (std::isalnum(static_cast<unsigned char>(text_[pos_])) || text_[pos_] == '_' || text_[pos_] == '.')) ++pos_;
         if (start == pos_) return invalid();
         TypeName result;
         result.name = text_.substr(start, pos_ - start);
-        if (result.name == "float") result.name = "double";
+        if (result.name == "float" || result.name == "decimal") result.name = "double";
         if (result.name == "null") result.name = "nil";
         skipWhitespace();
         if (result.name == "array" && consume('[')) {
@@ -115,18 +117,34 @@ private:
 
 TypeName parseTypeName(const std::string& text) { return TypeNameParser(text).parse(); }
 
-std::string describeTypeName(const TypeName& spec) {
+namespace {
+// Append-based rendering: each character is appended exactly once, so a
+// deeply nested type renders in linear time. The previous version built each
+// level as `out += describeTypeName(child)`, copying the whole rendered
+// child per level - quadratic on nesting depth, and this function sits on
+// the generic-instantiation hot path (called per member, per nesting level),
+// where it made 150-deep List<List<...>> take seconds. Output is identical.
+void describeTypeNameInto(const TypeName& spec, std::string& out) {
     if (!spec.unionMembers.empty()) {
-        std::string out;
         for (std::size_t i = 0; i < spec.unionMembers.size(); ++i) {
             if (i) out += "|";
-            out += unionMemberName(spec.unionMembers[i]);
+            const auto& member = spec.unionMembers[i];
+            if (member.name == "func" && !member.args.empty()) {
+                out += "(";
+                describeTypeNameInto(member, out);
+                out += ")";
+            } else {
+                describeTypeNameInto(member, out);
+            }
         }
-        return out;
+        return;
     }
-    std::string out = spec.name;
     if (spec.fixedSize && spec.name == "array") {
-        out = "array[" + std::to_string(*spec.fixedSize) + "]";
+        out += "array[";
+        out += std::to_string(*spec.fixedSize);
+        out += "]";
+    } else {
+        out += spec.name;
     }
     if (!spec.args.empty()) {
         // Function types are handled by reflectiveMatchesSpec directly.
@@ -134,18 +152,25 @@ std::string describeTypeName(const TypeName& spec) {
             out += "(";
             for (std::size_t i = 0; i + 1 < spec.args.size(); ++i) {
                 if (i) out += ",";
-                out += describeTypeName(spec.args[i]);
+                describeTypeNameInto(spec.args[i], out);
             }
-            out += "):" + describeTypeName(spec.args.back());
-            return out;
+            out += "):";
+            describeTypeNameInto(spec.args.back(), out);
+            return;
         }
         out += "<";
         for (std::size_t i = 0; i < spec.args.size(); ++i) {
             if (i) out += ",";
-            out += describeTypeName(spec.args[i]);
+            describeTypeNameInto(spec.args[i], out);
         }
         out += ">";
     }
+}
+} // namespace
+
+std::string describeTypeName(const TypeName& spec) {
+    std::string out;
+    describeTypeNameInto(spec, out);
     return out;
 }
 bool typeNamesEqual(const TypeName& a, const TypeName& b) {

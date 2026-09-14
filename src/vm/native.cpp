@@ -30,6 +30,7 @@
 #include <thread>
 #include <random>
 #include <unordered_map>
+#include <unordered_set>
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -59,7 +60,9 @@ const Chunk* nativeChunk() { return g_currentNativeVm ? g_currentNativeVm->activ
 // --- Math ---
 
 Value mathSqrt(const std::vector<Value>& args) {
-    return std::sqrt(toDouble(args[0]));
+    const double x = toDouble(args[0]);
+    if (!(x >= 0.0)) throw std::runtime_error("Math.sqrt: domain error; expected a non-negative value");
+    return std::sqrt(x);
 }
 
 Value mathAbs(const std::vector<Value>& args) {
@@ -72,7 +75,18 @@ Value mathAbs(const std::vector<Value>& args) {
 }
 
 Value mathPow(const std::vector<Value>& args) {
-    return std::pow(toDouble(args[0]), toDouble(args[1]));
+    const double x = toDouble(args[0]);
+    const double y = toDouble(args[1]);
+    const double result = std::pow(x, y);
+    // Like Math.exp: a non-finite result from finite inputs is an error,
+    // not a silent inf/NaN. pow() overflows to infinity on huge results
+    // and returns NaN on domain errors (a negative base with a
+    // non-integer exponent).
+    if (std::isinf(result) && std::isfinite(x) && std::isfinite(y))
+        throw std::runtime_error("Math.pow: result overflow");
+    if (std::isnan(result) && std::isfinite(x) && std::isfinite(y))
+        throw std::runtime_error("Math.pow: domain error; expected a non-negative base or an integer exponent");
+    return result;
 }
 
 Value mathFloor(const std::vector<Value>& args) {
@@ -317,7 +331,7 @@ Value collSet(const std::vector<Value>& args) {
 Value collLength(const std::vector<Value>& args) {
     RuntimeTypeCheck access(nativeChunk());
     if (const auto* p = std::get_if<ListRef>(&args[0]); p && *p) return static_cast<std::int64_t>(listLogicalSize(*p));
-    if (const auto* p = std::get_if<MapRef>(&args[0]); p && *p) return static_cast<std::int64_t>((*p)->entries.size());
+    if (const auto* p = std::get_if<MapRef>(&args[0]); p && *p) return static_cast<std::int64_t>((*p)->size());
     if (auto p = std::get_if<std::string>(&args[0])) return static_cast<std::int64_t>(p->size());
     throwTypeError("Collection.length expects a list/array/set, map, or string");
 }
@@ -416,16 +430,7 @@ Value collMapSet(const std::vector<Value>& args) {
     Value replacement = args[2];
     RuntimeTypeCheck types(nativeChunk());
     types.mapWrite(map, args[1], replacement);
-    const std::size_t pos = map->findEntry(args[1]);
-    if (pos != MapBox::kNoEntry) {
-        // In-place value update: keys keep their positions, so the lookup
-        // index stays valid.
-        std::swap(map->entries[pos].second, replacement);
-        types.commit();
-        return Value{};
-    }
-    map->entries.emplace_back(args[1], std::move(replacement));
-    map->noteAppendedKey(args[1]);
+    map->setEntry(args[1], std::move(replacement));
     types.commit();
     return Value{};
 }
@@ -433,8 +438,7 @@ Value collMapSet(const std::vector<Value>& args) {
 Value collMapGet(const std::vector<Value>& args) {
     RuntimeTypeCheck access(nativeChunk());
     auto map = requireMap(args[0], "Collection.mapGet");
-    const std::size_t pos = map->findEntry(args[1]);
-    if (pos != MapBox::kNoEntry) return map->entries[pos].second;
+    if (auto found = map->tryGetEntry(args[1])) return std::move(*found);
     throwKeyError("Collection.mapGet: key not found");
 }
 
@@ -446,14 +450,8 @@ Value collMapHas(const std::vector<Value>& args) {
 
 Value collMapRemove(const std::vector<Value>& args) {
     auto map = requireMap(args[0], "Collection.mapRemove");
-    std::pair<Value, Value> removed;
     RuntimeTypeCheck access(nativeChunk());
-    const std::size_t pos = map->findEntry(args[1]);
-    if (pos != MapBox::kNoEntry) {
-        removed = std::move(map->entries[pos]);
-        map->entries.erase(map->entries.begin() + static_cast<std::ptrdiff_t>(pos));
-        map->invalidateKeyIndex();
-    }
+    map->removeEntry(args[1]);
     return Value{};
 }
 
@@ -461,8 +459,9 @@ Value collMapKeys(const std::vector<Value>& args) {
     RuntimeTypeCheck access(nativeChunk());
     auto map = requireMap(args[0], "Collection.mapKeys");
     auto out = std::get<ListRef>(makeEmptyList());
-    out->items.reserve(map->entries.size());
-    for (const auto& entry : map->entries) out->items.push_back(entry.first);
+    const auto snapshot = map->snapshotEntries();
+    out->items.reserve(snapshot.size());
+    for (const auto& entry : snapshot) out->items.push_back(entry.first);
     if (map->storageType) out->storageType = std::make_shared<const NativeContainerType>(NativeContainerType{{map->storageType->arguments[0]}, {}});
     return out;
 }
@@ -471,8 +470,9 @@ Value collMapValues(const std::vector<Value>& args) {
     RuntimeTypeCheck access(nativeChunk());
     auto map = requireMap(args[0], "Collection.mapValues");
     auto out = std::get<ListRef>(makeEmptyList());
-    out->items.reserve(map->entries.size());
-    for (const auto& entry : map->entries) out->items.push_back(entry.second);
+    const auto snapshot = map->snapshotEntries();
+    out->items.reserve(snapshot.size());
+    for (const auto& entry : snapshot) out->items.push_back(entry.second);
     if (map->storageType) out->storageType = std::make_shared<const NativeContainerType>(NativeContainerType{{map->storageType->arguments[1]}, {}});
     return out;
 }
@@ -722,6 +722,22 @@ Value strFromCodePoint(const std::vector<Value>& args) {
     if (code < 0 || code > 255)
         throwIndexError("String.fromCodePoint: value " + std::to_string(code) + " out of the 0..255 byte range");
     return std::string(1, static_cast<char>(code));
+}
+
+Value strRepeat(const std::vector<Value>& args) {
+    // Named String.repeatText (not String.repeat): `repeat` is the do-while
+    // loop keyword and cannot appear after a dot.
+    const std::string& s = requireString(args[0], "String.repeatText");
+    const std::int64_t count = toInt64Strict(args[1]);
+    if (count < 0) throw std::runtime_error("String.repeatText: count must be non-negative");
+    if (count == 0 || s.empty()) return std::string("");
+    const auto total = static_cast<std::uint64_t>(count) * static_cast<std::uint64_t>(s.size());
+    if (total > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+        throw std::runtime_error("String.repeatText: result exceeds the maximum string size");
+    std::string out;
+    out.reserve(static_cast<std::size_t>(total));
+    for (std::int64_t i = 0; i < count; ++i) out.append(s);
+    return out;
 }
 
 
@@ -1446,10 +1462,13 @@ Value channelCreate(const std::vector<Value>& args) {
 
 namespace {
 // True when a blocking channel operation on THIS thread certainly cannot ever
-// be unblocked: no ZL worker thread exists, no async frame is queued on the
-// scheduler, and the caller is not itself a worker (main may still make
-// progress). The only remaining runnable entity is the thread about to block,
-// so waiting would be a hang - report it as a deadlock instead.
+// be unblocked: no ZL worker thread exists, no CPU-pool task is queued or
+// running, no async frame is queued on the scheduler, and the caller is not
+// itself a worker (main may still make progress). The only remaining runnable
+// entity is the thread about to block, so waiting would be a hang - report it
+// as a deadlock instead. Re-evaluated every round of the pump-while-blocked
+// loop below: a pending frame that finishes without touching the channel must
+// not buy the wait an eternity.
 bool channelBlockWouldDeadlock() {
     if (gIsWorkerThread) return false;
     if (gAliveWorkerThreads.load(std::memory_order_acquire) > 0) return false;
@@ -1463,15 +1482,53 @@ Value channelSend(const std::vector<Value>& args) {
     if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
         throw std::runtime_error("Channel.send: expected a Channel");
     auto state = (*obj)->channelState;
-    std::unique_lock<std::mutex> lock(state->mutex, std::defer_lock);
-    {
-        VM::BlockingNativeCall blocked(g_currentNativeVm);
-        lock.lock();
-        if (state->items.size() >= state->capacity && channelBlockWouldDeadlock()) {
+    VM* vm = g_currentNativeVm;
+    VM::BlockingNativeCall blocked(vm);
+    std::unique_lock<std::mutex> lock(state->mutex);
+    while (true) {
+        TaskRef receiverTask;
+        while (!state->pendingReceives.empty()) {
+            auto candidate = state->pendingReceives.front().task;
+            state->pendingReceives.pop_front();
+            if (candidate && !candidate->isTerminal()) {
+                receiverTask = std::move(candidate);
+                break;
+            }
+        }
+        if (receiverTask) {
+            // Completed after releasing the channel mutex: the receiver's
+            // continuations may synchronously re-enter this channel.
+            Value payload = args[1];
+            lock.unlock();
+            try {
+                receiverTask->start();
+                receiverTask->succeed(std::move(payload));
+            } catch (const std::logic_error&) {
+                // Cancellation won the race after the queue handoff.
+            }
+            state->cvNotEmpty.notify_one();
+            return Value{};
+        }
+        if (state->items.size() < state->capacity) break;
+        if (channelBlockWouldDeadlock()) {
             throw std::runtime_error(
                 "Channel.send: deadlock - the channel is full and no other thread or pending task can receive");
         }
-        state->cvNotFull.wait(lock, [&] { return state->items.size() < state->capacity; });
+        // An async receiver may be queued on this thread's scheduler behind
+        // the very call that is about to block. Pump one ready frame - with
+        // the channel lock released, since the pumped frame needs it - rather
+        // than sleeping through work only this thread can run. When no frame
+        // is ready, wait briefly so another thread's receiver can arrive; the
+        // condition is re-checked under the lock every round, so a notify
+        // that lands mid-pump is observed, never lost.
+        lock.unlock();
+        const bool pumped = vm && vm->pumpSchedulerOne();
+        lock.lock();
+        if (!pumped && state->items.size() >= state->capacity) {
+            state->cvNotFull.wait_for(lock, std::chrono::milliseconds(1), [&] {
+                return state->items.size() < state->capacity || !state->pendingReceives.empty();
+            });
+        }
     }
     state->items.push_back(args[1]);
     lock.unlock();
@@ -1484,15 +1541,53 @@ Value channelReceive(const std::vector<Value>& args) {
     if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
         throw std::runtime_error("Channel.receive: expected a Channel");
     auto state = (*obj)->channelState;
-    std::unique_lock<std::mutex> lock(state->mutex, std::defer_lock);
-    {
-        VM::BlockingNativeCall blocked(g_currentNativeVm);
-        lock.lock();
-        if (state->items.empty() && channelBlockWouldDeadlock()) {
+    VM* vm = g_currentNativeVm;
+    VM::BlockingNativeCall blocked(vm);
+    std::unique_lock<std::mutex> lock(state->mutex);
+    TaskRef senderTask;
+    std::optional<Value> handoff;
+    while (!handoff && state->items.empty()) {
+        while (!handoff && !state->pendingSends.empty()) {
+            auto sender = std::move(state->pendingSends.front());
+            state->pendingSends.pop_front();
+            if (sender.task && !sender.task->isTerminal()) {
+                senderTask = std::move(sender.task);
+                handoff = std::move(sender.value);
+            }
+        }
+        if (handoff) break;
+        if (channelBlockWouldDeadlock()) {
             throw std::runtime_error(
                 "Channel.receive: deadlock - the channel is empty and no other thread or pending task can send");
         }
-        state->cvNotEmpty.wait(lock, [&] { return !state->items.empty(); });
+        // An async sender may be queued on this thread's scheduler behind the
+        // very call that is about to block. Pump one ready frame - with the
+        // channel lock released, since the pumped frame needs it - rather
+        // than sleeping through work only this thread can run. When no frame
+        // is ready, wait briefly so another thread's sender can arrive; the
+        // condition is re-checked under the lock every round, so a notify
+        // that lands mid-pump is observed, never lost.
+        lock.unlock();
+        const bool pumped = vm && vm->pumpSchedulerOne();
+        lock.lock();
+        if (!pumped && state->items.empty() && !handoff) {
+            state->cvNotEmpty.wait_for(lock, std::chrono::milliseconds(1), [&] {
+                return !state->items.empty() || !state->pendingSends.empty();
+            });
+        }
+    }
+    if (handoff) {
+        // Completed after releasing the channel mutex: the sender's
+        // continuations may synchronously re-enter this channel.
+        lock.unlock();
+        try {
+            senderTask->start();
+            senderTask->succeed(Value{});
+        } catch (const std::logic_error&) {
+            // Cancellation won the race after the queue handoff.
+        }
+        state->cvNotFull.notify_one();
+        return std::move(*handoff);
     }
     Value value = std::move(state->items.front());
     state->items.pop_front();
@@ -1549,6 +1644,7 @@ Value channelSendAsync(const std::vector<Value>& args) {
                         [&](const auto& pending) { return pending.task == lockedTask; });
                     lockedState->pendingSends.erase(it, lockedState->pendingSends.end());
                 });
+                state->cvNotEmpty.notify_one();
                 return TaskRef(task);
             }
         }
@@ -1608,6 +1704,7 @@ Value channelReceiveAsync(const std::vector<Value>& args) {
                         [&](const auto& pending) { return pending.task == lockedTask; });
                     lockedState->pendingReceives.erase(it, lockedState->pendingReceives.end());
                 });
+                state->cvNotFull.notify_one();
                 return TaskRef(task);
             }
         }
@@ -2520,7 +2617,14 @@ std::string jsonEscape(const std::string& s) {
     }
     return o + "\"";
 }
-std::string toJson(const Value& v) {
+// Recursive JSON encoder. Unlike the printer (which truncates), encoding is
+// fail-closed: a cycle or a subtree past kMaxValueNestingDepth is a clean,
+// catchable error, because silently emitting truncated markers would corrupt
+// the serialized data. `active` tracks the current root-to-leaf path so
+// diamond sharing still encodes every occurrence; `depth` is passed by value
+// so siblings never consume each other's budget. Null box handles encode as
+// JSON null rather than dereferencing nothing.
+std::string toJsonInner(const Value& v, std::unordered_set<const void*>& active, int depth) {
     if (std::holds_alternative<std::monostate>(v)) return "null";
     if (auto p = std::get_if<bool>(&v)) return *p ? "true" : "false";
     if (auto p = std::get_if<std::int64_t>(&v)) return std::to_string(*p);
@@ -2532,25 +2636,46 @@ std::string toJson(const Value& v) {
     }
     if (auto p = std::get_if<std::string>(&v)) return jsonEscape(*p);
     if (auto p = std::get_if<ListRef>(&v)) {
+        if (!*p) return "null";
+        if (!active.insert(p->get()).second)
+            throw std::runtime_error("Serialize.encode: circular reference detected");
+        if (depth + 1 > kMaxValueNestingDepth)
+            throw std::runtime_error("Serialize.encode: nesting exceeds the maximum depth of " +
+                                     std::to_string(kMaxValueNestingDepth));
         std::string o = "[";
         for (std::size_t i = 0; i < (*p)->items.size(); ++i) {
             if (i) o += ",";
-            o += toJson((*p)->items[i]);
+            o += toJsonInner((*p)->items[i], active, depth + 1);
         }
+        active.erase(p->get());
         return o + "]";
     }
     if (auto p = std::get_if<MapRef>(&v)) {
+        if (!*p) return "null";
+        if (!active.insert(p->get()).second)
+            throw std::runtime_error("Serialize.encode: circular reference detected");
+        if (depth + 1 > kMaxValueNestingDepth)
+            throw std::runtime_error("Serialize.encode: nesting exceeds the maximum depth of " +
+                                     std::to_string(kMaxValueNestingDepth));
         std::string o = "{";
-        for (std::size_t i = 0; i < (*p)->entries.size(); ++i) {
+        const auto snapshot = (*p)->snapshotEntries();
+        for (std::size_t i = 0; i < snapshot.size(); ++i) {
             if (i) o += ",";
-            auto& e = (*p)->entries[i];
+            const auto& e = snapshot[i];
             if (!std::holds_alternative<std::string>(e.first))
                 throw std::runtime_error("Serialize.encode: object keys must be strings");
-            o += jsonEscape(std::get<std::string>(e.first)) + ":" + toJson(e.second);
+            o += jsonEscape(std::get<std::string>(e.first)) + ":" + toJsonInner(e.second, active, depth + 1);
         }
+        active.erase(p->get());
         return o + "}";
     }
     if (auto p = std::get_if<ObjectRef>(&v)) {
+        if (!*p) return "null";
+        if (!active.insert(p->get()).second)
+            throw std::runtime_error("Serialize.encode: circular reference detected");
+        if (depth + 1 > kMaxValueNestingDepth)
+            throw std::runtime_error("Serialize.encode: nesting exceeds the maximum depth of " +
+                                     std::to_string(kMaxValueNestingDepth));
         // The generic collection classes are thin wrappers whose only field is
         // the native storage they delegate to. Encoding the wrapper would emit
         // `{"__native":{...}}` - the object's plumbing rather than its data - so
@@ -2558,18 +2683,27 @@ std::string toJson(const Value& v) {
         const auto& className = (*p)->className;
         if (className == "List" || className == "Map" || className == "Set") {
             auto native = (*p)->fields.find("__native");
-            if (native != (*p)->fields.end()) return toJson(native->second);
+            if (native != (*p)->fields.end()) {
+                std::string encoded = toJsonInner(native->second, active, depth + 1);
+                active.erase(p->get());
+                return encoded;
+            }
         }
         std::string o = "{";
         bool first = true;
         for (auto& e : (*p)->fields) {
             if (!first) o += ",";
             first = false;
-            o += jsonEscape(e.first) + ":" + toJson(e.second);
+            o += jsonEscape(e.first) + ":" + toJsonInner(e.second, active, depth + 1);
         }
+        active.erase(p->get());
         return o + "}";
     }
     throw std::runtime_error("Serialize.encode: unsupported value");
+}
+std::string toJson(const Value& v) {
+    std::unordered_set<const void*> active;
+    return toJsonInner(v, active, 0);
 }
 Value serializeEncode(const std::vector<Value>& args){return toJson(args[0]);}
 Value serializeDecode(const std::vector<Value>& args){return JsonParser(requireString(args[0],"Serialize.decode")).parse();}
@@ -3069,6 +3203,7 @@ std::vector<NativeFunction> buildTable() {
         std::pair{NativeId::STRING_COMPAREIGNORECASE, strCompareIgnoreCase},
         std::pair{NativeId::STRING_CODEPOINTAT, strCodePointAt},
         std::pair{NativeId::STRING_FROMCODEPOINT, strFromCodePoint},
+        std::pair{NativeId::STRING_REPEAT, strRepeat},
         std::pair{NativeId::TIME_MONOTONICMILLIS, timeMonotonicMillis},
         std::pair{NativeId::TIME_DAYOFWEEK, timeDayOfWeek},
         std::pair{NativeId::TIME_DAYOFYEAR, timeDayOfYear},

@@ -1,0 +1,42 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - QuotedStringLiteral
+//
+// A string literal whose VALUE starts with '"' or '\'' must survive lowering
+// verbatim: the lexer already strips delimiters and processes escapes, so a
+// second strip in MIR lowering silently corrupted these literals (`"\"q\""`
+// compiled to `q`, and a match arm on the same spelling never matched).
+// ============================================================================
+
+import zl.text.Text
+
+class QuotedStringLiteral {
+    func check(bool cond, string what): void {
+        if (!cond) {
+            throw new Exception("QuotedStringLiteral failed: " + what)
+        }
+    }
+
+    func main(): void {
+        var self = new QuotedStringLiteral()
+        var d = "\"q\""
+        self.check(Text.length(d) == 3, "escaped-quote length")
+        self.check(d == "\"q\"", "escaped-quote equality")
+        self.check(Text.charAt(d, 0) == "\"", "escaped-quote first char")
+        self.check(Text.charAt(d, 2) == "\"", "escaped-quote last char")
+
+        var s = "'hi'"
+        self.check(Text.length(s) == 4, "single-quote length")
+        self.check(s == "'hi'", "single-quote equality")
+
+        var inner = "say \"hi\" ok"
+        self.check(Text.length(inner) == 11, "interior-quote length")
+
+        // The same literal as an expression and as a match pattern must agree.
+        var label = match d {
+            "\"q\"" => "matched"
+            _ => "no-match"
+        }
+        self.check(label == "matched", "match arm on quoted literal")
+        log("ok")
+    }
+}
