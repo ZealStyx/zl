@@ -160,18 +160,14 @@ std::vector<ResolvedDependency> resolveAll(const Manifest& rootManifest) {
         versionByIdentity[identity] = rd.packageVersion;
         results.push_back(rd);
 
+        // Descend using the SAME manifest object the fingerprint above was
+        // computed from (it is the same file: rd.dir / "zlpkg.toml", already
+        // existence-checked, parsed, and name-verified). Reloading it here
+        // would let a concurrent modification wedge the queued edges out of
+        // agreement with the recorded fingerprint.
         if (descended.insert(identity).second) {
-            std::filesystem::path subManifestPath = rd.dir / "zlpkg.toml";
-            if (std::filesystem::exists(subManifestPath)) {
-                Manifest subManifest;
-                try {
-                    subManifest = loadManifest(subManifestPath);
-                } catch (const ManifestError& e) {
-                    throw ResolveError("transitive dependency '" + dep.name + "': " + std::string(e.what()));
-                }
-                for (const auto& subDep : subManifest.dependencies) {
-                    queue.push_back({subDep, subManifest.manifestDir, dep.name});
-                }
+            for (const auto& subDep : depManifest.dependencies) {
+                queue.push_back({subDep, depManifest.manifestDir, dep.name});
             }
         }
     }

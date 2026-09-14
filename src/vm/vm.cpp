@@ -559,7 +559,7 @@ int VM::runImpl(const Chunk& chunk, const std::vector<std::string>& programArgs,
     }
     // The process-wide heap must never be collected from just this VM's roots
     // while other VMs/threads are still running.
-    GCSafepointCoordinator::instance().poll(gcParticipantId_, gcRoots());
+    GCSafepointCoordinator::instance().poll(gcParticipantId_, [this] { return gcRoots(); });
     // Final teardown: wait for dropped workers, but never forever - a worker
     // blocked on a channel nobody will serve is abandoned with a diagnostic
     // rather than hanging the process at exit.
@@ -597,7 +597,11 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
       try {
         drainThreadJoins();
         if (++instructionsSinceSafePoint >= 128 || TracingGC::instance().shouldCollect()) {
-            GCSafepointCoordinator::instance().poll(gcParticipantId_, gcRoots());
+            // The snapshot is provided lazily: building it walks the whole
+            // call stack, and doing that at every safepoint made deep
+            // recursion O(n^2). poll() invokes the provider only when a
+            // collection rendezvous actually needs these roots.
+            GCSafepointCoordinator::instance().poll(gcParticipantId_, [this] { return gcRoots(); });
             instructionsSinceSafePoint = 0;
         }
         if (ip >= chunk.code.size()) throw std::runtime_error("VM: instruction pointer out of bounds");

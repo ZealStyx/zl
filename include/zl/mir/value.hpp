@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -99,6 +100,37 @@ struct Constant {
                 return a.enumTypeName == b.enumTypeName && a.stringValue == b.stringValue;
         }
         return false;
+    }
+};
+
+// Hash consistent with Constant::operator==, for the module's constant index.
+// A linear scan here made interning O(n) per literal, so compiling a large
+// literal (e.g. a 200k-element list, which interns one int per index) was
+// O(n^2) and effectively hung. Doubles normalize -0.0 to +0.0 because the
+// equality above treats them as equal.
+struct ConstantHash {
+    [[nodiscard]] std::size_t operator()(const Constant& c) const noexcept {
+        std::size_t h = static_cast<std::size_t>(c.kind);
+        const auto mix = [&h](std::size_t v) {
+            h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        };
+        switch (c.kind) {
+            case ConstKind::Bool: mix(c.boolValue ? 1u : 0u); break;
+            case ConstKind::Int: mix(std::hash<std::int64_t>{}(c.intValue)); break;
+            case ConstKind::Double: {
+                double v = c.doubleValue;
+                if (v == 0.0) v = 0.0; // normalize -0.0
+                mix(std::hash<double>{}(v));
+                break;
+            }
+            case ConstKind::String: mix(std::hash<std::string>{}(c.stringValue)); break;
+            case ConstKind::Nil: break;
+            case ConstKind::EnumMember:
+                mix(std::hash<std::string>{}(c.enumTypeName));
+                mix(std::hash<std::string>{}(c.stringValue));
+                break;
+        }
+        return h;
     }
 };
 

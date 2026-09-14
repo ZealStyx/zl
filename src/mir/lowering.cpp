@@ -486,9 +486,13 @@ struct FunctionLowerer {
                 return Operand::constant(ctx.builder.constantBool(literal.raw == "true"),
                                          ctx.builder.types().boolType());
             case zl::TokenType::STRING_LITERAL: {
-                std::string text = literal.raw;
-                if (text.size() >= 2 && (text.front() == '"' || text.front() == '\'')) text = text.substr(1, text.size() - 2);
-                return Operand::constant(ctx.builder.constantString(std::move(text)),
+                // literal.raw is the lexer's already-unescaped token text
+                // (delimiters stripped, escapes processed); use it verbatim.
+                // A previous revision stripped a leading/trailing quote here
+                // on the assumption the raw lexeme still carried delimiters,
+                // which silently corrupted any literal whose VALUE starts
+                // with '"' or '\'' (e.g. "\"q\"" compiled to `q`).
+                return Operand::constant(ctx.builder.constantString(std::string(literal.raw)),
                                          ctx.builder.types().stringType());
             }
             case zl::TokenType::KW_NULL: {

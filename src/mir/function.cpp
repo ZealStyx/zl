@@ -181,12 +181,14 @@ const StaticField* Module::staticField(StaticId id) const {
 }
 
 ConstId Module::internConstant(const Constant& value) {
-    const auto it = std::find(constants.begin(), constants.end(), value);
-    if (it != constants.end()) {
-        return static_cast<ConstId>(std::distance(constants.begin(), it) + 1);
+    const auto it = constantIndex.find(value);
+    if (it != constantIndex.end()) {
+        return it->second;
     }
     constants.push_back(value);
-    return static_cast<ConstId>(constants.size());
+    const auto id = static_cast<ConstId>(constants.size());
+    constantIndex.emplace(constants.back(), id);
+    return id;
 }
 
 } // namespace zl::mir

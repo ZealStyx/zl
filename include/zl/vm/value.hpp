@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <atomic>
 #include <condition_variable>
 #include <thread>
@@ -88,6 +89,38 @@ private:
 using Value = std::variant<std::monostate, std::int64_t, double, std::string,
                            bool, ListRef, MapRef, ObjectRef, ClosureRef, TaskRef, ThreadRef,
                            NativeHandleRef, NativeBufferView, NativeStructView, NativeCallbackRef>;
+
+// Hash over Value for pooled lookup (see Chunk::constantIndex). Primitive
+// alternatives hash by value; every other alternative hashes to a shared
+// bucket and lets operator== decide. That keeps the hash consistent (equal
+// values always agree) without baking container/pointer identity into it,
+// and the pool only ever holds primitives in practice, so the shared
+// bucket never sits on a hot path. -0.0 normalizes to +0.0 because the
+// variant equality treats them as equal.
+struct ValueHash {
+    [[nodiscard]] std::size_t operator()(const Value& v) const {
+        return std::visit(
+            [](const auto& alt) -> std::size_t {
+                using T = std::decay_t<decltype(alt)>;
+                if constexpr (std::is_same_v<T, std::monostate>) {
+                    return 0x9e3779b9u;
+                } else if constexpr (std::is_same_v<T, std::int64_t>) {
+                    return std::hash<std::int64_t>{}(alt);
+                } else if constexpr (std::is_same_v<T, double>) {
+                    double d = alt;
+                    if (d == 0.0) d = 0.0; // normalize -0.0
+                    return std::hash<double>{}(d);
+                } else if constexpr (std::is_same_v<T, std::string>) {
+                    return std::hash<std::string>{}(alt);
+                } else if constexpr (std::is_same_v<T, bool>) {
+                    return alt ? 2u : 3u;
+                } else {
+                    return 0;
+                }
+            },
+            v);
+    }
+};
 
 // Value is complete now, so these can finally hold real containers of it.
 struct ListBox {
