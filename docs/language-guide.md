@@ -56,10 +56,11 @@ a variable or parameter typed as the enum rejects a raw string at compile time.
 **Map ordering is a guarantee, not an accident.** `map` is insertion-ordered by
 construction: it is a vector-backed association list, not a hash table. New keys append
 at the end, re-setting an existing key updates it in place, and removing a key does not
-reorder the rest. That vector backing also means **lookups are a linear scan**: `get`,
-`has`, and `remove` cost O(n), and inserting n entries is O(n²). The typed
-`Map<K,V>` is the same storage with a type-safe face, so treat maps as small
-collections — for lookups at scale, keep parallel `Map` indexes or restructure.
+reorder the rest. Lookups by **string key are O(1) expected** (a lazily built hash
+index over the vector); lookups by any other key type — `int`, objects, mixed unions —
+scan linearly, so building an n-entry non-string-keyed map costs O(n²). The typed
+`Map<K,V>` is the same storage with a type-safe face, so prefer string keys at scale
+and treat large non-string-keyed maps as small collections.
 
 **`decimal` is binary64, not base-10.** It is a synonym of `double`: 64-bit IEEE-754
 floating point, with all the usual binary fraction rounding — `0.1 + 0.2 != 0.3`.
