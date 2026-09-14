@@ -740,6 +740,169 @@ Value strRepeat(const std::vector<Value>& args) {
     return out;
 }
 
+// UTF-8 scalar helpers used by String.utf8* / Text.*. Ill-formed sequences
+// are treated as a single-byte character so indexing never hangs or splits a
+// well-formed multi-byte scalar. String.length/charAt remain byte operations.
+struct Utf8Char {
+    std::string bytes;
+    std::uint32_t cp;
+    std::size_t next;
+};
+
+Utf8Char utf8Next(const std::string& s, std::size_t i) {
+    const auto u = static_cast<unsigned char>(s[i]);
+    auto one = [&]() { return Utf8Char{s.substr(i, 1), u, i + 1}; };
+    if (u < 0x80) return {s.substr(i, 1), u, i + 1};
+    int need = 0;
+    std::uint32_t cp = 0;
+    if ((u & 0xE0) == 0xC0) { need = 2; cp = u & 0x1F; }
+    else if ((u & 0xF0) == 0xE0) { need = 3; cp = u & 0x0F; }
+    else if ((u & 0xF8) == 0xF0) { need = 4; cp = u & 0x07; }
+    else return one();
+    if (i + static_cast<std::size_t>(need) > s.size()) return one();
+    for (int k = 1; k < need; ++k) {
+        const auto c = static_cast<unsigned char>(s[i + static_cast<std::size_t>(k)]);
+        if ((c & 0xC0) != 0x80) return one();
+        cp = (cp << 6) | (c & 0x3F);
+    }
+    const std::uint32_t minCp = need == 2 ? 0x80u : need == 3 ? 0x800u : 0x10000u;
+    if (cp < minCp || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) return one();
+    return {s.substr(i, static_cast<std::size_t>(need)), cp, i + static_cast<std::size_t>(need)};
+}
+
+std::size_t utf8LengthOf(const std::string& s) {
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < s.size(); i = utf8Next(s, i).next) ++n;
+    return n;
+}
+
+Utf8Char utf8At(const std::string& s, std::int64_t index, const char* fnName) {
+    if (index < 0) {
+        throwIndexError(std::string(fnName) + ": index " + std::to_string(index) + " out of bounds");
+    }
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < s.size(); ) {
+        auto ch = utf8Next(s, i);
+        if (static_cast<std::int64_t>(n) == index) return ch;
+        i = ch.next;
+        ++n;
+    }
+    throwIndexError(std::string(fnName) + ": index " + std::to_string(index) +
+                    " out of bounds (size " + std::to_string(n) + ")");
+}
+
+std::string utf8Encode(std::uint32_t cp) {
+    std::string out;
+    if (cp <= 0x7Fu) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp <= 0x7FFu) {
+        out.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else if (cp <= 0xFFFFu) {
+        out.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else {
+        out.push_back(static_cast<char>(0xF0u | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    }
+    return out;
+}
+
+Value strUtf8Length(const std::vector<Value>& args) {
+    return static_cast<std::int64_t>(utf8LengthOf(requireString(args[0], "String.utf8Length")));
+}
+
+Value strUtf8CharAt(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.utf8CharAt");
+    return utf8At(s, toInt64Strict(args[1]), "String.utf8CharAt").bytes;
+}
+
+Value strUtf8Substring(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.utf8Substring");
+    const std::int64_t start = toInt64Strict(args[1]);
+    const std::int64_t end = toInt64Strict(args[2]);
+    const auto n = static_cast<std::int64_t>(utf8LengthOf(s));
+    if (start < 0 || end < start || end > n) {
+        throw std::runtime_error("String.utf8Substring: invalid range [" + std::to_string(start) +
+                                  ", " + std::to_string(end) + ") for a string of length " +
+                                  std::to_string(n));
+    }
+    std::string out;
+    std::int64_t idx = 0;
+    for (std::size_t i = 0; i < s.size() && idx < end; ) {
+        auto ch = utf8Next(s, i);
+        if (idx >= start) out += ch.bytes;
+        i = ch.next;
+        ++idx;
+    }
+    return out;
+}
+
+Value strUtf8Reverse(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.utf8Reverse");
+    std::vector<std::string> chars;
+    for (std::size_t i = 0; i < s.size(); ) {
+        auto ch = utf8Next(s, i);
+        chars.push_back(std::move(ch.bytes));
+        i = ch.next;
+    }
+    std::string out;
+    out.reserve(s.size());
+    for (auto it = chars.rbegin(); it != chars.rend(); ++it) out += *it;
+    return out;
+}
+
+Value strUtf8CodePointAt(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.utf8CodePointAt");
+    return static_cast<std::int64_t>(utf8At(s, toInt64Strict(args[1]), "String.utf8CodePointAt").cp);
+}
+
+Value strUtf8FromCodePoint(const std::vector<Value>& args) {
+    const std::int64_t code = toInt64Strict(args[0]);
+    if (code < 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) {
+        throwIndexError("String.utf8FromCodePoint: value " + std::to_string(code) +
+                        " is not a Unicode scalar value");
+    }
+    return utf8Encode(static_cast<std::uint32_t>(code));
+}
+
+Value strUtf8ByteIndex(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.utf8ByteIndex");
+    const std::int64_t index = toInt64Strict(args[1]);
+    const auto n = static_cast<std::int64_t>(utf8LengthOf(s));
+    if (index < 0 || index > n) {
+        throwIndexError("String.utf8ByteIndex: index " + std::to_string(index) +
+                        " out of bounds (size " + std::to_string(n) + ")");
+    }
+    if (index == n) return static_cast<std::int64_t>(s.size());
+    std::int64_t idx = 0;
+    for (std::size_t i = 0; i < s.size(); ) {
+        if (idx == index) return static_cast<std::int64_t>(i);
+        i = utf8Next(s, i).next;
+        ++idx;
+    }
+    return static_cast<std::int64_t>(s.size());
+}
+
+Value strUtf8IndexFromByte(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.utf8IndexFromByte");
+    const std::int64_t byteIndex = toInt64Strict(args[1]);
+    if (byteIndex < 0 || static_cast<std::size_t>(byteIndex) > s.size()) {
+        throwIndexError("String.utf8IndexFromByte: byte index " + std::to_string(byteIndex) +
+                        " out of bounds (size " + std::to_string(s.size()) + ")");
+    }
+    const auto target = static_cast<std::size_t>(byteIndex);
+    std::int64_t idx = 0;
+    for (std::size_t i = 0; i < s.size() && i < target; ) {
+        i = utf8Next(s, i).next;
+        ++idx;
+    }
+    return idx;
+}
+
 
 // --- Parsing utilities ---
 // Int.parse, Double.parse, Bool.parse - the official ZL way to convert
@@ -3204,6 +3367,14 @@ std::vector<NativeFunction> buildTable() {
         std::pair{NativeId::STRING_CODEPOINTAT, strCodePointAt},
         std::pair{NativeId::STRING_FROMCODEPOINT, strFromCodePoint},
         std::pair{NativeId::STRING_REPEAT, strRepeat},
+        std::pair{NativeId::STRING_UTF8LENGTH, strUtf8Length},
+        std::pair{NativeId::STRING_UTF8CHARAT, strUtf8CharAt},
+        std::pair{NativeId::STRING_UTF8SUBSTRING, strUtf8Substring},
+        std::pair{NativeId::STRING_UTF8REVERSE, strUtf8Reverse},
+        std::pair{NativeId::STRING_UTF8CODEPOINTAT, strUtf8CodePointAt},
+        std::pair{NativeId::STRING_UTF8FROMCODEPOINT, strUtf8FromCodePoint},
+        std::pair{NativeId::STRING_UTF8BYTEINDEX, strUtf8ByteIndex},
+        std::pair{NativeId::STRING_UTF8INDEXFROMBYTE, strUtf8IndexFromByte},
         std::pair{NativeId::TIME_MONOTONICMILLIS, timeMonotonicMillis},
         std::pair{NativeId::TIME_DAYOFWEEK, timeDayOfWeek},
         std::pair{NativeId::TIME_DAYOFYEAR, timeDayOfYear},

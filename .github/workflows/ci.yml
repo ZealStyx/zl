@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+
+      - name: Build toolchain and tests
+        run: cmake --build build --config Release --target zl-tests --parallel
+
+      - name: CTest
+        run: ctest --test-dir build --output-on-failure -C Release --timeout 120

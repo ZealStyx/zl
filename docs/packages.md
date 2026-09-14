@@ -7,9 +7,13 @@
 ## Imports
 
 Java-style dotted imports: `import io.github.test.Helpers` resolves to
-`<sourceRoot>/io/github/test/Helpers.zl`, where `sourceRoot` is the nearest ancestor
-directory literally named `src` — or, for flat single-file programs with no imports, the
-entry file's own directory.
+`<sourceRoot>/io/github/test/Helpers.zl`. `sourceRoot` is the nearest ancestor
+directory literally named `src` that is reached **before** a project boundary
+(`zlpkg.toml` or a `.git` file/directory). Hitting a project boundary first
+stops the walk, so cloning into a path that happens to contain a directory named
+`src` (for example `/home/src/app`) cannot steal imports from an unrelated tree.
+If neither `src` nor a project boundary is found, the entry file's own directory
+is used.
 
 Transitive imports, diamond imports, and circular-import detection are all handled.
 
@@ -95,3 +99,6 @@ re-resolve even when the lock is fresh.
 Dependencies are fetched over git by shelling out to the system `git` CLI. No registry
 or index exists yet, so every dependency must state exactly where it comes from —
 `path` or `git`, never a bare version number.
+
+Git remotes must be `https://`, `ssh://`, or scp-like `user@host:path`.
+`http://`, `git://`, `file://`, and helper transports such as `ext::` are rejected.

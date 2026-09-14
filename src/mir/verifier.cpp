@@ -2265,6 +2265,14 @@ private:
                 // member; the call is through that member, not the union.
                 const Type* calleeType = typeOf(refinedTypeAt(id, callee));
                 if (!calleeType) return;
+                // An untyped lambda parameter is UNKNOWN until a func
+                // annotation is written (`func(f) => f(21)`). The type checker
+                // already treats that as a value call; the runtime checks
+                // callability. Rejecting it here would undo that and report
+                // "not callable" for programs the front end accepted.
+                if (calleeType->kind == TypeKind::Unknown || calleeType->kind == TypeKind::TypeParam) {
+                    return;
+                }
                 if (calleeType->kind != TypeKind::Function) {
                     error("call_indirect through " + render(callee.type) + ", which is not callable",
                           id, index, loc);

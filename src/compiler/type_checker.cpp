@@ -4086,7 +4086,10 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
     // resolution never falling through to class members.
     {
         auto localVar = symbols_.lookupVar(node->calleeName);
-        if (localVar && localVar->type == ZlType::FUNCTION) {
+        // Untyped lambda parameters are UNKNOWN until a func annotation is
+        // written. Calling them (`func(f) => f(21)`) is a value call, not a
+        // lookup of a named function `f`.
+        if (localVar && (localVar->type == ZlType::FUNCTION || localVar->type == ZlType::UNKNOWN)) {
             node->isValueCall = true;
             node->calleeStorageName = localVar->storageName;
             if (!localVar->functionParamTypes.empty() &&

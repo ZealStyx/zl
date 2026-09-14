@@ -190,7 +190,7 @@ int run(const std::vector<std::string>& argv) {
     STARTUPINFOA si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessA(nullptr, commandLine.data(), nullptr, nullptr, TRUE, 0, nullptr,
+    if (!CreateProcessA(nullptr, commandLine.data(), nullptr, nullptr, FALSE, 0, nullptr,
                         nullptr, &si, &pi)) {
         return -1;
     }
