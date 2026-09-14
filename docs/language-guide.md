@@ -39,13 +39,38 @@ This is enforced by the compiler pipeline. Errors are reported in three categori
 - `class` and `data` declarations, plus `enum`
 - Access modifiers: `public`, `private`, `protected`
 
+**An explicit type comes BEFORE the name, Java-style:** `Animal a = new Dog(...)`,
+`int total = 0`. The annotation-after-colon spelling `var x: int` is a syntax error.
+
+**Methods default to `private`.** Omitting a modifier on a method makes it private to
+its class, so cross-class calls need an explicit `public` (or `protected` for
+subclasses). Static *fields* without a modifier are likewise private.
+
+**Static methods are not inherited-qualified** (unlike static fields, which are —
+see below). `Derived.helper()` fails when `helper` is declared on `Base`; call it as
+`Base.helper()`.
+
 `enum` members are accessed as `EnumName.MEMBER` and are genuinely statically typed —
 a variable or parameter typed as the enum rejects a raw string at compile time.
 
 **Map ordering is a guarantee, not an accident.** `map` is insertion-ordered by
 construction: it is a vector-backed association list, not a hash table. New keys append
 at the end, re-setting an existing key updates it in place, and removing a key does not
-reorder the rest.
+reorder the rest. That vector backing also means **lookups are a linear scan**: `get`,
+`has`, and `remove` cost O(n), and inserting n entries is O(n²). The typed
+`Map<K,V>` is the same storage with a type-safe face, so treat maps as small
+collections — for lookups at scale, keep parallel `Map` indexes or restructure.
+
+**`decimal` is binary64, not base-10.** It is a synonym of `double`: 64-bit IEEE-754
+floating point, with all the usual binary fraction rounding — `0.1 + 0.2 != 0.3`.
+There is no decimal-fixed type yet.
+
+**`string` has no ordering operator.** `<`, `<=`, `>`, `>=` do not work on strings;
+only `==` and `!=` do. (Comparison fails at runtime inside `sort` comparators, not at
+compile time — compare with an explicit key or `String.compare` instead.)
+
+**Dynamic call results are not directly callable.** `f(x)()` — invoking whatever a
+call returned — is rejected. Bind the result first: `var g = f(x)` then `g()`.
 
 **Static fields** support inherited qualified access. A derived class resolves an
 inherited static field to its declaring class, so reads and writes share the same
@@ -418,17 +443,42 @@ See `examples/advanced/OptionType.zl` and `examples/advanced/ResultType.zl`.
 
 ## Reflection
 
-A minimal, name-based `Type` API for runtime inspection:
+A minimal `Type` API for runtime inspection:
 
 ```zl
 Type.name(value)       // runtime type/class name
-Type.fields(object)    // effective field names, including inherited fields
-Type.methods(object)   // effective method names, including inherited methods
 Type.base(object)      // direct base class name, or nil for a root class
 ```
 
-Reflection metadata is intentionally small. Generic type arguments, method signatures,
-annotations, and writable reflection are reserved for future phases.
+`Type.fields(object)` and `Type.methods(object)` return the *effective* members,
+including inherited ones — but not as plain strings: each element is a `Field` or
+`Method` object. Both return a native `list`, so walk them with the
+`Collection.*` primitives and name the element type before calling methods on it:
+
+```zl
+list<Field> fields = t.fields()
+for i in 0..Collection.length(fields) {
+    Field f = Collection.get(fields, i)
+    log("field " + f.name() + ": " + f.type() + " (" + f.access() + ")")
+}
+
+list<Method> methods = t.methods()
+for i in 0..Collection.length(methods) {
+    Method m = Collection.get(methods, i)
+    log("method " + m.name() + " -> " + m.returnType())
+}
+```
+
+`Field` exposes `name()`, `type()`, and `access()`; `Method` exposes `name()`,
+`returnType()`, `access()`, `isStatic()`, `isAsync()`, and `parameters()`. The
+instance form `Type.of(value)` returns the `Type` object itself (`name()`,
+`kind()`, `isData()`, `fields()`, `methods()`). String-comparing an element is a
+mistake — compare `f.name()` instead.
+
+Reflection metadata is intentionally small. Generic type arguments, annotations,
+and writable reflection are reserved for future phases.
+
+See `examples/intermediate/Reflection.zl` for a complete program.
 
 ## Runtime lifetimes and GC roots
 
