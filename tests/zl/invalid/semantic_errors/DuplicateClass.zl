@@ -1,0 +1,15 @@
+// Regression fixture - invalid/semantic_errors - DuplicateClass
+//
+// Two classes with the same name in one compilation unit must be rejected.
+
+class DuplicateClass {
+    func main(): void {
+        log("fine")
+    }
+}
+
+class DuplicateClass {
+    func main(): void {
+        log("shadow")
+    }
+}

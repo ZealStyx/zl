@@ -3,6 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BIN="${ZL_BIND_BIN:-$ROOT/build/zl-bind}"
 TMP="$(mktemp -d)"
+export ROOT TMP
 trap 'rm -rf "$TMP"' EXIT
 "$BIN" "$ROOT/tests/zl-bind/fixtures/example_native.h" Demo "$TMP"
 grep -q '^version=3$' "$TMP/Demo.zlbind"
@@ -11,7 +12,7 @@ grep -q '^abi=' "$TMP/Demo.zlbind"
 grep -q '^pointer_bits=' "$TMP/Demo.zlbind"
 grep -q '^int64_bits=64$' "$TMP/Demo.zlbind"
 grep -q '^double_bits=64$' "$TMP/Demo.zlbind"
-grep -q '^function|zl_add|int|2|' "$TMP/Demo.zlbind"
+grep -q '^func|zl_add|int|2|' "$TMP/Demo.zlbind"
 grep -q '^class|Counter|constructor=1|ownership=unique|errors=exception|handles=integer$' "$TMP/Demo.zlbind"
 grep -q '^method|Counter.value|int|1|const=true$' "$TMP/Demo.zlbind"
 grep -q '^method|Counter.increment|void|2|const=false$' "$TMP/Demo.zlbind"
@@ -30,9 +31,18 @@ cp "$ROOT/tests/zl-bind/fixtures/example_native.h" "$TMP/example_native.h"
 cp "$ROOT/tests/zl-bind/fixtures/example_native.cpp" "$TMP/example_native.cpp"
 g++ -std=c++17 -I"$ROOT/include" -I"$TMP" -c "$TMP/Demo_bindings.cpp" -o "$TMP/Demo_bindings.o"
 g++ -std=c++17 -I"$ROOT/include" -I"$TMP" -c "$TMP/example_native.cpp" -o "$TMP/example_native.o"
-g++ -std=c++17 -I"$ROOT/include" -c "$ROOT/src/vm/native.cpp" -o "$TMP/native.o"
-g++ -std=c++17 -I"$ROOT/include" -c "$ROOT/src/vm/value.cpp" -o "$TMP/value.o"
-g++ -std=c++17 -I"$ROOT/include" -c "$ROOT/src/compiler/native_catalog.cpp" -o "$TMP/native_catalog.o"
+# The registry test binds into the real runtime, so link the same translation
+# units zl_language is built from (src/ minus main.cpp). Compiled in parallel;
+# object names are path-flattened to stay unique across subdirectories.
+find "$ROOT/src" -name '*.cpp' ! -name 'main.cpp' -print0 |
+    xargs -0 -P "$(nproc)" -n 1 sh -c '
+        src_file="$1"
+        rel="${src_file#"$ROOT"/}"
+        obj="$TMP/$(echo "$rel" | tr "/" "_").o"
+        g++ -std=c++17 -I"$ROOT/include" -c "$src_file" -o "$obj"
+    ' sh
+ZL_RUNTIME_OBJECTS="$(find "$TMP" -maxdepth 1 -name 'src_*.o' | sort | tr "\n" " ")"
+[[ -n "$ZL_RUNTIME_OBJECTS" ]] || { echo "runtime objects failed to build" >&2; exit 1; }
 cat > "$TMP/registry_test.cpp" <<'CPP'
 #include "zl/vm/native.hpp"
 #include <cstdint>
@@ -62,7 +72,7 @@ int main() {
     std::cout << "zl-bind class/registry tests passed\n";
 }
 CPP
-g++ -std=c++17 -I"$ROOT/include" "$TMP/Demo_bindings.o" "$TMP/example_native.o" "$TMP/native.o" "$TMP/value.o" "$TMP/native_catalog.o" "$TMP/registry_test.cpp" -o "$TMP/registry_test"
+g++ -std=c++17 -I"$ROOT/include" "$TMP/Demo_bindings.o" "$TMP/example_native.o" $ZL_RUNTIME_OBJECTS "$TMP/registry_test.cpp" -o "$TMP/registry_test"
 "$TMP/registry_test"
 
 

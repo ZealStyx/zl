@@ -1,0 +1,244 @@
+// ============================================================================
+// Regression fixture - valid/core_tests - AllFeatures
+//
+// One program that walks every core language feature, so a regression in any
+// of them shows up in scripts/run_regressions.sh (valid scope) and the file
+// doubles as the compile-and-run smoke test in scripts/native_gate.sh.
+//
+// Covered: scalars and arithmetic, strings and string builtins, bools, lists,
+// maps, sets, for/while/repeat loops with step/break/continue, guarded and
+// structural match, closures, records, classes (fields, constructors,
+// inheritance, @Override, static methods), user generic classes, Option and
+// Result, exceptions with catch-by-type, and the auto-imported zl.lang
+// builtins.
+// ============================================================================
+
+data Point {
+    x: int
+    y: int
+}
+
+class Animal {
+    public string name
+
+    func Animal(string name): void {
+        this.name = name
+    }
+
+    public func speak(): string {
+        return "..."
+    }
+
+    public func describe(): string {
+        return this.name + " says " + this.speak()
+    }
+}
+
+class Dog extends Animal {
+    func Dog(string name): void {
+        super(name)
+    }
+
+    @Override
+    public func speak(): string {
+        return "Woof"
+    }
+}
+
+class Box<T> {
+    T value
+
+    func Box(T value): void {
+        this.value = value
+    }
+
+    public func get(): T {
+        return this.value
+    }
+
+    public func replace(T value): void {
+        this.value = value
+    }
+}
+
+class AllFeatures {
+    static func fib(int n): int {
+        if (n < 2) { return n }
+        return AllFeatures.fib(n - 1) + AllFeatures.fib(n - 2)
+    }
+
+    static func fact(int n): int {
+        var acc = 1
+        var i = 2
+        while (i <= n) {
+            acc = acc * i
+            i = i + 1
+        }
+        return acc
+    }
+
+    static func applyTwice(func f, int x): int {
+        return f(f(x))
+    }
+
+    static func describePoint(Point p): string {
+        return "(" + p.x + ", " + p.y + ")"
+    }
+
+    static func risky(int n): int {
+        if (n > 100) { throw new Exception("too big: " + n) }
+        return n * 2
+    }
+
+    func main(): void {
+        // ---- scalars and arithmetic ----
+        var a = 7
+        var b = 3
+        log(a + b * b)
+        log(a / b)
+        log(a % b)
+        log(-a)
+        int doubled = a * 2
+        log(doubled)
+
+        // ---- strings ----
+        var s = "ZL"
+        log(s + " " + "corpus")
+        log(String.upper(s))
+        log(String.length(s))
+        log(s == "ZL")
+        log("abc" != "abd")
+
+        // ---- bools ----
+        var flag = true
+        if (flag && !false) { log("bools ok") }
+
+        // ---- lists ----
+        var xs = new List<int>()
+        xs.push(4)
+        xs.push(5)
+        xs.push(6)
+        log(xs.length())
+        log(xs.get(1))
+        xs.put(0, 40)
+        log(xs.get(0))
+        var total = 0
+        for i in 0..xs.length() {
+            total = total + xs.get(i)
+        }
+        log(total)
+
+        // ---- maps ----
+        var m = new Map<string, int>()
+        m.put("ada", 36)
+        m.put("grace", 45)
+        log(m.length())
+        log(m.get("ada"))
+        log(m.has("grace"))
+        log(m.has("nobody"))
+        m.put("ada", 37)
+        log(m.get("ada"))
+        var keys = m.keys()
+        for i in 0..keys.length() {
+            log("key " + keys.get(i))
+        }
+
+        // ---- sets ----
+        var t = new Set<int>()
+        t.add(1)
+        t.add(1)
+        t.add(2)
+        log(t.length())
+        log(t.has(1))
+
+        // ---- loops: step, repeat, break, continue ----
+        for i in 0..10 step 4 {
+            log("for " + i)
+        }
+        var k = 0
+        repeat {
+            k = k + 1
+        } while (k < 2)
+        log("repeat " + k)
+
+        var sum = 0
+        for i in 0..10 {
+            if (i == 2) { continue }
+            if (i == 5) { break }
+            sum = sum + i
+        }
+        log("sum " + sum)
+
+        // ---- match: literals, guards, catch-all ----
+        var grade = match total {
+            v when v > 100 => "big"
+            51 => "exact"
+            _ => "small"
+        }
+        log(grade)
+
+        var kind = match s {
+            string text => "string " + String.upper(text)
+            _ => "other"
+        }
+        log(kind)
+
+        // ---- closures ----
+        log(AllFeatures.applyTwice(func(int x) => x + 10, 5))
+
+        // ---- records ----
+        var p = Point { x: 3, y: 4 }
+        var q = Point { x: 3, y: 4 }
+        log(AllFeatures.describePoint(p))
+        log(p == q)
+        log(p == Point { x: 3, y: 5 })
+
+        // ---- classes: inheritance and virtual dispatch ----
+        var generic = new Animal("Generic")
+        var rex = new Dog("Rex")
+        log(generic.describe())
+        log(rex.describe())
+        log(rex.name)
+        Animal masked = new Dog("Ada")
+        log(masked.describe())
+
+        // ---- user generic classes ----
+        var box = new Box<int>(9)
+        log(box.get())
+        box.replace(box.get() * 3)
+        log(box.get())
+        var words = new Box<string>("generic")
+        log(words.get())
+
+        // ---- Option ----
+        var present = new Some<int>(42)
+        var absent = new None<int>()
+        log(present.isSome())
+        log(absent.isNone())
+        log(present.unwrapOr(0))
+        log(absent.unwrapOr(-1))
+
+        // ---- Result ----
+        var ok = new Ok<int, string>(7)
+        var err = new Err<int, string>("boom")
+        log(ok.isOk())
+        log(err.isErr())
+        log(ok.unwrapOr(0))
+        log(err.unwrapOr(-1))
+
+        // ---- exceptions ----
+        try {
+            log(AllFeatures.risky(50))
+            log(AllFeatures.risky(200))
+            log("unreachable")
+        } catch Exception e {
+            log("caught " + e.message)
+        }
+
+        // ---- statics and auto-imported builtins ----
+        log(AllFeatures.fib(12))
+        log(AllFeatures.fact(6))
+        log(Math.max(3, 9))
+        log(Math.abs(-4))
+    }
+}

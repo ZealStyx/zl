@@ -3143,8 +3143,20 @@ std::optional<std::size_t> findNativeFunction(NativeId id) {
 
 std::optional<std::size_t> findNativeFunction(const std::string& qualifiedName) {
     const auto signature = findNativeSignature(qualifiedName);
-    if (!signature) return std::nullopt;
+    if (!signature) {
+        // Not a catalog native: it may be a runtime-registered extension
+        // binding (zl-bind output), which is resolved by name alone.
+        return findNativeFunctionByName(qualifiedName);
+    }
     return findNativeFunction((*signature)->id);
+}
+
+std::optional<std::size_t> findNativeFunctionByName(const std::string& qualifiedName) {
+    const auto& table = nativeFunctionTable();
+    for (std::size_t i = 0; i < table.size(); ++i) {
+        if (table[i].qualifiedName == qualifiedName) return i;
+    }
+    return std::nullopt;
 }
 
 } // namespace zl

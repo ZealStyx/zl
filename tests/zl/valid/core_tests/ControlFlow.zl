@@ -1,0 +1,131 @@
+// ============================================================================
+// Regression fixture - valid/core_tests - ControlFlow
+//
+// Loop forms (for-range, step, while, repeat, break/continue, nested loops),
+// short-circuit evaluation, ternary-free branching, and match exhaustiveness
+// shapes: literal arms, guards, enum coverage, union alternatives, and null
+// handling for nullable references.
+// ============================================================================
+
+enum Level { LOW MEDIUM HIGH }
+
+class ControlFlow {
+    static func classify(int n): string {
+        return match n {
+            v when v < 0 => "negative"
+            0 => "zero"
+            v when v < 4 => "small"
+            _ => "large"
+        }
+    }
+
+    static func levelName(Level level): string {
+        // Every enum member is covered, so no wildcard is needed.
+        return match level {
+            Level.LOW => "low"
+            Level.MEDIUM => "medium"
+            Level.HIGH => "high"
+        }
+    }
+
+    static func describe(int|string value): string {
+        return match value {
+            int n => "number " + n
+            string text => String.upper(text)
+            null => "missing"
+        }
+    }
+
+    static func shortCircuitCalls(): int {
+        // && and || must skip the right side when the left decides. The bump
+        // closure keeps its own persistent count of how often it ran.
+        var count = 0
+        var bump = func(): int {
+            count = count + 1
+            return count
+        }
+        if (false && bump() > 0) { log("unreachable") }
+        log(count == 0)
+        if (true || bump() > 0) { log("short-circuited") }
+        log(count == 0)
+        return count
+    }
+
+    func main(): void {
+        // for-range with and without step
+        var rangeTotal = 0
+        for i in 1..5 {
+            rangeTotal = rangeTotal + i
+        }
+        log(rangeTotal)
+
+        var stepped = 0
+        for i in 0..10 step 3 {
+            stepped = stepped + 1
+        }
+        log(stepped)
+
+        // exclusive end bound: 0..0 runs zero times
+        var zeroRuns = 0
+        for i in 0..0 {
+            zeroRuns = zeroRuns + 1
+        }
+        log(zeroRuns)
+
+        // while with a compound condition
+        var n = 0
+        while (n < 10 && n != 7) {
+            n = n + 3
+        }
+        log(n)
+
+        // repeat..while runs its body before the first test
+        var k = 100
+        repeat {
+            k = k + 1
+        } while (k < 0)
+        log(k)
+
+        // break/continue, including from a nested loop
+        var sum = 0
+        for i in 0..5 {
+            if (i == 1) { continue }
+            for j in 0..5 {
+                if (j == 2) { break }
+                sum = sum + 1
+            }
+        }
+        log(sum)
+
+        // early return from a helper
+        log(ControlFlow.shortCircuitCalls())
+
+        // match shapes
+        log(ControlFlow.classify(-5))
+        log(ControlFlow.classify(0))
+        log(ControlFlow.classify(2))
+        log(ControlFlow.classify(99))
+
+        log(ControlFlow.levelName(Level.MEDIUM))
+
+        log(ControlFlow.describe(7))
+        log(ControlFlow.describe("hi"))
+        log(ControlFlow.describe(null))
+
+        // a union type can hold null; the match needs a null arm
+        string|int maybe = null
+        var label = match maybe {
+            string s => "got " + s
+            int n => "number " + n
+            null => "empty"
+        }
+        log(label)
+        maybe = "present"
+        label = match maybe {
+            string s => "got " + s
+            int n => "number " + n
+            null => "empty"
+        }
+        log(label)
+    }
+}

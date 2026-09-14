@@ -1,0 +1,78 @@
+// ============================================================================
+// Regression fixture - valid/native/benchmarks - Benchmark
+//
+// A VM-executed numeric benchmark whose output must match Expected.txt
+// exactly (checked by scripts/native_gate.sh). The workload is deliberately
+// deterministic: integer loops, recursion and list sorting with fixed inputs,
+// so the logged results are stable across runs and optimization tiers.
+// ============================================================================
+
+class Benchmark {
+    static func fib(int n): int {
+        if (n < 2) { return n }
+        return Benchmark.fib(n - 1) + Benchmark.fib(n - 2)
+    }
+
+    static func digitSum(int n): int {
+        var total = 0
+        while (n > 0) {
+            total = total + n % 10
+            n = n / 10
+        }
+        return total
+    }
+
+    static func sortSum(List<int> xs): int {
+        // insertion sort over a small fixed-size list
+        for i in 1..xs.length() {
+            var j = i
+            while (j > 0 && xs.get(j - 1) > xs.get(j)) {
+                var tmp = xs.get(j)
+                xs.put(j, xs.get(j - 1))
+                xs.put(j - 1, tmp)
+                j = j - 1
+            }
+        }
+        var total = 0
+        for i in 0..xs.length() {
+            total = total + xs.get(i)
+        }
+        return total
+    }
+
+    func main(): void {
+        // recursion
+        log("fib " + Benchmark.fib(22))
+
+        // tight integer loop
+        var acc = 0
+        for i in 0..100000 {
+            acc = acc + (i % 7)
+        }
+        log("loop " + acc)
+
+        // nested loops
+        var grid = 0
+        for i in 0..200 {
+            for j in 0..200 {
+                grid = grid + (i * j % 13)
+            }
+        }
+        log("grid " + grid)
+
+        // arithmetic helpers
+        log("digits " + Benchmark.digitSum(987654321))
+
+        // sorting workload
+        var xs = new List<int>()
+        var seed = 12345
+        for i in 0..400 {
+            // deterministic LCG so the input order never varies
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            xs.push(seed % 1000)
+        }
+        log("sorted sum " + Benchmark.sortSum(xs))
+        log("first " + xs.get(0))
+        log("last " + xs.last())
+    }
+}

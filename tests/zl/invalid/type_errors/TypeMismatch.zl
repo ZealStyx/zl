@@ -1,0 +1,10 @@
+// Regression fixture - invalid/type_errors - TypeMismatch
+//
+// A declared int variable cannot be assigned a string.
+
+class TypeMismatch {
+    func main(): void {
+        int answer = "forty-two"
+        log(answer)
+    }
+}

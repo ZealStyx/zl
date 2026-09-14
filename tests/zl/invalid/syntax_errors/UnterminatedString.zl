@@ -1,0 +1,9 @@
+// Regression fixture - invalid/syntax_errors - UnterminatedString
+//
+// A string literal with no closing quote must be rejected at lex/parse time.
+
+class UnterminatedString {
+    func main(): void {
+        log("never closed)
+    }
+}

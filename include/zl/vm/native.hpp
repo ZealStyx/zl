@@ -59,5 +59,9 @@ public:
 // library func has that exact "Namespace.name".
 [[nodiscard]] std::optional<std::size_t> findNativeFunction(const std::string& qualifiedName);
 [[nodiscard]] std::optional<std::size_t> findNativeFunction(NativeId id);
+// Name-based lookup for runtime-registered extension bindings (NativeId::
+// EXTENSION), which have no compile-time catalog signature. Returns the
+// table index, or nullopt when no registered binding carries that name.
+[[nodiscard]] std::optional<std::size_t> findNativeFunctionByName(const std::string& qualifiedName);
 
 } // namespace zl

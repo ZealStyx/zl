@@ -1,0 +1,10 @@
+// mathlib's public module, imported as `mathlib.MathUtil` by dependents.
+class MathUtil {
+    public static func triple(int n): int {
+        return n * 3
+    }
+
+    public static func greet(string name): string {
+        return "hello from " + name
+    }
+}

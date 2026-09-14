@@ -1,0 +1,7 @@
+// Second helper module for the ImportCase fixture: imported by ImportHelper,
+// proving same-directory resolution is transitive.
+
+data Payload {
+    label: string
+    weight: int
+}
