@@ -724,6 +724,22 @@ Value strFromCodePoint(const std::vector<Value>& args) {
     return std::string(1, static_cast<char>(code));
 }
 
+Value strRepeat(const std::vector<Value>& args) {
+    // Named String.repeatText (not String.repeat): `repeat` is the do-while
+    // loop keyword and cannot appear after a dot.
+    const std::string& s = requireString(args[0], "String.repeatText");
+    const std::int64_t count = toInt64Strict(args[1]);
+    if (count < 0) throw std::runtime_error("String.repeatText: count must be non-negative");
+    if (count == 0 || s.empty()) return std::string("");
+    const auto total = static_cast<std::uint64_t>(count) * static_cast<std::uint64_t>(s.size());
+    if (total > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+        throw std::runtime_error("String.repeatText: result exceeds the maximum string size");
+    std::string out;
+    out.reserve(static_cast<std::size_t>(total));
+    for (std::int64_t i = 0; i < count; ++i) out.append(s);
+    return out;
+}
+
 
 // --- Parsing utilities ---
 // Int.parse, Double.parse, Bool.parse - the official ZL way to convert
@@ -3187,6 +3203,7 @@ std::vector<NativeFunction> buildTable() {
         std::pair{NativeId::STRING_COMPAREIGNORECASE, strCompareIgnoreCase},
         std::pair{NativeId::STRING_CODEPOINTAT, strCodePointAt},
         std::pair{NativeId::STRING_FROMCODEPOINT, strFromCodePoint},
+        std::pair{NativeId::STRING_REPEAT, strRepeat},
         std::pair{NativeId::TIME_MONOTONICMILLIS, timeMonotonicMillis},
         std::pair{NativeId::TIME_DAYOFWEEK, timeDayOfWeek},
         std::pair{NativeId::TIME_DAYOFYEAR, timeDayOfYear},

@@ -10,6 +10,13 @@ namespace zl {
 // translation unit.
 static bool runtimeAssignableToSpec(const Value& value, const TypeName& spec, const Chunk* chunk);
 
+// A bare `unknown`/`object` type argument is dynamic: it accepts any actual
+// type in covariant positions (a Task<T> payload, a func return). The guard
+// requires a bare name so a hypothetical `unknown<...>` never wildcards.
+static bool isDynamicTypeName(const TypeName& type) {
+    return (type.name == "unknown" || type.name == "object") && type.args.empty() && type.unionMembers.empty();
+}
+
 // Default value for a declared field type: the value types get their type's
 // zero; everything with reference semantics stays nil.
 static Value defaultFieldSpecValue(const TypeName& spec, const Chunk& chunk) {
@@ -198,6 +205,12 @@ bool reflectiveMatchesSpec(const Value& value, const TypeName& spec, const Chunk
             const auto actual = parseTypeName((*closure)->parameterTypeNames[i]);
             if (!typeNamesEqual(actual, spec.args[i])) return false;
         }
+        // A dynamic ("unknown"/"object") expected return accepts any actual
+        // return: the caller promised to handle whatever comes back. Parameter
+        // positions stay exactly equal (invariance is what keeps a
+        // func(unknown) expectation from accepting a func(int) value whose
+        // body would then receive values it cannot handle).
+        if (isDynamicTypeName(spec.args.back())) return true;
         std::string returnType = (*closure)->returnTypeName.empty() ? "void" : (*closure)->returnTypeName;
         if ((*closure)->isAsync) returnType = "Task<" + returnType + ">";
         const auto actualReturn = parseTypeName(returnType);
@@ -213,6 +226,12 @@ bool reflectiveMatchesSpec(const Value& value, const TypeName& spec, const Chunk
         // their concrete T at runtime. Preserve the historical permissive
         // outer-Task check when no concrete value type metadata is available.
         if (actualName.empty()) return true;
+        // A dynamic ("unknown"/"object") expectation matches any concrete
+        // payload: Task<unknown> is how untyped task handles are spelled, and
+        // requiring the runtime tag to literally equal "unknown" would make
+        // every concretely-tagged task (Task<void>, Task<int>, ...) fail to
+        // match it. Concrete expectations still compare exactly below.
+        if (isDynamicTypeName(spec.args.front())) return true;
         const auto actual = parseTypeName(actualName);
         return typeNamesEqual(actual, spec.args.front());
     }

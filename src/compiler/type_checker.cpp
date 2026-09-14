@@ -2126,11 +2126,14 @@ TypeChecker::InferredType TypeChecker::inferIndexAccess(const IndexAccessExpr* n
         }
     }
     const InferredType index = inferExpr(node->index.get());
-    if (index.type != ZlType::INT && index.type != ZlType::UNKNOWN) {
-        typeError("list index must be an int", node->line);
-    }
+    // Check the object first: indexing a Map (or anything else) with a string
+    // key used to report "list index must be an int", blaming the key when the
+    // real problem is that [] only works on List<T>.
     if (object.type != ZlType::OBJECT || object.className.rfind("List<", 0) != 0 || object.className.back() != '>') {
         typeError("indexed access requires a List<T>", node->line);
+    }
+    if (index.type != ZlType::INT && index.type != ZlType::UNKNOWN) {
+        typeError("list index must be an int", node->line);
     }
     InferredType result;
     result.ownership = OwnershipKind::GC;

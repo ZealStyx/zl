@@ -221,6 +221,10 @@ void testTaskValueType() {
             "typed task rejects the wrong value type");
     require(zl::reflectiveTypeMatchesName(untypedTask, "Task<int>", &chunk),
             "a task without concrete metadata stays permissive");
+    require(zl::reflectiveTypeMatchesName(typedTask, "Task<unknown>", &chunk),
+            "a dynamic Task<unknown> expectation matches a concretely-tagged task");
+    require(zl::reflectiveTypeMatchesName(typedTask, "Task<object>", &chunk),
+            "a dynamic Task<object> expectation matches a concretely-tagged task");
 }
 
 void testTypeCheckBoundary() {

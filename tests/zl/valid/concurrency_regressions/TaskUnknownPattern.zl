@@ -1,0 +1,46 @@
+// ============================================================================
+// Regression fixture - valid/concurrency_regressions - TaskUnknownPattern
+//
+// A dynamic Task<unknown> pattern must match any concretely-tagged task value.
+// The runtime check used exact tag equality, so a Task<void> (e.g. from
+// Channel.sendAsync) fell through a Task<unknown> arm - and the reference
+// compiler's var-decl assertion raised "expected Task<unknown>, got Task" on
+// programs the MIR pipeline accepted. Concrete mismatches (Task<string> here)
+// must still NOT match.
+// ============================================================================
+
+import zl.lang.Channel
+
+class TaskUnknownPattern {
+    func main(): void {
+        var d = Channel.create(1)
+        var st = Channel.sendAsync(d, "queued")
+        // Hide the static Task<void> type so the match exercises the runtime
+        // tag check, not the verifier's static type assumption.
+        unknown u = st
+
+        var dynamic = match u {
+            Task<unknown> t => "dynamic-match"
+            _ => "dynamic-nomatch"
+        }
+        if (dynamic != "dynamic-match") { throw new Exception("Task<unknown> did not match a Task<void> value") }
+
+        var exact = match u {
+            Task<void> t => "exact-match"
+            _ => "exact-nomatch"
+        }
+        if (exact != "exact-match") { throw new Exception("Task<void> did not match a Task<void> value") }
+
+        var mismatch = match u {
+            Task<string> t => "mismatch-match"
+            _ => "mismatch-nomatch"
+        }
+        if (mismatch != "mismatch-nomatch") { throw new Exception("Task<string> wrongly matched a Task<void> value") }
+
+        // Drain the buffered item and join the async send before exiting.
+        var got = Channel.receive(d)
+        st.block()
+        if (got != "queued") { throw new Exception("expected queued, got " + got) }
+        log("ok")
+    }
+}

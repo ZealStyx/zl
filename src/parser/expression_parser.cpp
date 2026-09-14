@@ -99,11 +99,31 @@ NodePtr ExpressionParser::parsePratt(int minBindingPower) {
         // -(2^^2), while the right-hand side of power can still begin with a
         // unary expression such as 2^^-2.
         NodePtr operand = parsePratt(110);
-        auto node = std::make_unique<UnaryExpr>();
-        node->op = op.type;
-        node->operand = std::move(operand);
-        node->line = op.line;
-        left = std::move(node);
+        // Fold -9223372036854775808 (INT64_MIN) into a single literal. It is
+        // the only int whose positive half exceeds INT64_MAX, so without this
+        // fold the literal range check rejects the only possible spelling of
+        // the most-negative int64. Nothing else folds: every other negative
+        // number keeps its UnaryExpr shape exactly as before.
+        if (op.type == TokenType::MINUS && operand->kind == NodeKind::Literal) {
+            auto* literal = static_cast<Literal*>(operand.get());
+            if (literal->literalType == TokenType::INT_LITERAL && literal->raw == "9223372036854775808") {
+                literal->raw = "-9223372036854775808";
+                literal->line = op.line;
+                left = std::move(operand);
+            } else {
+                auto node = std::make_unique<UnaryExpr>();
+                node->op = op.type;
+                node->operand = std::move(operand);
+                node->line = op.line;
+                left = std::move(node);
+            }
+        } else {
+            auto node = std::make_unique<UnaryExpr>();
+            node->op = op.type;
+            node->operand = std::move(operand);
+            node->line = op.line;
+            left = std::move(node);
+        }
     } else {
         left = parseCall();
     }
