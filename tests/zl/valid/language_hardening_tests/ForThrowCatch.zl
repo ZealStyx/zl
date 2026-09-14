@@ -1,0 +1,47 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - ForThrowCatch
+//
+// A `for` loop whose body can only exit through an unwind edge (a try body
+// whose last statement throws, caught and swallowed) must still lower to
+// valid MIR with correct stepping. The step block used to reuse a temporary
+// loaded in the condition block, but the latch is not dominated by the
+// condition block when the only path to it runs try -> catch -> after ->
+// latch (temporaries do not flow across unwind edges), so verification
+// rejected the module with a dominance violation instead of running it.
+// The latch now reloads the step slot itself.
+// ============================================================================
+
+class ForThrowCatch {
+    func main(): void {
+        var bad = new List<string>()
+        bad.push("a")
+        bad.push("b")
+        bad.push("c")
+        var seen = new List<string>()
+        for i in 0..bad.length() {
+            try {
+                seen.push(bad.get(i))
+                throw new Exception("bail " + i)
+            } catch Exception ex {
+            }
+        }
+        if (seen.length() != 3) { throw new Exception("ForThrowCatch: wrong iterations") }
+        if (seen.get(0) != "a" || seen.get(1) != "b" || seen.get(2) != "c") {
+            throw new Exception("ForThrowCatch: wrong order")
+        }
+        // A stepped range must advance by the step, not 1, on the same path.
+        var total = 0
+        var steps = 0
+        for i in 0..10 step 3 {
+            try {
+                total = total + i
+                steps = steps + 1
+                throw new Exception("x")
+            } catch Exception ex {
+            }
+        }
+        if (steps != 4) { throw new Exception("ForThrowCatch: wrong step count") }
+        if (total != 18) { throw new Exception("ForThrowCatch: wrong step values") }
+        log("ok")
+    }
+}

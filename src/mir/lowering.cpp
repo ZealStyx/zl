@@ -1890,7 +1890,16 @@ struct FunctionLowerer {
 
         gotoBlock(stepBlock);
         const Operand counterValue = Operand::temp(fb.emitLoad(counter, loc), arena.intType());
-        const Operand advanced = Operand::temp(fb.emitBinary(Opcode::Add, counterValue, stepValue,
+        // Reload the step here rather than reusing the condition block's
+        // `stepValue` temp: the latch is not always dominated by the
+        // condition block. When the loop body can only exit through an
+        // unwind edge (a try body whose last statement throws, so the only
+        // path to the latch runs try -> catch -> after -> latch), a temp
+        // defined in the condition block does not dominate its use in the
+        // latch, and temporaries do not flow across unwind edges. The
+        // counter above already reloads for the same reason.
+        const Operand stepReload = Operand::temp(fb.emitLoad(stepSlot, loc), arena.intType());
+        const Operand advanced = Operand::temp(fb.emitBinary(Opcode::Add, counterValue, stepReload,
                                                              arena.intType(), loc), arena.intType());
         fb.emitStore(counter, advanced, loc);
         fb.emitJump(conditionBlock, loc);

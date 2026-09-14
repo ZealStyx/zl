@@ -1,0 +1,42 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - IncompleteStubRefusal
+//
+// A function the MIR lowerer cannot fully translate must be REFUSED LOUDLY,
+// never compiled as a silent truncation of its body. Lowering marks such a
+// function incomplete and skips the rest of its body from the failure point
+// on; the bytecode backend used to ignore that flag and compile the prefix
+// as a whole function (a truncated `v + v` on generic operands became a
+// void return / skipped side effects, faulting far-away caller contracts or
+// silently dropping work). Now the backend stubs incomplete functions: the
+// refusal names the function and reason at compile time, and reaching the
+// stub raises at runtime before any of the body runs.
+// ============================================================================
+
+class Box<T> {
+    public int calls
+
+    public func bump(T v): void {
+        this.calls = this.calls + 1
+        // Generic arithmetic has no MIR spelling: lowering stops here and
+        // marks this function incomplete.
+        var x = v + v
+        this.calls = this.calls + 10
+        log("unreachable " + x)
+    }
+}
+
+class IncompleteStubRefusal {
+    func main(): void {
+        var box = new Box<int>()
+        var raised = false
+        try {
+            box.bump(21)
+        } catch Exception e {
+            raised = true
+        }
+        if (!raised) { throw new Exception("IncompleteStubRefusal: truncated body ran silently (calls=" + box.calls + ")") }
+        // The refusal happens before the body runs: no partial side effects.
+        if (box.calls != 0) { throw new Exception("IncompleteStubRefusal: partial body ran (calls=" + box.calls + ")") }
+        log("ok")
+    }
+}
