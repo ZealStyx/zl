@@ -5,6 +5,17 @@
 #include <algorithm>
 
 namespace zl {
+// Default value for a declared field type: the value types get their type's
+// zero; everything with reference semantics stays nil.
+static Value defaultFieldValue(const std::string& typeName) {
+    const std::string base = typeName.substr(0, typeName.find('<'));
+    if (base == "int") return std::int64_t{0};
+    if (base == "double" || base == "float" || base == "decimal") return 0.0;
+    if (base == "bool") return false;
+    if (base == "string") return std::string{};
+    return Value{}; // objects, collections, funcs, type parameters, unknown
+}
+
 static RuntimeTypeBindings bindTypeParameters(const ClassReflectionInfo& info, const std::string& typeName) {
     const auto spec = parseTypeName(typeName);
     RuntimeTypeBindings bindings;
@@ -51,6 +62,24 @@ void initializeObjectType(Value& value, const std::string& typeName, const Chunk
     const auto meta = chunk.classReflection.find(spec.name);
     if (meta != chunk.classReflection.end()) (*object)->runtimeType = meta->second.runtimeType;
     if (meta != chunk.classReflection.end()) {
+        // Declared instance fields start at their type's zero value, not nil:
+        // reading an `int` field the constructor never assigned must yield 0
+        // (not a nil that then explodes in arithmetic), `double` 0.0, `bool`
+        // false, `string` "". Everything with reference semantics (objects,
+        // collections, funcs, unresolved type parameters) stays nil, which is
+        // the only sensible absent value. Only fields the object does not
+        // already carry are defaulted, so a factory that pre-set a field keeps
+        // its value and still gets type-asserted below. The field's EFFECTIVE
+        // type is used, so a generic class instantiated as Gen<int> defaults
+        // its T payload to 0, not nil.
+        for (const auto& field : meta->second.fields) {
+            if (field.isStatic) continue;
+            if ((*object)->fields.find(field.name) == (*object)->fields.end()) {
+                (*object)->fields.emplace(
+                    field.name,
+                    defaultFieldValue(runtimeFieldType(chunk, spec.name, field.name, object->get())));
+            }
+        }
         RuntimeTypeCheck fields(&chunk);
         for (const auto& field : meta->second.fields) {
             const auto value = (*object)->fields.find(field.name);
