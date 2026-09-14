@@ -57,6 +57,17 @@ std::map<std::string, std::string> parseInlineTable(const std::string& body, con
 
 } // namespace
 
+bool isValidPackageName(const std::string& name) {
+    if (name.empty() || name.size() > 100) return false;
+    if (name.front() == '.' || name.front() == '-') return false;
+    for (unsigned char c : name) {
+        const bool alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        if (!alnum && c != '.' && c != '_' && c != '-') return false;
+    }
+    if (name.find("..") != std::string::npos) return false;
+    return true;
+}
+
 Manifest loadManifest(const std::filesystem::path& manifestPath) {
     std::ifstream file(manifestPath);
     if (!file) {
@@ -113,6 +124,11 @@ Manifest loadManifest(const std::filesystem::path& manifestPath) {
             auto fields = parseInlineTable(value.substr(1, value.size() - 2), manifestPath.string() + ":" + std::to_string(lineNo));
 
             Dependency dep;
+            if (!isValidPackageName(key)) {
+                throw err("dependency name '" + key +
+                          "' is invalid: allowed are letters, digits, '.', '_' and '-', "
+                          "with no leading '.'/'-' and no \"..\"");
+            }
             dep.name = key;
             if (auto v = fields.find("version"); v != fields.end()) dep.version = v->second;
             if (auto it = fields.find("path"); it != fields.end()) {
@@ -134,6 +150,11 @@ Manifest loadManifest(const std::filesystem::path& manifestPath) {
 
     if (!haveName) throw ManifestError(manifestPath.string() + ": missing [package] name");
     if (!haveVersion) throw ManifestError(manifestPath.string() + ": missing [package] version");
+    if (!isValidPackageName(manifest.name)) {
+        throw ManifestError(manifestPath.string() + ": package name '" + manifest.name +
+                            "' is invalid: allowed are letters, digits, '.', '_' and '-', "
+                            "with no leading '.'/'-' and no \"..\"");
+    }
 
     return manifest;
 }
