@@ -1,0 +1,28 @@
+import zl.lang.Channel
+
+// Sync/async channel rendezvous must cross-match: a sync send completes an
+// already-queued async receive (and vice versa) instead of buffering past it
+// and leaving the waiter blocked forever. Before the fix both directions
+// below hung until the runner killed them (exit 124).
+class ChannelSyncAsyncMix {
+    func main(): void {
+        // Async receive queued first, sync send rendezvouses with it.
+        var c = Channel.create(4)
+        var rt = Channel.receiveAsync(c)
+        Channel.send(c, "hello")
+        var got = rt.block()
+        if (got != "hello") { throw new Exception("mix1: expected hello, got " + got) }
+
+        // Full buffer, async send queued, sync receives drain in FIFO order.
+        var d = Channel.create(1)
+        Channel.send(d, "full")
+        var st = Channel.sendAsync(d, "queued")
+        var first = Channel.receive(d)
+        var second = Channel.receive(d)
+        st.block()
+        if (first != "full") { throw new Exception("mix2 first: expected full, got " + first) }
+        if (second != "queued") { throw new Exception("mix2 second: expected queued, got " + second) }
+
+        log("ok")
+    }
+}

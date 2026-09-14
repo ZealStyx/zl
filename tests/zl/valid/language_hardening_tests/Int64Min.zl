@@ -1,0 +1,28 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - Int64Min
+//
+// -9223372036854775808 (INT64_MIN) must be spellable. Its positive half
+// exceeds INT64_MAX, so the literal range check used to reject the only
+// possible spelling of the most-negative int64; the parser now folds that
+// exact spelling into a single negative literal. Neighboring out-of-range
+// spellings (e.g. -9223372036854775809) must still be rejected.
+// ============================================================================
+
+import zl.text.Text
+
+class Int64Min {
+    func main(): void {
+        var m = -9223372036854775808
+        if (m + 1 != -9223372036854775807) { throw new Exception("Int64Min: MIN + 1 wrong") }
+        var mx = 9223372036854775807
+        if (mx - 1 != 9223372036854775806) { throw new Exception("Int64Min: MAX - 1 wrong") }
+        // Negating MIN overflows: checked arithmetic must raise, not wrap.
+        try {
+            var n = 0 - m
+            throw new Exception("Int64Min: negating MIN did not raise (got " + n + ")")
+        } catch Exception e {
+            if (!Text.contains(e.message, "overflow")) { throw new Exception("Int64Min: wrong error: " + e.message) }
+        }
+        log("ok")
+    }
+}

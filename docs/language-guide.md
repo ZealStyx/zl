@@ -70,6 +70,17 @@ There is no decimal-fixed type yet.
 only `==` and `!=` do. (Comparison fails at runtime inside `sort` comparators, not at
 compile time — compare with an explicit key or `String.compare` instead.)
 
+**Integer arithmetic is checked, except bit operations.** `+`, `-`, `*`, `/`, `%`,
+and unary `-` on `int` raise a runtime error on overflow, and `/`/`%` also reject a
+zero divisor (including `INT64_MIN / -1`). Division by zero is an error even for
+`double`: the language has no infinities or NaN. `double` arithmetic is checked
+the same way — `+`, `-`, `*`, `/`, and `^^` raise on overflow, and `^^` and
+`Math.pow` also reject a negative base with a fractional exponent, while
+`Math.sqrt` rejects a negative argument (underflow still rounds to zero). Bitwise
+`&`, `|`, `^`, `~` and the shifts `<<`, `>>`, `>>>` instead wrap modulo 2^64
+(two's complement): `>>` is arithmetic (sign-extending), `>>>` is logical
+(zero-filling), and a shift count outside `0..63` is a runtime error.
+
 **Dynamic call results are not directly callable.** `f(x)()` — invoking whatever a
 call returned — is rejected. Bind the result first: `var g = f(x)` then `g()`.
 

@@ -143,8 +143,12 @@ bool parseConst(const Instruction& ins, const std::unordered_map<ValueId, ConstV
                 if (n != 0) { std::int64_t next = 0; if (!checkedMul(factor, factor, next)) { exact = false; break; } factor = next; }
             }
             if (exact) { out = {ConstValue::Kind::Int, result, static_cast<double>(result), result != 0}; return true; }
-            const double d = std::pow(static_cast<double>(a), static_cast<double>(b));
-            if (std::isfinite(d)) { out.kind = ConstValue::Kind::Double; out.d = d; return true; }
+            // Inexact means the true value does not fit in int64: the runtime
+            // raises `integer overflow in exponentiation`, so the fold must
+            // stay unfolded. Folding it into a double would silently change
+            // both the static type and the value, like the overflowing
+            // int folds below that return false for the same reason.
+            return false;
         }
         switch (static_cast<zl::TokenType>(op)) {
             case zl::TokenType::PLUS: if (!checkedAdd(a, b, r)) return false; break;

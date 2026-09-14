@@ -1,0 +1,29 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - ShiftSemantics
+//
+// Locks in the documented integer/shift contract: arithmetic `+ - * / %` is
+// checked, while bitwise and shift operators wrap modulo 2^64. `>>` is
+// arithmetic (sign-extending), `>>>` is logical (zero-filling).
+// ============================================================================
+
+class ShiftSemantics {
+    func check(bool cond, string what): void {
+        if (!cond) {
+            throw new Exception("ShiftSemantics failed: " + what)
+        }
+    }
+
+    func main(): void {
+        var self = new ShiftSemantics()
+        var min = -9223372036854775807 - 1
+        self.check((1 << 63) == min, "shl wraps to INT64_MIN")
+        self.check((-8 >> 1) == -4, "shr is arithmetic")
+        self.check((-8 >>> 1) == 9223372036854775804, "ushr is logical")
+        self.check((1 >>> 63) == 0, "ushr of small value")
+        self.check((-1 >>> 63) == 1, "ushr of -1")
+        self.check((7 & 3) == 3, "bitand")
+        self.check((7 | 3) == 7, "bitor")
+        self.check((7 ^ 3) == 4, "bitxor")
+        log("ok")
+    }
+}

@@ -97,7 +97,8 @@ bool RuntimeTypeCheck::container(const Value& value, const TypeName& type) {
     // attached to the heap until the entire boundary succeeds.
     pending_.push_back({&slot, std::make_shared<const NativeContainerType>(wanted)});
     if (map) {
-        for (const auto& entry : dictionary->entries)
+        const auto snapshot = dictionary->snapshotEntries();
+        for (const auto& entry : snapshot)
             if (!matches(entry.first, wanted.arguments[0]) || !matches(entry.second, wanted.arguments[1])) return false;
     } else {
         for (std::size_t i = std::min(list->frontIndex, list->items.size()); i < list->items.size(); ++i)

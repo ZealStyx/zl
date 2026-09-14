@@ -34,12 +34,20 @@ private:
         [[nodiscard]] bool atTokenBoundary() const { return pending == 0; }
     };
 
+    // The recognizer recurses once per nesting level (`Box<Box<...>>`), so
+    // hostile input without a cap is a stack overflow (SIGSEGV) rather than
+    // a failed scan. The budget counts nested scanTermCursor activations;
+    // exceeding it fails the scan, exactly like any other non-type input.
+    // Kept in step with Parser::kMaxTypeDepth: anything deeper would be
+    // rejected by the real type parser anyway.
+    static constexpr int kMaxScanDepth = 500;
+
     [[nodiscard]] bool matches(const Cursor& cursor, TokenType type) const;
     [[nodiscard]] bool consume(Cursor& cursor, TokenType type) const;
     // Consumes one '>' , splitting a fused shift token when needed.
     [[nodiscard]] bool consumeAngleClose(Cursor& cursor) const;
-    [[nodiscard]] bool scanTermCursor(Cursor& cursor) const;
-    [[nodiscard]] bool scanAnnotationCursor(Cursor& cursor) const;
+    [[nodiscard]] bool scanTermCursor(Cursor& cursor, int depth) const;
+    [[nodiscard]] bool scanAnnotationCursor(Cursor& cursor, int depth) const;
 
     const std::vector<Token>& tokens_;
 };

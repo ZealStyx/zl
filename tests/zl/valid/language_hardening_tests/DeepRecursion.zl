@@ -1,0 +1,27 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - DeepRecursion
+//
+// Deep-but-legal recursion must run in linear time: the GC safepoint used
+// to rebuild the full O(depth) root snapshot at every poll even when no
+// collection was pending, making 60k frames take ~26s (quadratic). It now
+// takes a fraction of a second; the 20s case timeout keeps any
+// reintroduction of the eager snapshot failing loudly.
+// ============================================================================
+
+class DeepRecursion {
+    func boom(int n): int {
+        if (n <= 0) {
+            return 0
+        }
+        return boom(n - 1) + 1
+    }
+
+    func main(): void {
+        var self = new DeepRecursion()
+        var depth = self.boom(60000)
+        if (depth != 60000) {
+            throw new Exception("DeepRecursion failed: expected 60000, got " + depth)
+        }
+        log("ok")
+    }
+}

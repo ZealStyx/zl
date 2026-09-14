@@ -1,0 +1,12 @@
+// Regression fixture - invalid/type_errors - IntLiteralOutOfRange
+//
+// Integer literals outside the int64 range must be rejected. Note the fold
+// boundary: -9223372036854775808 (INT64_MIN) is the one exception and spells
+// fine (see valid/language_hardening_tests/Int64Min), but one past it in
+// either direction is still an error.
+
+class IntLiteralOutOfRange {
+    func main(): void {
+        log(-9223372036854775809)
+    }
+}

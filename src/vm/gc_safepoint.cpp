@@ -67,14 +67,35 @@ void GCSafepointCoordinator::unregisterParticipant(ParticipantId id) {
     lock.unlock();
 }
 
-void GCSafepointCoordinator::poll(ParticipantId id, GCRoots roots) {
+void GCSafepointCoordinator::poll(ParticipantId id, std::function<GCRoots()> rootProvider) {
     auto& s = state();
     std::unique_lock<std::mutex> lock(s.mutex);
     if (!s.participants.count(id)) return;
+    if (!s.collectionRequested && !TracingGC::instance().shouldCollect()) {
+        return; // Fast path: no rendezvous to join, so no snapshot is built.
+    }
+    // Slow path: a collection is already requested, or this participant's
+    // pressure will request one. Build the snapshot OUTSIDE the coordinator
+    // lock (it walks the caller's stack and may allocate), then re-check
+    // under the lock: the participant may have unregistered, or the request
+    // may have cleared, in between. A collection cannot have run to
+    // completion without this participant while it stayed registered and
+    // unparked (allParked would have been false), so observing a cleared
+    // request here means no rendezvous needed these roots.
+    lock.unlock();
+    GCRoots roots = rootProvider ? rootProvider() : GCRoots{};
+    lock.lock();
+    if (!s.participants.count(id)) {
+        lock.unlock(); // Drop the unneeded snapshot with no lock held.
+        return;
+    }
     if (!s.collectionRequested && TracingGC::instance().shouldCollect()) {
         s.collectionRequested = true;
     }
-    if (!s.collectionRequested) return;
+    if (!s.collectionRequested) {
+        lock.unlock(); // Same: nothing to join; release outside the lock.
+        return;
+    }
 
     auto& participant = s.participants.at(id);
     participant.roots = std::move(roots);

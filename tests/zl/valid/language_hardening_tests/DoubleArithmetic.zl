@@ -1,0 +1,88 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - DoubleArithmetic
+//
+// Doubles are fail-closed like ints: a non-finite result is a catchable
+// error, never a silent inf/NaN (the language has neither value). Each case
+// below produced a silent `inf`/`nan` before the fix, including NaN from
+// Math.sqrt/Math.pow and overflow baked into chunks by constant folding.
+// Underflow still rounds to zero/denormal without raising. Math.hypot stays
+// scaled so a finite hypotenuse never raises on huge components.
+// ============================================================================
+
+import zl.math.Vector2
+import zl.math.Vector3
+
+class DoubleArithmetic {
+    func check(bool cond, string what): void {
+        if (!cond) {
+            throw new Exception("DoubleArithmetic failed: " + what)
+        }
+    }
+
+    func expect(string want, func action): void {
+        var raised = false
+        var message = ""
+        try {
+            action()
+        } catch Exception e {
+            raised = true
+            message = e.message
+        }
+        if (!raised) {
+            throw new Exception("DoubleArithmetic failed: no error raised, wanted '" + want + "'")
+        }
+        if (message != want) {
+            throw new Exception("DoubleArithmetic failed: got '" + message + "', wanted '" + want + "'")
+        }
+    }
+
+    func main(): void {
+        var self = new DoubleArithmetic()
+
+        // A large-but-finite double (1.5e308, just under the ~1.8e308 max):
+        // doubling it overflows, so every arithmetic op below can be driven
+        // into its overflow error without any loop.
+        var x = 150000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.0
+        var tiny = 0.0000000001
+
+        self.expect("floating-point overflow in multiplication", func() => x * x)
+        self.expect("floating-point overflow in addition", func() => x + x)
+        self.expect("floating-point overflow in subtraction", func() => x - (0.0 - x))
+        self.expect("floating-point overflow in division", func() => x / tiny)
+        self.expect("division by zero", func() => 1.0 / 0.0)
+        self.expect("floating-point overflow in exponentiation", func() => x ^^ 2.0)
+        self.expect("invalid floating-point result in exponentiation", func() => (-1.0) ^^ 0.5)
+        self.expect("Math.pow: result overflow", func() => Math.pow(10.0, 1000.0))
+        self.expect("Math.pow: domain error; expected a non-negative base or an integer exponent", func() => Math.pow(-1.0, 0.5))
+        self.expect("Math.sqrt: domain error; expected a non-negative value", func() => Math.sqrt(-1.0))
+
+        // Overflow through pure literals must raise at runtime, not fold to
+        // inf: 9e307 is finite, but doubling it is not.
+        self.expect("floating-point overflow in multiplication", func() => 90000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.0 * 2.0)
+
+        // Sanity: ordinary double math is unaffected, and underflow rounds
+        // to zero instead of raising.
+        self.check(Math.abs((0.1 + 0.2) - 0.3) < 0.000001, "0.1 + 0.2")
+        self.check((7.5 % 2.0) == 1.5, "fmod")
+        self.check(Math.sqrt(2.0) > 1.4142, "sqrt value")
+        self.check(Math.pow(2.0, 10.0) == 1024.0, "pow value")
+        self.check((2.0 ^^ 10.0) == 1024.0, "operator pow value")
+        // 1.0 / 1.5e308 is subnormal-or-zero; squaring it underflows to
+        // zero instead of raising.
+        var small = 1.0 / x
+        self.check((small * small) == 0.0, "underflow rounds to zero")
+
+        // hypot() is scaled: finite hypotenuses of huge components do not
+        // raise, while a genuinely overflowing one still does.
+        self.check(Math.hypot(3.0, 4.0) == 5.0, "hypot value")
+        self.check(Math.hypot(0.0, 0.0) == 0.0, "hypot zero")
+        var leg = 100000000000000000000.0
+        self.check(Math.abs(Math.hypot(leg, leg) - 141421356237309510000.0) < 1000000.0, "hypot huge")
+        self.expect("floating-point overflow in multiplication", func() => Math.hypot(x, x))
+        var v2 = new Vector2<double, double>(leg, leg)
+        self.check(Math.abs(v2.length() - 141421356237309510000.0) < 1000000.0, "vector2 length huge")
+        var v3 = new Vector3<double, double, double>(leg, leg, leg)
+        self.check(Math.abs(v3.length() - 173205080756887730000.0) < 1000000.0, "vector3 length huge")
+        log("ok")
+    }
+}

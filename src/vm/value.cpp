@@ -53,8 +53,17 @@ std::string escapeRecordString(const std::string& input) {
 // log("hi") prints hi, not "hi"), but elements NESTED inside a list/map print
 // strings quoted (so log({"a", "b"}) prints ["a", "b"], not [a, b] - otherwise
 // you can't tell a list of strings from a list of identifiers-gone-wrong).
-std::string formatValue(const Value& v, bool quoteStrings) {
-    return std::visit([quoteStrings](const auto& held) -> std::string {
+//
+// The value graph can be deep (built in a loop) or cyclic (a list holding
+// itself), and printing is exactly where users meet such values - so the
+// traversal is total: ancestor cycles print as `<cyclic>` and subtrees past
+// kMaxValueNestingDepth print as `<...>`, never a stack overflow. `active`
+// holds only the current root-to-leaf path (insert on entry, erase on
+// exit), so diamond sharing still prints every occurrence in full; `depth`
+// is passed by value so siblings never consume each other's budget.
+std::string formatValueInner(const Value& v, bool quoteStrings,
+                             std::unordered_set<const void*>& active, int depth) {
+    return std::visit([quoteStrings, &active, depth](const auto& held) -> std::string {
         using T = std::decay_t<decltype(held)>;
         if constexpr (std::is_same_v<T, std::monostate>) {
             return "nil";
@@ -73,25 +82,33 @@ std::string formatValue(const Value& v, bool quoteStrings) {
         } else if constexpr (std::is_same_v<T, std::string>) {
             return quoteStrings ? ("\"" + held + "\"") : held;
         } else if constexpr (std::is_same_v<T, ListRef>) {
+            if (!held) return "[]";
+            if (!active.insert(held.get()).second) return "[<cyclic>]";
+            if (depth + 1 > kMaxValueNestingDepth) { active.erase(held.get()); return "[<...>]"; }
             std::string s = "[";
-            if (held) {
-                for (std::size_t i = 0; i < held->items.size(); ++i) {
-                    if (i) s += ", ";
-                    s += formatValue(held->items[i], true);
-                }
+            for (std::size_t i = 0; i < held->items.size(); ++i) {
+                if (i) s += ", ";
+                s += formatValueInner(held->items[i], true, active, depth + 1);
             }
+            active.erase(held.get());
             return s + "]";
         } else if constexpr (std::is_same_v<T, MapRef>) {
+            if (!held) return "{}";
+            if (!active.insert(held.get()).second) return "{<cyclic>}";
+            if (depth + 1 > kMaxValueNestingDepth) { active.erase(held.get()); return "{<...>}"; }
             std::string s = "{";
-            if (held) {
-                for (std::size_t i = 0; i < held->entries.size(); ++i) {
-                    if (i) s += ", ";
-                    s += formatValue(held->entries[i].first, true) + ": " + formatValue(held->entries[i].second, true);
-                }
+            const auto snapshot = held->snapshotEntries();
+            for (std::size_t i = 0; i < snapshot.size(); ++i) {
+                if (i) s += ", ";
+                s += formatValueInner(snapshot[i].first, true, active, depth + 1) + ": " +
+                     formatValueInner(snapshot[i].second, true, active, depth + 1);
             }
+            active.erase(held.get());
             return s + "}";
         } else if constexpr (std::is_same_v<T, ObjectRef>) {
             if (!held) return "nil";
+            if (!active.insert(held.get()).second) return held->className + " { <cyclic> }";
+            if (depth + 1 > kMaxValueNestingDepth) { active.erase(held.get()); return held->className + " { <...> }"; }
             std::string s = held->className + " { ";
             bool first = true;
             if (held->runtimeType && held->runtimeType->isDataType) {
@@ -103,7 +120,7 @@ std::string formatValue(const Value& v, bool quoteStrings) {
                     if (std::holds_alternative<std::string>(it->second)) {
                         s += "\"" + escapeRecordString(std::get<std::string>(it->second)) + "\"";
                     } else {
-                        s += formatValue(it->second, true);
+                        s += formatValueInner(it->second, true, active, depth + 1);
                     }
                     first = false;
                 }
@@ -111,11 +128,11 @@ std::string formatValue(const Value& v, bool quoteStrings) {
                 s = held->className + "{";
                 for (const auto& [k, fieldValue] : held->fields) {
                     if (!first) s += ", ";
-                    s += k + ": " + formatValue(fieldValue, true);
+                    s += k + ": " + formatValueInner(fieldValue, true, active, depth + 1);
                     first = false;
                 }
             }
-            if (held->runtimeType && held->runtimeType->isDataType) return s + "}";
+            active.erase(held.get());
             return s + "}";
         } else if constexpr (std::is_same_v<T, ClosureRef>) {
             return "<func>";
@@ -136,7 +153,8 @@ std::string formatValue(const Value& v, bool quoteStrings) {
 } // namespace
 
 std::string valueToString(const Value& v) {
-    return formatValue(v, false);
+    std::unordered_set<const void*> active;
+    return formatValueInner(v, false, active, 0);
 }
 
 bool isTruthy(const Value& v) {
@@ -155,7 +173,7 @@ bool isTruthy(const Value& v) {
         } else if constexpr (std::is_same_v<T, ListRef>) {
             return held && !held->items.empty();
         } else if constexpr (std::is_same_v<T, MapRef>) {
-            return held && !held->entries.empty();
+            return held && held->size() != 0;
         } else if constexpr (std::is_same_v<T, ObjectRef>) {
             return held != nullptr; // non-nil object is truthy
         } else if constexpr (std::is_same_v<T, ClosureRef>) {
@@ -247,10 +265,19 @@ struct ObjectPairHash {
 };
 
 bool recordValuesEqual(const ObjectRef& a, const ObjectRef& b,
-                       std::unordered_set<std::pair<const ObjectBox*, const ObjectBox*>, ObjectPairHash>& seen) {
+                       std::unordered_set<std::pair<const ObjectBox*, const ObjectBox*>, ObjectPairHash>& seen,
+                       int depth) {
     if (a == b) return true;
     if (!a || !b) return false;
     if (!a->runtimeType || !b->runtimeType || !a->runtimeType->isDataType || !b->runtimeType->isDataType || a->className != b->className) return false;
+    // Cycles are cut off by `seen`, but depth is not: a 100k-long record
+    // chain compared with == is a stack overflow without this budget. Like
+    // Python's RecursionError on deep comparison, this is a clean error the
+    // program can catch, not a crash.
+    if (depth > kMaxValueNestingDepth) {
+        throw std::runtime_error("structural comparison nesting exceeds the maximum depth of " +
+                                 std::to_string(kMaxValueNestingDepth));
+    }
 
     const auto key = std::make_pair(a.get(), b.get());
     if (!seen.insert(key).second) return true;
@@ -264,7 +291,7 @@ bool recordValuesEqual(const ObjectRef& a, const ObjectRef& b,
             // fields preserve special-value semantics such as NaN != NaN.
             if (!valuesEqual(av, it->second)) return false;
         } else if (std::holds_alternative<ObjectRef>(av) && std::holds_alternative<ObjectRef>(it->second)) {
-            if (!recordValuesEqual(std::get<ObjectRef>(av), std::get<ObjectRef>(it->second), seen)) return false;
+            if (!recordValuesEqual(std::get<ObjectRef>(av), std::get<ObjectRef>(it->second), seen, depth + 1)) return false;
         } else if (!valuesEqual(av, it->second)) {
             return false;
         }
@@ -278,24 +305,30 @@ std::size_t hashCombineValue(std::size_t seed, std::size_t value) noexcept {
     return seed ^ (value + static_cast<std::size_t>(0x9e3779b97f4a7c15ULL) + (seed << 6) + (seed >> 2));
 }
 
-std::size_t valueHashImpl(const Value& v, std::unordered_set<const ObjectBox*>& seen);
+std::size_t valueHashImpl(const Value& v, std::unordered_set<const ObjectBox*>& seen, int depth);
 
-std::size_t recordHash(const ObjectRef& obj, std::unordered_set<const ObjectBox*>& seen) {
+std::size_t recordHash(const ObjectRef& obj, std::unordered_set<const ObjectBox*>& seen, int depth) {
     if (!obj) return 0;
     if (!seen.insert(obj.get()).second) return std::hash<const ObjectBox*>{}(obj.get());
+    // Same budget as structural comparison: hashing a 100k-deep record
+    // chain must be a catchable error, not a stack overflow.
+    if (depth > kMaxValueNestingDepth) {
+        throw std::runtime_error("structural hash nesting exceeds the maximum depth of " +
+                                 std::to_string(kMaxValueNestingDepth));
+    }
     std::size_t seed = std::hash<std::string>{}(obj->className);
     if (obj->runtimeType && obj->runtimeType->isDataType) {
         for (const auto& field : obj->runtimeType->fields) {
             auto it = obj->fields.find(field.name);
             if (it == obj->fields.end()) continue;
             seed = hashCombineValue(seed, std::hash<std::string>{}(field.name));
-            seed = hashCombineValue(seed, valueHashImpl(it->second, seen));
+            seed = hashCombineValue(seed, valueHashImpl(it->second, seen, depth + 1));
         }
     }
     return seed;
 }
 
-std::size_t valueHashImpl(const Value& v, std::unordered_set<const ObjectBox*>& seen) {
+std::size_t valueHashImpl(const Value& v, std::unordered_set<const ObjectBox*>& seen, int depth) {
     return std::visit([&](const auto& held) -> std::size_t {
         using T = std::decay_t<decltype(held)>;
         if constexpr (std::is_same_v<T, std::monostate>) return 0x11;
@@ -312,7 +345,7 @@ std::size_t valueHashImpl(const Value& v, std::unordered_set<const ObjectBox*>& 
             return hashCombineValue(0x14, std::hash<double>{}(held));
         } else if constexpr (std::is_same_v<T, std::string>) return hashCombineValue(0x15, std::hash<std::string>{}(held));
         else if constexpr (std::is_same_v<T, ObjectRef>) {
-            if (held && held->runtimeType && held->runtimeType->isDataType) return hashCombineValue(0x18, recordHash(held, seen));
+            if (held && held->runtimeType && held->runtimeType->isDataType) return hashCombineValue(0x18, recordHash(held, seen, depth));
             return hashCombineValue(0x18, std::hash<const ObjectBox*>{}(held.get()));
         } else if constexpr (std::is_same_v<T, ListRef>) return hashCombineValue(0x16, std::hash<const ListBox*>{}(held.get()));
         else if constexpr (std::is_same_v<T, MapRef>) return hashCombineValue(0x17, std::hash<const MapBox*>{}(held.get()));
@@ -329,7 +362,7 @@ std::size_t valueHashImpl(const Value& v, std::unordered_set<const ObjectBox*>& 
 
 std::int64_t valueHashCode(const Value& v) {
     std::unordered_set<const ObjectBox*> seen;
-    return static_cast<std::int64_t>(valueHashImpl(v, seen) & 0x7fffffffffffffffULL);
+    return static_cast<std::int64_t>(valueHashImpl(v, seen, 0) & 0x7fffffffffffffffULL);
 }
 
 bool valuesEqual(const Value& a, const Value& b) {
@@ -350,7 +383,7 @@ bool valuesEqual(const Value& a, const Value& b) {
         const auto& bo = std::get<ObjectRef>(b);
         if (ao && bo && ao->runtimeType && bo->runtimeType && ao->runtimeType->isDataType && bo->runtimeType->isDataType) {
             std::unordered_set<std::pair<const ObjectBox*, const ObjectBox*>, ObjectPairHash> seen;
-            return recordValuesEqual(ao, bo, seen);
+            return recordValuesEqual(ao, bo, seen, 0);
         }
         return ao == bo;
     }
@@ -359,11 +392,49 @@ bool valuesEqual(const Value& a, const Value& b) {
 }
 
 std::size_t MapBox::findEntry(const Value& key) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    return findEntryLocked(key);
+}
+
+std::optional<Value> MapBox::tryGetEntry(const Value& key) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    const std::size_t pos = findEntryLocked(key);
+    if (pos == kNoEntry) return std::nullopt;
+    return entries[pos].second;
+}
+
+void MapBox::setEntry(const Value& key, Value value) {
+    std::lock_guard<std::mutex> lock(mutex);
+    const std::size_t pos = findEntryLocked(key);
+    if (pos != kNoEntry) {
+        // In-place value update: keys keep their positions, so the lookup
+        // index stays valid.
+        entries[pos].second = std::move(value);
+        return;
+    }
+    entries.emplace_back(key, std::move(value));
+    noteAppendedKeyLocked(key);
+}
+
+bool MapBox::removeEntry(const Value& key) {
+    std::lock_guard<std::mutex> lock(mutex);
+    const std::size_t pos = findEntryLocked(key);
+    if (pos == kNoEntry) return false;
+    entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(pos));
+    invalidateKeyIndexLocked();
+    return true;
+}
+
+std::vector<std::pair<Value, Value>> MapBox::snapshotEntries() const {
+    std::lock_guard<std::mutex> lock(mutex);
+    return entries;
+}
+
+std::size_t MapBox::findEntryLocked(const Value& key) const {
     // String keys are the overwhelmingly common case and can never equal a
     // non-string key (see the comment on stringKeyIndex), so they may use
     // the hash index once the map is big enough for it to pay for itself.
     if (const auto* needle = std::get_if<std::string>(&key); needle && entries.size() >= 8) {
-        std::lock_guard<std::mutex> lock(keyIndexMutex);
         if (!stringKeyIndexValid) {
             stringKeyIndex.clear();
             stringKeyIndex.reserve(entries.size());

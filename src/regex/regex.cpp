@@ -99,6 +99,8 @@ private:
     const std::string& source_;
     std::size_t pos_{0};
     int captureCount_{0};
+    int depth_{0};
+    static constexpr int kMaxPatternDepth = 500;
     std::vector<std::string> captureNames_;
 
     bool atEnd() const { return pos_ >= source_.size(); }
@@ -116,6 +118,16 @@ private:
     }
 
     std::shared_ptr<Node> parseAlternation() {
+        // Single choke point for all pattern nesting (groups, lookarounds
+        // and captures all recurse back through here): without a budget,
+        // `((((...` overflows the C++ stack (SIGSEGV) instead of failing to
+        // compile. RAII-scoped: fail() throws and the Parser is discarded.
+        struct DepthGuard {
+            int& depth;
+            ~DepthGuard() { --depth; }
+        };
+        if (++depth_ > kMaxPatternDepth) fail("pattern nesting exceeds the maximum depth");
+        DepthGuard guard{depth_};
         auto left = parseSequence();
         if (peek() != '|') return left;
         auto n = make(NodeKind::Alternation);

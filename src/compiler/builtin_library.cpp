@@ -1558,7 +1558,15 @@ class Math {
     }
 
     public static func hypot(double a, double b): double {
-        return Math.sqrt(a * a + b * b)
+        // Scaled so huge (or tiny) inputs cannot overflow (or underflow)
+        // the intermediate squares: with m = max(|a|, |b|), the scaled
+        // squares are at most 1, so only a genuinely overflowing result -
+        // a hypotenuse past ~1.8e308 - raises.
+        var m = Math.max(Math.abs(a), Math.abs(b))
+        if (m == 0.0) { return 0.0 }
+        var x = a / m
+        var y = b / m
+        return m * Math.sqrt(x * x + y * y)
     }
 }
 )ZL";

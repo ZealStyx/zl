@@ -62,7 +62,7 @@ ZlType TypeResolver::resolveType(const TypeAnnotation& annotation,
     if (n == "nil" || n == "null") return ZlType::NIL;
     if (n == "int") return ZlType::INT;
     if (n == "double") return ZlType::DOUBLE;
-    if (n == "float") return ZlType::DOUBLE;
+    if (n == "float" || n == "decimal") return ZlType::DOUBLE;
     if (n == "string") return ZlType::STRING;
     if (n == "bool") return ZlType::BOOL;
     if (n == "unknown") return ZlType::UNKNOWN;
@@ -162,7 +162,7 @@ ZlType TypeResolver::resolveType(const TypeAnnotation& annotation,
                 }
                 allOwnParams = false;
                 if (arg.name == "int") deferred.args.push_back({ZlType::INT, ""});
-                else if (arg.name == "double" || arg.name == "float") deferred.args.push_back({ZlType::DOUBLE, ""});
+                else if (arg.name == "double" || arg.name == "float" || arg.name == "decimal") deferred.args.push_back({ZlType::DOUBLE, ""});
                 else if (arg.name == "string") deferred.args.push_back({ZlType::STRING, ""});
                 else if (arg.name == "bool") deferred.args.push_back({ZlType::BOOL, ""});
                 else deferred.args.push_back({ZlType::OBJECT, arg.name});
@@ -304,6 +304,19 @@ std::string TypeResolver::instantiateGenericClass(const std::string& genericName
         if (type == ZlType::OBJECT && !name.args.empty()) {
             const auto* shape = semanticModel_.findClass(name.name);
             if (shape && !shape->typeParams.empty()) {
+                // Fast path: this exact instantiation already has a shape.
+                // Re-resolving the arguments would recursively descend the
+                // whole nested type and rebuild/hash a deep structural
+                // identity at every level - per member, per nesting level,
+                // which is cubic on types like List<List<...>> (150 levels
+                // took 5s, 500 hung). The rendered name is canonical (the
+                // same Base<a,b> spelling instantiateGenericClass keys on),
+                // so a by-name hit means the slow path below could only
+                // rediscover the identical identity. On a miss, fall through
+                // to the full first-time instantiation.
+                if (genericInstantiationByName_.count(rendered)) {
+                    return {type, rendered};
+                }
                 std::vector<ResolvedTypeArg> args;
                 for (const auto& arg : name.args) args.push_back(resolveCanonicalType(arg));
                 return {type, instantiateGenericClass(name.name, args, line)};

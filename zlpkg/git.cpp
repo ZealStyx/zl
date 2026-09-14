@@ -70,12 +70,21 @@ bool isAllowedGitRef(const std::string& ref) {
     return true;
 }
 
-// Clones `url` (and optionally checks out `ref`) into a scratch directory,
-// resolves HEAD's full sha, and returns {sha, scratchDir}. Caller is
-// responsible for moving/discarding scratchDir.
-struct RawClone { std::string sha; std::filesystem::path dir; };
+// A pinned commit sha: lowercase hex, 4..64 chars (git's own loosest shape
+// for an unambiguous abbreviation through a full sha-1). Anything else in
+// a sha position is a corrupt/tampered pin, never a commit - and since
+// shas become cache directory names, this also keeps path metacharacters
+// like '/' and ".." out of the cache path by construction.
+bool isPinnedSha(const std::string& sha) {
+    if (sha.size() < 4 || sha.size() > 64) return false;
+    for (unsigned char c : sha) {
+        const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        if (!hex) return false;
+    }
+    return true;
+}
 
-RawClone rawClone(const std::string& url, const std::string& ref, const std::filesystem::path& cacheRoot) {
+void validateGitRemote(const std::string& url, const std::string& ref) {
     if (!isAllowedGitUrl(url)) {
         throw GitError("git dependency URL '" + url + "' is not allowed: only https://, http://, "
                        "ssh://, git://, file:// and user@host:path URLs are accepted "
@@ -85,6 +94,15 @@ RawClone rawClone(const std::string& url, const std::string& ref, const std::fil
         throw GitError("git dependency ref '" + ref + "' is not allowed: refs must not start with '-' "
                        "or contain whitespace/control characters");
     }
+}
+
+// Clones `url` (and optionally checks out `ref`) into a scratch directory,
+// resolves HEAD's full sha, and returns {sha, scratchDir}. Caller is
+// responsible for moving/discarding scratchDir.
+struct RawClone { std::string sha; std::filesystem::path dir; };
+
+RawClone rawClone(const std::string& url, const std::string& ref, const std::filesystem::path& cacheRoot) {
+    validateGitRemote(url, ref);
 
     std::filesystem::path tmpDir = cacheRoot / ".tmp" / ("clone-" + randomSuffix());
     std::error_code ec;
@@ -114,7 +132,9 @@ RawClone rawClone(const std::string& url, const std::string& ref, const std::fil
 }
 
 // Moves scratchDir into place at cacheRoot/depName/sha, or discards it if
-// that exact sha is already cached from a previous fetch.
+// that exact sha is already cached from a previous fetch - but only when
+// the cached entry verifies as a pristine checkout of that sha. A stale,
+// half-written, or tampered entry is replaced by the fresh clone.
 std::filesystem::path settle(const std::filesystem::path& scratchDir, const std::filesystem::path& cacheRoot,
                               const std::string& depName, const std::string& sha) {
     // Defense in depth: depName reaches a filesystem path here, so it must
@@ -124,18 +144,24 @@ std::filesystem::path settle(const std::filesystem::path& scratchDir, const std:
     }
     std::filesystem::path finalDir = cacheRoot / depName / sha;
     // The name is validated, so `finalDir` is cacheRoot/<name>/<sha>; assert
-    // that rather than trusting the path arithmetic.
+    // that rather than trusting the path arithmetic. The trailing separator
+    // matters: a bare prefix check would accept "/cache-evil" as inside
+    // "/cache".
     std::error_code canonEc;
     const std::filesystem::path cacheAbs = std::filesystem::weakly_canonical(cacheRoot, canonEc);
     const std::filesystem::path finalAbs = std::filesystem::weakly_canonical(finalDir.parent_path(), canonEc);
-    if (!canonEc && !finalAbs.string().empty() &&
-        finalAbs.string().rfind(cacheAbs.string(), 0) != 0) {
+    const std::string prefix = cacheAbs.string() + std::filesystem::path::preferred_separator;
+    if (!canonEc && !finalAbs.string().empty() && finalAbs != cacheAbs &&
+        finalAbs.string().rfind(prefix, 0) != 0) {
         throw GitError("dependency cache path '" + finalDir.string() + "' escapes the cache root");
     }
     std::error_code ec;
     if (std::filesystem::exists(finalDir)) {
-        std::filesystem::remove_all(scratchDir, ec);
-        return finalDir;
+        if (verifyGitCache(finalDir, sha)) {
+            std::filesystem::remove_all(scratchDir, ec);
+            return finalDir;
+        }
+        std::filesystem::remove_all(finalDir, ec);
     }
     std::filesystem::create_directories(finalDir.parent_path(), ec);
     std::filesystem::rename(scratchDir, finalDir, ec);
@@ -154,32 +180,33 @@ std::filesystem::path settle(const std::filesystem::path& scratchDir, const std:
 
 GitFetchResult fetchGit(const std::string& url, const std::string& ref, const std::filesystem::path& cacheRoot,
                          const std::string& depName) {
+    validateGitRemote(url, ref);
+    // Pinned sha + verified cache: no network needed. The rev-parse check
+    // is what makes this sound - a cache entry is trusted only when HEAD
+    // is exactly the requested commit, so a substituted or half-written
+    // directory falls through to a fresh clone below.
+    if (isPinnedSha(ref) && isValidPackageName(depName)) {
+        std::filesystem::path cached = cacheRoot / depName / ref;
+        if (verifyGitCache(cached, ref)) return {ref, cached};
+    }
     RawClone clone = rawClone(url, ref, cacheRoot);
     std::filesystem::path finalDir = settle(clone.dir, cacheRoot, depName, clone.sha);
     return {clone.sha, finalDir};
 }
 
-GitFetchResult restoreGitPin(const std::string& url, const std::string& sha, const std::filesystem::path& cacheRoot,
-                              const std::string& depName) {
-    // The name comes back out of zlpkg.lock here; validate it the same way
-    // as at manifest-parse time so a hand-edited lock can't aim the cache
-    // path outside .zlpkg/.
-    if (!isValidPackageName(depName)) {
-        throw GitError("locked dependency name '" + depName + "' is not a valid package name - regenerate zlpkg.lock");
-    }
-    std::filesystem::path finalDir = cacheRoot / depName / sha;
-    if (std::filesystem::exists(finalDir)) return {sha, finalDir};
-    // Not cached (or cache was cleared) - re-clone and check out the exact
-    // pinned sha, which reproduces the same content deterministically.
-    RawClone clone = rawClone(url, sha, cacheRoot);
-    if (clone.sha != sha) {
-        // Extremely unlikely (would mean the pinned sha no longer exists,
-        // and checkout somehow succeeded on something else), but worth a
-        // clear error rather than silently drifting.
-        throw GitError("expected to restore pinned commit " + sha + " for '" + url + "' but got " + clone.sha);
-    }
-    std::filesystem::path finalDir2 = settle(clone.dir, cacheRoot, depName, clone.sha);
-    return {clone.sha, finalDir2};
+bool verifyGitCache(const std::filesystem::path& dir, const std::string& sha) {
+    if (!isPinnedSha(sha)) return false;
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dir, ec) || ec) return false;
+    const auto rev = runCaptured({"git", "-C", dir.string(), "rev-parse", "HEAD"});
+    if (rev.exitCode != 0 || trim(rev.output) != sha) return false;
+    // HEAD alone is not enough: the worktree may hold uncommitted edits
+    // (or dropped-in files) on top of the right commit. A cache entry is
+    // a pristine clone, so any status output at all fails verification.
+    const auto status =
+        runCaptured({"git", "-C", dir.string(), "status", "--porcelain=v1", "--untracked-files=all"});
+    if (status.exitCode != 0) return false;
+    return trim(status.output).empty();
 }
 
 } // namespace zlpkg

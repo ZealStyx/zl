@@ -1,0 +1,10 @@
+import leaf.Leaf
+
+class TransitiveAdded {
+    func main(): void {
+        if (Leaf.value() != 99) {
+            throw new Exception("wrong leaf: expected 99, got " + Leaf.value())
+        }
+        log("ok")
+    }
+}

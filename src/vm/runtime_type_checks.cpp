@@ -5,15 +5,49 @@
 #include <algorithm>
 
 namespace zl {
+// Forward declaration: the field-default rule below asks whether nil
+// satisfies a union, which is the assignability check defined later in this
+// translation unit.
+static bool runtimeAssignableToSpec(const Value& value, const TypeName& spec, const Chunk* chunk);
+
+// A bare `unknown`/`object` type argument is dynamic: it accepts any actual
+// type in covariant positions (a Task<T> payload, a func return). The guard
+// requires a bare name so a hypothetical `unknown<...>` never wildcards.
+static bool isDynamicTypeName(const TypeName& type) {
+    return (type.name == "unknown" || type.name == "object") && type.args.empty() && type.unionMembers.empty();
+}
+
 // Default value for a declared field type: the value types get their type's
 // zero; everything with reference semantics stays nil.
-static Value defaultFieldValue(const std::string& typeName) {
-    const std::string base = typeName.substr(0, typeName.find('<'));
+static Value defaultFieldSpecValue(const TypeName& spec, const Chunk& chunk) {
+    // A union field keeps the historical nil default wherever the union
+    // accepts nil (e.g. `int|string`, nilable through string); otherwise it
+    // takes its first member's zero. Either way the default satisfies the
+    // union, so a constructor that never assigns the field still builds a
+    // well-typed object instead of failing the post-construction assertion.
+    if (!spec.unionMembers.empty()) {
+        if (runtimeAssignableToSpec(Value{}, spec, &chunk)) return Value{};
+        return defaultFieldSpecValue(spec.unionMembers.front(), chunk);
+    }
+    const std::string& base = spec.name;
     if (base == "int") return std::int64_t{0};
     if (base == "double" || base == "float" || base == "decimal") return 0.0;
     if (base == "bool") return false;
     if (base == "string") return std::string{};
+    // Enum values are member-name strings and nil is not a valid enum, so an
+    // unassigned enum field defaults to the first member - the same way an
+    // unassigned int field reads 0. Without this, any class with an enum
+    // field its constructor never assigns cannot be constructed at all: the
+    // nil default fails the field assertion in initializeObjectType.
+    const auto meta = chunk.classReflection.find(base);
+    if (meta != chunk.classReflection.end() && meta->second.isEnumType && !meta->second.enumMembers.empty()) {
+        return Value{meta->second.enumMembers.front()};
+    }
     return Value{}; // objects, collections, funcs, type parameters, unknown
+}
+
+static Value defaultFieldValue(const std::string& typeName, const Chunk& chunk) {
+    return defaultFieldSpecValue(parseTypeName(typeName), chunk);
 }
 
 static RuntimeTypeBindings bindTypeParameters(const ClassReflectionInfo& info, const std::string& typeName) {
@@ -77,7 +111,7 @@ void initializeObjectType(Value& value, const std::string& typeName, const Chunk
             if ((*object)->fields.find(field.name) == (*object)->fields.end()) {
                 (*object)->fields.emplace(
                     field.name,
-                    defaultFieldValue(runtimeFieldType(chunk, spec.name, field.name, object->get())));
+                    defaultFieldValue(runtimeFieldType(chunk, spec.name, field.name, object->get()), chunk));
             }
         }
         RuntimeTypeCheck fields(&chunk);
@@ -171,6 +205,12 @@ bool reflectiveMatchesSpec(const Value& value, const TypeName& spec, const Chunk
             const auto actual = parseTypeName((*closure)->parameterTypeNames[i]);
             if (!typeNamesEqual(actual, spec.args[i])) return false;
         }
+        // A dynamic ("unknown"/"object") expected return accepts any actual
+        // return: the caller promised to handle whatever comes back. Parameter
+        // positions stay exactly equal (invariance is what keeps a
+        // func(unknown) expectation from accepting a func(int) value whose
+        // body would then receive values it cannot handle).
+        if (isDynamicTypeName(spec.args.back())) return true;
         std::string returnType = (*closure)->returnTypeName.empty() ? "void" : (*closure)->returnTypeName;
         if ((*closure)->isAsync) returnType = "Task<" + returnType + ">";
         const auto actualReturn = parseTypeName(returnType);
@@ -186,6 +226,12 @@ bool reflectiveMatchesSpec(const Value& value, const TypeName& spec, const Chunk
         // their concrete T at runtime. Preserve the historical permissive
         // outer-Task check when no concrete value type metadata is available.
         if (actualName.empty()) return true;
+        // A dynamic ("unknown"/"object") expectation matches any concrete
+        // payload: Task<unknown> is how untyped task handles are spelled, and
+        // requiring the runtime tag to literally equal "unknown" would make
+        // every concretely-tagged task (Task<void>, Task<int>, ...) fail to
+        // match it. Concrete expectations still compare exactly below.
+        if (isDynamicTypeName(spec.args.front())) return true;
         const auto actual = parseTypeName(actualName);
         return typeNamesEqual(actual, spec.args.front());
     }
