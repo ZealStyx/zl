@@ -849,6 +849,13 @@ std::optional<Value> tryFoldBinaryLiterals(const BinaryExpr* node) {
                 case TokenType::NEQ: return Value{x != y};
                 default: break;
             }
+            // An int/int pair that failed int folding above (overflow,
+            // MIN/-1) must raise at runtime. It must NOT fall through to
+            // double folding below: stod parses int spellings fine, which
+            // would silently fold `MAX + 1` into a double constant -
+            // changing both the static type and the value, and swallowing
+            // the overflow error the runtime would have raised.
+            return std::nullopt;
         }
 
         const auto leftDouble = doubleValue(left);

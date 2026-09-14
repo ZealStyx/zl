@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -93,7 +94,18 @@ struct Constant {
         switch (a.kind) {
             case ConstKind::Bool: return a.boolValue == b.boolValue;
             case ConstKind::Int: return a.intValue == b.intValue;
-            case ConstKind::Double: return a.doubleValue == b.doubleValue;
+            case ConstKind::Double: {
+                // Bitwise: -0.0 and +0.0 are observably different values (log
+                // prints "-0" vs "0"; 1.0/x divides with a different sign), so
+                // they must not share a constant-pool slot. (IEEE == treats
+                // them as equal, which is the language's RUNTIME equality for
+                // `==`, not pool identity.)
+                std::uint64_t aBits = 0, bBits = 0;
+                static_assert(sizeof(aBits) == sizeof(a.doubleValue));
+                std::memcpy(&aBits, &a.doubleValue, sizeof(aBits));
+                std::memcpy(&bBits, &b.doubleValue, sizeof(bBits));
+                return aBits == bBits;
+            }
             case ConstKind::String: return a.stringValue == b.stringValue;
             case ConstKind::Nil: return true;
             case ConstKind::EnumMember:
@@ -106,8 +118,8 @@ struct Constant {
 // Hash consistent with Constant::operator==, for the module's constant index.
 // A linear scan here made interning O(n) per literal, so compiling a large
 // literal (e.g. a 200k-element list, which interns one int per index) was
-// O(n^2) and effectively hung. Doubles normalize -0.0 to +0.0 because the
-// equality above treats them as equal.
+// O(n^2) and effectively hung. Doubles hash by bit pattern, matching the
+// bitwise equality above (-0.0 and +0.0 get distinct slots).
 struct ConstantHash {
     [[nodiscard]] std::size_t operator()(const Constant& c) const noexcept {
         std::size_t h = static_cast<std::size_t>(c.kind);
@@ -118,9 +130,10 @@ struct ConstantHash {
             case ConstKind::Bool: mix(c.boolValue ? 1u : 0u); break;
             case ConstKind::Int: mix(std::hash<std::int64_t>{}(c.intValue)); break;
             case ConstKind::Double: {
-                double v = c.doubleValue;
-                if (v == 0.0) v = 0.0; // normalize -0.0
-                mix(std::hash<double>{}(v));
+                std::uint64_t bits = 0;
+                static_assert(sizeof(bits) == sizeof(c.doubleValue));
+                std::memcpy(&bits, &c.doubleValue, sizeof(bits));
+                mix(std::hash<std::uint64_t>{}(bits));
                 break;
             }
             case ConstKind::String: mix(std::hash<std::string>{}(c.stringValue)); break;

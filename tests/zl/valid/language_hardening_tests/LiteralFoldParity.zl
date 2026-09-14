@@ -1,0 +1,102 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - LiteralFoldParity
+//
+// Every constant folder (AST, MIR, and the native emitter's IR optimizer)
+// must agree with runtime checked arithmetic: an overflowing integer literal
+// expression raises a catchable error, it never folds into a wider type or
+// a wrapped value. And -0.0 is a distinct value from +0.0 everywhere: the
+// constant pools must not conflate them (log prints "-0" vs "0").
+//
+// This file is self-checking under every backend: tests/backend_fold_parity.py
+// runs it under MIR, AST, unoptimized MIR, and --backend native and requires
+// identical "ok" output from all four.
+// ============================================================================
+
+import zl.text.Text
+
+class LiteralFoldParity {
+    func check(bool cond, string what): void {
+        if (!cond) {
+            throw new Exception("LiteralFoldParity failed: " + what)
+        }
+    }
+
+    func expectOverflow(int id, func action): void {
+        var raised = false
+        var message = ""
+        try {
+            action()
+        } catch Exception e {
+            raised = true
+            message = e.message
+        }
+        if (!raised) {
+            throw new Exception("LiteralFoldParity failed: case " + id + " did not raise")
+        }
+        if (!Text.contains(message, "overflow")) {
+            throw new Exception("LiteralFoldParity failed: case " + id + " wrong error: " + message)
+        }
+    }
+
+    func expectError(string want, int id, func action): void {
+        var raised = false
+        var message = ""
+        try {
+            action()
+        } catch Exception e {
+            raised = true
+            message = e.message
+        }
+        if (!raised) {
+            throw new Exception("LiteralFoldParity failed: case " + id + " did not raise")
+        }
+        if (message != want) {
+            throw new Exception("LiteralFoldParity failed: case " + id + " got '" + message + "', wanted '" + want + "'")
+        }
+    }
+
+    func main(): void {
+        var self = new LiteralFoldParity()
+
+        // Overflowing PURE-LITERAL int expressions must raise at runtime, not
+        // fold to a double (the AST folder used to return -9.22...e+18 here,
+        // which also masked whichever fault the other operand carried).
+        self.expectOverflow(1, func() => 9223372036854775807 + 1)
+        self.expectOverflow(2, func() => 9223372036854775807 + 10)
+        self.expectOverflow(3, func() => (-9223372036854775808) - 1)
+        self.expectOverflow(4, func() => (-9223372036854775808) - 7)
+        self.expectOverflow(5, func() => 9223372036854775807 * 2)
+        self.expectOverflow(6, func() => (-9223372036854775808) * 2)
+        self.expectOverflow(7, func() => (-9223372036854775808) / (-1))
+        self.expectOverflow(8, func() => 10 ^^ 19)
+        self.expectOverflow(9, func() => 2 ^^ 63)
+        self.expectOverflow(10, func() => 0 - (-9223372036854775808))
+        // MIN % -1 is exact (== 0) and must NOT raise.
+        self.check((-9223372036854775808) % (-1) == 0, "MIN % -1")
+
+        // Literal divide/modulo by zero and out-of-range shifts raise too.
+        self.expectError("division by zero", 11, func() => 1 / 0)
+        self.expectError("modulo by zero", 12, func() => 1 % 0)
+        self.expectError("division by zero", 13, func() => 1.0 / 0.0)
+        self.expectError("modulo by zero", 14, func() => 1.0 % 0.0)
+        self.expectError("shift count must be in the range 0..63", 15, func() => 1 << 64)
+        self.expectError("shift count must be in the range 0..63", 16, func() => 1 << (-1))
+        self.expectError("shift count must be in the range 0..63", 17, func() => 1 >>> 100)
+
+        // -0.0 survives constant folding and pooling as its own value: it
+        // prints "-0" while +0.0 prints "0", on every backend.
+        self.check(("" + (-0.0)) == "-0", "neg-zero literal prints")
+        self.check(("" + 0.0) == "0", "pos-zero literal prints")
+        self.check(("" + (0.0 * (-10.0))) == "-0", "folded mul keeps sign")
+        self.check(("" + (0.0 / (-1.2))) == "-0", "folded div keeps sign")
+        self.check(("" + ((-0.0) + (-0.0))) == "-0", "neg + neg")
+        self.check(("" + (0.0 + (-0.0))) == "0", "pos + neg")
+        // Runtime equality stays IEEE: the zeros compare equal.
+        self.check((-0.0) == 0.0, "zeros equal")
+        self.check(!((-0.0) != 0.0), "zeros not unequal")
+        self.check((-0.0) <= 0.0, "zeros lte")
+        self.check(!((-0.0) < 0.0), "zeros not lt")
+
+        log("ok")
+    }
+}

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <atomic>
@@ -92,11 +93,11 @@ using Value = std::variant<std::monostate, std::int64_t, double, std::string,
 
 // Hash over Value for pooled lookup (see Chunk::constantIndex). Primitive
 // alternatives hash by value; every other alternative hashes to a shared
-// bucket and lets operator== decide. That keeps the hash consistent (equal
+// bucket and lets the equality decide. That keeps the hash consistent (equal
 // values always agree) without baking container/pointer identity into it,
 // and the pool only ever holds primitives in practice, so the shared
-// bucket never sits on a hot path. -0.0 normalizes to +0.0 because the
-// variant equality treats them as equal.
+// bucket never sits on a hot path. Doubles hash by bit pattern, matching
+// ValueEqual below (-0.0 and +0.0 get distinct slots).
 struct ValueHash {
     [[nodiscard]] std::size_t operator()(const Value& v) const {
         return std::visit(
@@ -107,9 +108,10 @@ struct ValueHash {
                 } else if constexpr (std::is_same_v<T, std::int64_t>) {
                     return std::hash<std::int64_t>{}(alt);
                 } else if constexpr (std::is_same_v<T, double>) {
-                    double d = alt;
-                    if (d == 0.0) d = 0.0; // normalize -0.0
-                    return std::hash<double>{}(d);
+                    std::uint64_t bits = 0;
+                    static_assert(sizeof(bits) == sizeof(alt));
+                    std::memcpy(&bits, &alt, sizeof(bits));
+                    return std::hash<std::uint64_t>{}(bits);
                 } else if constexpr (std::is_same_v<T, std::string>) {
                     return std::hash<std::string>{}(alt);
                 } else if constexpr (std::is_same_v<T, bool>) {
@@ -119,6 +121,27 @@ struct ValueHash {
                 }
             },
             v);
+    }
+};
+
+// Pool identity for Chunk::constantIndex. Variant equality would do, except
+// that it treats -0.0 and +0.0 as equal while the language observes the
+// difference (log prints "-0" vs "0"; division by each takes a different
+// sign), so doubles compare by bit pattern here. (The language's runtime
+// `==` stays IEEE; this is only slot identity.)
+struct ValueEqual {
+    [[nodiscard]] bool operator()(const Value& a, const Value& b) const {
+        if (a.index() != b.index()) return false;
+        if (const auto* x = std::get_if<double>(&a)) {
+            const auto* y = std::get_if<double>(&b);
+            if (y == nullptr) return false;
+            std::uint64_t xBits = 0, yBits = 0;
+            static_assert(sizeof(xBits) == sizeof(*x));
+            std::memcpy(&xBits, x, sizeof(xBits));
+            std::memcpy(&yBits, y, sizeof(yBits));
+            return xBits == yBits;
+        }
+        return a == b;
     }
 };
 

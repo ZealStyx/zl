@@ -211,7 +211,7 @@ struct Chunk {
     // are append-only and never reused, so entries stay valid for the
     // chunk's lifetime. Anything that bypasses addConstant/addName to touch
     // the vectors directly must update these maps to match.
-    std::unordered_map<Value, std::size_t, ValueHash> constantIndex;
+    std::unordered_map<Value, std::size_t, ValueHash, ValueEqual> constantIndex;
     std::unordered_map<std::string, std::size_t> nameIndex;
     std::vector<FunctionInfo> functions;
     // class name -> vtable indexed by compile-time dispatch slot. Entries

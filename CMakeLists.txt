@@ -540,6 +540,15 @@ if(BUILD_TESTING)
             ${CMAKE_SOURCE_DIR}/tests/pipeline_report_cli.py $<TARGET_FILE:zl_language>)
         set_tests_properties(pipeline-report PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endif()
+    # Backend fold parity: the self-checking LiteralFoldParity fixture must
+    # print "ok" under the MIR, AST, unoptimized-MIR, and native configs, so
+    # no constant folder or pool can drift from checked runtime arithmetic.
+    find_program(ZL_PARITY_PYTHON NAMES python3)
+    if(ZL_PARITY_PYTHON)
+        add_test(NAME backend-fold-parity COMMAND ${ZL_PARITY_PYTHON}
+            ${CMAKE_SOURCE_DIR}/tests/backend_fold_parity.py $<TARGET_FILE:zl_language>)
+        set_tests_properties(backend-fold-parity PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endif()
 endif()
 
 # --- Platform link-requirement guard ----------------------------------------
