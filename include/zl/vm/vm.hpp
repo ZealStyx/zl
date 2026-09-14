@@ -42,6 +42,10 @@ public:
     Value invokeReflectiveFunction(const Value& functionValue, const Value& argsList);
     Value invokeTaskClosure(const ClosureRef& closure);
     const Chunk* activeChunk() const noexcept { return activeChunk_; }
+    // Ready async frames in this VM's scheduler. Channel blocking uses this
+    // (plus the alive-worker count) to detect that nobody can ever unblock a
+    // send/receive and raise a deadlock error instead of hanging forever.
+    [[nodiscard]] std::size_t schedulerPendingCount() const noexcept { return scheduler_ ? scheduler_->pendingCount() : 0; }
 
     // Only the wait itself belongs in this scope: callbacks and managed-data
     // access must happen after reactivation, even if the native acquired a lock.
@@ -101,7 +105,7 @@ private:
     void pushNativeRoots(const std::vector<Value>& roots);
     void popNativeRoots();
     void appendNativeRoots(std::vector<Value>& roots) const;
-    void drainThreadJoins();
+    void drainThreadJoins(bool bounded = false);
     GCRoots gcRoots() const;
     void beginBlockingNativeCall();
     void endBlockingNativeCall() const;

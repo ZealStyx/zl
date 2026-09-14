@@ -241,10 +241,11 @@ GCRoots VM::gcRoots() const {
     return roots;
 }
 
-void VM::drainThreadJoins() {
+void VM::drainThreadJoins(bool bounded) {
     if (threadJoins_.empty()) return;
     BlockingNativeCall blocked(this);
-    threadJoins_.drain();
+    if (bounded) threadJoins_.drainBounded();
+    else threadJoins_.drain();
 }
 
 void VM::beginBlockingNativeCall() {
@@ -559,7 +560,10 @@ int VM::runImpl(const Chunk& chunk, const std::vector<std::string>& programArgs,
     // The process-wide heap must never be collected from just this VM's roots
     // while other VMs/threads are still running.
     GCSafepointCoordinator::instance().poll(gcParticipantId_, gcRoots());
-    drainThreadJoins();
+    // Final teardown: wait for dropped workers, but never forever - a worker
+    // blocked on a channel nobody will serve is abandoned with a diagnostic
+    // rather than hanging the process at exit.
+    drainThreadJoins(true);
     // An async entry task is an entry-point result, not an ignored background
     // task. Propagate failure/cancellation with a freshly pinned exception.
     if (entryTask_) (void)entryTask_->observe();

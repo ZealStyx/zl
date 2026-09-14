@@ -1444,6 +1444,20 @@ Value channelCreate(const std::vector<Value>& args) {
     return obj;
 }
 
+namespace {
+// True when a blocking channel operation on THIS thread certainly cannot ever
+// be unblocked: no ZL worker thread exists, no async frame is queued on the
+// scheduler, and the caller is not itself a worker (main may still make
+// progress). The only remaining runnable entity is the thread about to block,
+// so waiting would be a hang - report it as a deadlock instead.
+bool channelBlockWouldDeadlock() {
+    if (gIsWorkerThread) return false;
+    if (gAliveWorkerThreads.load(std::memory_order_acquire) > 0) return false;
+    if (g_currentNativeVm && g_currentNativeVm->schedulerPendingCount() > 0) return false;
+    return true;
+}
+} // namespace
+
 Value channelSend(const std::vector<Value>& args) {
     auto obj = std::get_if<ObjectRef>(&args[0]);
     if (!obj || !*obj || (*obj)->className != "Channel" || !(*obj)->channelState)
@@ -1453,6 +1467,10 @@ Value channelSend(const std::vector<Value>& args) {
     {
         VM::BlockingNativeCall blocked(g_currentNativeVm);
         lock.lock();
+        if (state->items.size() >= state->capacity && channelBlockWouldDeadlock()) {
+            throw std::runtime_error(
+                "Channel.send: deadlock - the channel is full and no other thread or pending task can receive");
+        }
         state->cvNotFull.wait(lock, [&] { return state->items.size() < state->capacity; });
     }
     state->items.push_back(args[1]);
@@ -1470,6 +1488,10 @@ Value channelReceive(const std::vector<Value>& args) {
     {
         VM::BlockingNativeCall blocked(g_currentNativeVm);
         lock.lock();
+        if (state->items.empty() && channelBlockWouldDeadlock()) {
+            throw std::runtime_error(
+                "Channel.receive: deadlock - the channel is empty and no other thread or pending task can send");
+        }
         state->cvNotEmpty.wait(lock, [&] { return !state->items.empty(); });
     }
     Value value = std::move(state->items.front());

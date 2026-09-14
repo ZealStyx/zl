@@ -20,6 +20,7 @@
 #include "zl/parser/parser.hpp"
 #include "zl/lexer/lexer.hpp"
 #include "zl/vm/vm.hpp"
+#include "zl/vm/runtime_thread.hpp"
 #include "zl/vm/native.hpp"
 #include "zl/compiler/native_compiler.hpp"
 #include "zl/compiler/pipeline.hpp"
@@ -444,7 +445,7 @@ int safetyCheck(const char* file, const char* executable, const std::string& sto
     return finish(0, "verified", "static verification does not discharge runtime obligations");
 }
 
-int main(int argc, char** argv) {
+int zlMain(int argc, char** argv) {
     if (argc >= 2) {
         const std::string command = argv[1];
         if (command == "--safety-check") {
@@ -1188,4 +1189,16 @@ int main(int argc, char** argv) {
         std::cerr << "runtime error: " << e.what() << "\n";
         return 1;
     }
+}
+
+// The real main(): if the interpreter abandoned a deadlocked worker thread at
+// teardown, exit without running static destructors - the abandoned thread may
+// still touch global runtime state (GC heap, scheduler) during its teardown,
+// and a use-after-free at process exit is worse than a clean _Exit.
+int main(int argc, char** argv) {
+    const int code = zlMain(argc, argv);
+    std::cerr.flush();
+    std::cout.flush();
+    if (zl::gAbandonedWorkerThreads.load(std::memory_order_acquire)) std::_Exit(code);
+    return code;
 }
