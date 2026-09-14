@@ -304,6 +304,19 @@ std::string TypeResolver::instantiateGenericClass(const std::string& genericName
         if (type == ZlType::OBJECT && !name.args.empty()) {
             const auto* shape = semanticModel_.findClass(name.name);
             if (shape && !shape->typeParams.empty()) {
+                // Fast path: this exact instantiation already has a shape.
+                // Re-resolving the arguments would recursively descend the
+                // whole nested type and rebuild/hash a deep structural
+                // identity at every level - per member, per nesting level,
+                // which is cubic on types like List<List<...>> (150 levels
+                // took 5s, 500 hung). The rendered name is canonical (the
+                // same Base<a,b> spelling instantiateGenericClass keys on),
+                // so a by-name hit means the slow path below could only
+                // rediscover the identical identity. On a miss, fall through
+                // to the full first-time instantiation.
+                if (genericInstantiationByName_.count(rendered)) {
+                    return {type, rendered};
+                }
                 std::vector<ResolvedTypeArg> args;
                 for (const auto& arg : name.args) args.push_back(resolveCanonicalType(arg));
                 return {type, instantiateGenericClass(name.name, args, line)};

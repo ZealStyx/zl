@@ -1041,6 +1041,14 @@ void TypeChecker::check(const Program& program, bool requireMain) {
     // resolution and interface-implementation matching, and a stale UNKNOWN
     // silently degrades all three (the call lowers to nothing and the
     // bytecode backend then drops it from the compiled body).
+    // NOTE: member signatures are resolved in their OWNING class's context
+    // (type parameters in scope). Resolving them at global scope misreads a
+    // bare type-parameter reference (e.g. builtin Result<T, E>'s `unwrapErr(): E`)
+    // as a class name - and if the user declares a generic class with that
+    // same name, resolution fails with a bogus "requires N type arguments"
+    // error pointing at an unrelated line.
+    const std::string savedClassName = currentClassName_;
+    const std::vector<std::string> savedClassTypeParams = currentClassTypeParams_;
     for (const auto& decl : program.declarations) {
         if (decl->kind != NodeKind::ClassDecl && decl->kind != NodeKind::DataDecl) continue;
         const std::string className = decl->kind == NodeKind::ClassDecl
@@ -1048,6 +1056,8 @@ void TypeChecker::check(const Program& program, bool requireMain) {
             : static_cast<const DataDecl*>(decl.get())->name;
         auto* classIt = semanticModel_.findClass(className);
         if (!classIt) continue;
+        currentClassName_ = className;
+        currentClassTypeParams_ = classIt->typeParams;
         const auto& members = decl->kind == NodeKind::ClassDecl
             ? static_cast<const ClassDecl*>(decl.get())->members
             : static_cast<const DataDecl*>(decl.get())->members;
@@ -1083,6 +1093,8 @@ void TypeChecker::check(const Program& program, bool requireMain) {
             }
         }
     }
+    currentClassName_ = savedClassName;
+    currentClassTypeParams_ = savedClassTypeParams;
 
     // Pass 0c: link `extends` parents for classes and data records. Record
     // inheritance is deliberately restricted to data -> data so value
