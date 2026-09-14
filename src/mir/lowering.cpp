@@ -1295,7 +1295,22 @@ struct FunctionLowerer {
             arguments.push_back(value);
         }
         std::vector<TypeId> typeArguments;
-        for (const auto& argument : node.typeArgs) typeArguments.push_back(types.fromAnnotation(argument));
+        // Derive the alloc's generic arguments from the checker-recorded
+        // result type, not from re-resolving the syntactic annotations.
+        // checkAlloc requires alloc typeArguments to equal the result type's
+        // arguments exactly, and the two spellings disagree for names the
+        // checker erases (`object` and `Thread` become `unknown` in the
+        // recorded instantiation, while the MIR converter interns them as
+        // distinct types) - `new List<object>()` then fails verification even
+        // though the reference accepts it. The recorded type is authoritative:
+        // the lowerer re-resolves nothing. Fall back to the annotations only
+        // when the checker recorded no argument list to read.
+        if (const Type* recorded = ctx.builder.types().find(objectType);
+            recorded && recorded->arguments.size() == node.typeArgs.size()) {
+            typeArguments = recorded->arguments;
+        } else {
+            for (const auto& argument : node.typeArgs) typeArguments.push_back(types.fromAnnotation(argument));
+        }
 
         const TempId instance = fb.emitAlloc(node.className, std::move(typeArguments), objectType, loc);
         const Operand receiver = Operand::temp(instance, objectType);
