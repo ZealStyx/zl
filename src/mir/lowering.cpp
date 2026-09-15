@@ -10,6 +10,7 @@
 #include "zl/common/type_name.hpp"
 #include "zl/compiler/dispatch_table.hpp"
 #include "zl/compiler/native_catalog.hpp"
+#include "zl/vm/native.hpp"
 #include "zl/compiler/operator_rules.hpp"
 #include "zl/compiler/semantic_types.hpp"
 #include "zl/lexer/token.hpp"
@@ -485,9 +486,13 @@ struct FunctionLowerer {
                 return Operand::constant(ctx.builder.constantBool(literal.raw == "true"),
                                          ctx.builder.types().boolType());
             case zl::TokenType::STRING_LITERAL: {
-                std::string text = literal.raw;
-                if (text.size() >= 2 && (text.front() == '"' || text.front() == '\'')) text = text.substr(1, text.size() - 2);
-                return Operand::constant(ctx.builder.constantString(std::move(text)),
+                // literal.raw is the lexer's already-unescaped token text
+                // (delimiters stripped, escapes processed); use it verbatim.
+                // A previous revision stripped a leading/trailing quote here
+                // on the assumption the raw lexeme still carried delimiters,
+                // which silently corrupted any literal whose VALUE starts
+                // with '"' or '\'' (e.g. "\"q\"" compiled to `q`).
+                return Operand::constant(ctx.builder.constantString(std::string(literal.raw)),
                                          ctx.builder.types().stringType());
             }
             case zl::TokenType::KW_NULL: {
@@ -1084,6 +1089,18 @@ struct FunctionLowerer {
                 const TempId temp = fb.emitCallNative(qualifiedName, static_cast<std::int32_t>((*native)->id),
                                                       std::move(arguments), returnsVoid ? 0 : resultType,
                                                       (*native)->taskValueType != zl::ZlType::UNKNOWN, loc);
+                return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
+            }
+            if (zl::findNativeFunctionByName(qualifiedName)) {
+                // Runtime-registered extension native (zl-bind output): no
+                // catalog entry, resolved by name alone. The id is -1, not
+                // NativeId::EXTENSION: every extension shares that id, so an
+                // id lookup would find the first extension rather than this
+                // one - the backend resolves -1 by name. Arity was validated
+                // by the front end against the declared arity; the result is
+                // dynamic.
+                const TempId temp = fb.emitCallNative(qualifiedName, -1, std::move(arguments),
+                                                      returnsVoid ? 0 : resultType, false, loc);
                 return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
             }
             const std::string target = node.namespaceName + "." + node.resolvedDispatch.describe();
@@ -1873,7 +1890,16 @@ struct FunctionLowerer {
 
         gotoBlock(stepBlock);
         const Operand counterValue = Operand::temp(fb.emitLoad(counter, loc), arena.intType());
-        const Operand advanced = Operand::temp(fb.emitBinary(Opcode::Add, counterValue, stepValue,
+        // Reload the step here rather than reusing the condition block's
+        // `stepValue` temp: the latch is not always dominated by the
+        // condition block. When the loop body can only exit through an
+        // unwind edge (a try body whose last statement throws, so the only
+        // path to the latch runs try -> catch -> after -> latch), a temp
+        // defined in the condition block does not dominate its use in the
+        // latch, and temporaries do not flow across unwind edges. The
+        // counter above already reloads for the same reason.
+        const Operand stepReload = Operand::temp(fb.emitLoad(stepSlot, loc), arena.intType());
+        const Operand advanced = Operand::temp(fb.emitBinary(Opcode::Add, counterValue, stepReload,
                                                              arena.intType(), loc), arena.intType());
         fb.emitStore(counter, advanced, loc);
         fb.emitJump(conditionBlock, loc);

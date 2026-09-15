@@ -1,0 +1,38 @@
+// Two Shared cells aliasing one Map, mutated from a worker thread while a
+// second worker prints the map concurrently. Every map op is atomic and
+// traversal observes a point-in-time snapshot, so this exits 0 (Thread-
+// Sanitizer also reports no data race; before the fix it reported the
+// collMapSet emplace racing the log() traversal).
+class SharedMapThreads {
+    func main(): void {
+        var inner = new Map<int, int>()
+        var i = 0
+        while (i < 200) {
+            inner.put(i, i)
+            i = i + 1
+        }
+        var s1 = new Shared<Map<int, int>>(inner)
+        var s2 = new Shared<Map<int, int>>(inner)
+        var t1 = Thread.start(func() {
+            var j = 0
+            while (j < 200) {
+                s1.withLock(func() { s1.get().put(10000 + j, j) return s1.get() })
+                s1.withLock(func() { s1.get().remove(j) return s1.get() })
+                j = j + 1
+            }
+        })
+        var t2 = Thread.start(func() {
+            var j = 0
+            while (j < 50) {
+                s2.withLock(func() { log(s2.get()) return s2.get() })
+                j = j + 1
+            }
+        })
+        Thread.join(t1)
+        Thread.join(t2)
+        var final = s1.withLock(func() { return s1.get() })
+        if (final.has(0)) { throw new Exception("key 0 survived removal") }
+        if (!final.has(10000)) { throw new Exception("key 10000 missing") }
+        log("ok")
+    }
+}

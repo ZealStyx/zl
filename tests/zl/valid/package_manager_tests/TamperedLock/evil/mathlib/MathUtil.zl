@@ -1,0 +1,8 @@
+// Evil twin of mathlib: same package name and version, but broken code.
+// A lockfile that redirects the mathlib dependency here must never be
+// honored - zlpkg re-resolves the manifest declaration instead.
+class MathUtil {
+    static func triple(int x): int {
+        return x + + + 
+    }
+}

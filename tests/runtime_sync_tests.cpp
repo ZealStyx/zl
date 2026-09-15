@@ -28,7 +28,9 @@ void require(bool condition, const std::string& message) {
 }
 
 using namespace std::chrono_literals;
+using zl::MapBox;
 using zl::ObjectBox;
+using zl::Value;
 
 // The state objects live on an ObjectBox, lazily initialized by the VM; the
 // tests initialize them directly so each primitive is exercised in isolation.
@@ -250,6 +252,71 @@ void testChannelState() {
     state.reset();
 }
 
+void testMapBoxState() {
+    // Sequential semantics: insertion order, in-place update, hit/miss,
+    // removal, and snapshot isolation (a snapshot is detached from later
+    // mutation, so printers/serializers never observe a torn map).
+    MapBox box;
+    box.setEntry(Value{std::int64_t{1}}, Value{std::int64_t{10}});
+    box.setEntry(Value{std::string{"k"}}, Value{std::int64_t{20}});
+    require(box.size() == 2, "setEntry grows the map");
+    box.setEntry(Value{std::int64_t{1}}, Value{std::int64_t{11}});
+    require(box.size() == 2, "setEntry updates a present key in place");
+    auto hit = box.tryGetEntry(Value{std::int64_t{1}});
+    require(hit && std::get<std::int64_t>(*hit) == 11, "tryGetEntry returns the updated value");
+    require(!box.tryGetEntry(Value{std::int64_t{2}}), "tryGetEntry misses an absent key");
+    require(box.findEntry(Value{std::string{"k"}}) != MapBox::kNoEntry, "findEntry locates a string key");
+    auto snap = box.snapshotEntries();
+    box.setEntry(Value{std::int64_t{3}}, Value{std::int64_t{30}});
+    box.removeEntry(Value{std::string{"k"}});
+    require(snap.size() == 2, "snapshotEntries is detached from later mutation");
+    require(box.removeEntry(Value{std::int64_t{3}}), "removeEntry reports a present key");
+    require(!box.removeEntry(Value{std::int64_t{3}}), "removeEntry reports an absent key");
+
+    // Enough string keys to engage the hash index, then hammer one MapBox
+    // from several threads the way aliased Shared cells do: concurrent
+    // insert/update/lookup/remove/snapshot/size must neither crash, tear,
+    // nor lose atomicity of any single op.
+    MapBox shared;
+    for (int i = 0; i < 64; ++i)
+        shared.setEntry(Value{"s" + std::to_string(i)}, Value{std::int64_t{i}});
+    std::atomic<bool> failed{false};
+    auto worker = [&](int id) {
+        try {
+            for (int i = 0; i < 500; ++i) {
+                const int key = (id * 500 + i) % 128;
+                shared.setEntry(Value{std::int64_t{key}}, Value{std::int64_t{id}});
+                (void)shared.tryGetEntry(Value{std::int64_t{key}});
+                (void)shared.tryGetEntry(Value{"s" + std::to_string(key % 64)});
+                if ((i % 7) == 0) (void)shared.snapshotEntries();
+                if ((i % 11) == 0) (void)shared.size();
+                if ((i % 13) == 0) shared.removeEntry(Value{std::int64_t{(key + 1) % 128}});
+            }
+        } catch (...) {
+            failed.store(true);
+        }
+    };
+    std::thread t1([&] { worker(1); });
+    std::thread t2([&] { worker(2); });
+    std::thread t3([&] { worker(3); });
+    std::thread t4([&] { worker(4); });
+    t1.join();
+    t2.join();
+    t3.join();
+    t4.join();
+    require(!failed.load(), "concurrent map ops complete without throwing");
+    // The map is always in a coherent state: snapshot and size agree, and
+    // every snapshot entry is still findable with an equal value.
+    auto finalSnap = shared.snapshotEntries();
+    require(finalSnap.size() == shared.size(), "snapshot and size agree after the hammer");
+    bool coherent = true;
+    for (const auto& entry : finalSnap) {
+        auto current = shared.tryGetEntry(entry.first);
+        if (!current || *current != entry.second) { coherent = false; break; }
+    }
+    require(coherent, "every snapshot entry round-trips through lookup");
+}
+
 } // namespace
 
 int main() {
@@ -259,6 +326,7 @@ int main() {
     testSemaphoreState();
     testConditionState();
     testChannelState();
+    testMapBoxState();
 
     if (failures != 0) {
         std::cerr << failures << " sync regression(s) failed\n";

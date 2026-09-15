@@ -1,0 +1,6 @@
+[package]
+name = "stalelock"
+version = "0.1.0"
+
+[dependencies]
+mathlib = { path = "../mathlib", version = "0.1.0" }

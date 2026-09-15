@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "zl/common/ownership.hpp"
@@ -333,6 +334,12 @@ struct Module {
     // an interface?" is answerable.
     std::vector<InterfaceInfo> interfaces;
     std::vector<Constant> constants;
+    // Index into `constants` (ConstId = vector position + 1), kept in step by
+    // internConstant, which is the only writer of either. Constant ids are
+    // append-only and never reused, so entries stay valid for the module's
+    // lifetime. Anything that bypasses internConstant to touch `constants`
+    // directly must update this map to match.
+    std::unordered_map<Constant, ConstId, ConstantHash> constantIndex;
     // The program entry point, or kNoFunction when the module has none.
     FunctionId entryPoint{kNoFunction};
 

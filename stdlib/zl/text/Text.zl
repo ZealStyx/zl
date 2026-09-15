@@ -10,13 +10,10 @@ class Text {
     public static func isBlank(string value): bool { return String.trim(value) == "" }
     public static func repeatText(string value, int count): string {
         if count < 0 { throw new Exception("Text.repeat count must be non-negative") }
-        var result = ""
-        var i = 0
-        while i < count {
-            result = result + value
-            i = i + 1
-        }
-        return result
+        // Linear-time native repeat: the old loop re-concatenated (and
+        // re-copied) the whole accumulator per iteration, which is quadratic
+        // and effectively hangs on large counts.
+        return String.repeatText(value, count)
     }
     public static func contains(string value, string needle): bool { return String.contains(value, needle) }
     public static func indexOf(string value, string needle): int { return String.indexOf(value, needle) }

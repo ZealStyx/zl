@@ -1,0 +1,24 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - GenericNestPerf
+//
+// Deeply nested generic instantiations must compile in reasonable time. The
+// front end used to be cubic in nesting depth here (a by-value TypeName copy
+// at every level of the type-name parser, string-rebuilding renders, and a
+// re-descending canonicalizer): 150-deep List took ~5s for an annotation and
+// 60-method nested-signature generics took ~34s. Linearized parsing,
+// rendering, and a by-name instantiation fast path brought those to ~0.5s
+// and ~2.4s. Like RepeatTextPerf, the case timeout is the perf assertion.
+// ============================================================================
+
+class GenericNestPerf {
+    func take(List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<List<int>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> x): void {
+        log("took")
+    }
+    func main(): void {
+        var items = new List<int>()
+        items.push(1)
+        items.push(2)
+        if (items.length() != 2) { throw new Exception("GenericNestPerf: List broken") }
+        log("ok")
+    }
+}

@@ -164,7 +164,11 @@ zl_add_required_test(zl-runtime-task-executor-tests tests/runtime_task_executor_
     src/vm/gc.cpp)
 target_link_libraries(zl-runtime-task-executor-tests PRIVATE Threads::Threads)
 
-zl_add_required_test(zl-runtime-sync-tests tests/runtime_sync_tests.cpp)
+zl_add_required_test(zl-runtime-sync-tests tests/runtime_sync_tests.cpp
+    src/vm/value.cpp
+    src/vm/gc.cpp
+    src/vm/runtime_exception.cpp
+    src/vm/runtime_task.cpp)
 target_link_libraries(zl-runtime-sync-tests PRIVATE Threads::Threads)
 
 zl_add_required_test(zl-ir-tests tests/ir_tests.cpp src/compiler/ir.cpp src/compiler/ir_optimizer.cpp)
@@ -535,6 +539,15 @@ if(BUILD_TESTING)
         add_test(NAME pipeline-report COMMAND ${ZL_REPORT_PYTHON}
             ${CMAKE_SOURCE_DIR}/tests/pipeline_report_cli.py $<TARGET_FILE:zl_language>)
         set_tests_properties(pipeline-report PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endif()
+    # Backend fold parity: the self-checking LiteralFoldParity fixture must
+    # print "ok" under the MIR, AST, unoptimized-MIR, and native configs, so
+    # no constant folder or pool can drift from checked runtime arithmetic.
+    find_program(ZL_PARITY_PYTHON NAMES python3)
+    if(ZL_PARITY_PYTHON)
+        add_test(NAME backend-fold-parity COMMAND ${ZL_PARITY_PYTHON}
+            ${CMAKE_SOURCE_DIR}/tests/backend_fold_parity.py $<TARGET_FILE:zl_language>)
+        set_tests_properties(backend-fold-parity PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endif()
 endif()
 

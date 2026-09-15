@@ -94,7 +94,7 @@ int main() {
     coordinator.beginBlockingNative(idle, {std::int64_t{33}});
 
     requestCollection();
-    std::thread poller([&] { coordinator.poll(runner, {std::int64_t{22}}); });
+    std::thread poller([&] { coordinator.poll(runner, []() -> zl::GCRoots { return {std::int64_t{22}}; }); });
     {
         std::unique_lock<std::mutex> lock(mutex);
         cv.wait(lock, [] { return collecting; });
@@ -125,7 +125,7 @@ int main() {
     // unregistration must wake a poller to take over collection.
     stage = "registration during a request / last active participant exiting";
     requestCollection();
-    std::thread nextPoller([&] { coordinator.poll(runner, {std::int64_t{44}}); });
+    std::thread nextPoller([&] { coordinator.poll(runner, []() -> zl::GCRoots { return {std::int64_t{44}}; }); });
     {
         std::unique_lock<std::mutex> lock(mutex);
         cv.wait(lock, [] { return sampled; });
@@ -143,12 +143,24 @@ int main() {
     }
     requestCollection();
     bool caught = false;
-    try { coordinator.poll(runner, {std::int64_t{55}}); }
+    try { coordinator.poll(runner, []() -> zl::GCRoots { return {std::int64_t{55}}; }); }
     catch (const std::runtime_error&) { caught = true; }
     require(caught, "controlled collection failure was swallowed");
     requestCollection();
-    coordinator.poll(runner, {std::int64_t{66}});
+    coordinator.poll(runner, []() -> zl::GCRoots { return {std::int64_t{66}}; });
     require(containsRoot(33) && containsRoot(66), "failure damaged the next rendezvous/root snapshot");
+    // With no collection requested and no allocation pressure, a poll must
+    // return without invoking the root provider: the snapshot costs O(call
+    // depth), and building it at every safepoint made deep recursion O(n^2).
+    stage = "idle poll must not build a root snapshot";
+    const auto observer = coordinator.registerParticipant();
+    int providerCalls = 0;
+    coordinator.poll(observer, [&]() -> zl::GCRoots {
+        ++providerCalls;
+        return {std::int64_t{77}};
+    });
+    require(providerCalls == 0, "idle poll built a root snapshot it never publishes");
+    coordinator.unregisterParticipant(observer);
     coordinator.endBlockingNative(idle);
     coordinator.unregisterParticipant(idle);
     coordinator.unregisterParticipant(runner);
