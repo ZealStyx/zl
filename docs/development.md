@@ -240,6 +240,18 @@ program that imports a sibling module is genuinely compared instead of failing t
 load on both paths and being counted as a match. If a corpus program stops being
 compared, that shows up as a change in the counts, not as a silent pass.
 
+### On CI
+
+`.github/workflows/ci.yml` runs exactly the commands above on every push to
+`main` and every pull request. The Linux job is the full gate: the `zl-tests`
+build, the whole CTest suite, the regression corpus
+(`scripts/run_regressions.sh … all`), the five differential harnesses, and the
+native compiler gate. macOS and Windows build and run CTest so the
+"portable, on every platform" claim is verified rather than assumed; the
+native-execution tests guard themselves and skip where executable memory is
+unavailable. Nothing in the workflow is CI-only, and every gate exits
+non-zero on a mismatch, so a green check is the claim above, not a hope.
+
 ## Distribution builds
 
 Release packaging is driven by CMake/CPack — see [`packaging/README.md`](../packaging/README.md).

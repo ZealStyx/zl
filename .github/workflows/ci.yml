@@ -1,0 +1,92 @@
+# The checks in docs/development.md, on every push.
+#
+# Everything here is the same command a developer runs by hand - the build
+# target, the CTest suite, and the shell gates. No check in this file is
+# special-cased for CI, and no gate that prints "identical" but exits 0 can
+# hide here: every one of them returns non-zero on a mismatch, so a red line
+# is a real regression and a green line is the claim, not a hope.
+#
+# The Linux job runs the full gate (CTest plus the corpus and differential
+# harnesses, which are language-semantics checks and therefore platform
+# independent). macOS and Windows build and run the CTest suite so the
+# "portable, on every platform" promise in docs/development.md is verified
+# rather than assumed; the native-execution tests guard themselves with
+# ZL_NATIVE_CAN_EXECUTE and skip where executable memory is unavailable.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push on the same ref supersedes the older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux - full gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (core plus every test executable and fixture)
+        run: cmake --build build --config Release --target zl-tests --parallel
+
+      - name: CTest (unit suites, boundary lint, safety pipeline, report and parity checks)
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Regression corpus (tests/zl/valid and tests/zl/invalid, including package-manager cases)
+        run: bash scripts/run_regressions.sh build/zl_language all
+
+      - name: Differential harnesses (examples corpus)
+        run: |
+          bash tools/backend_diff.sh build/zl_language
+          bash tools/mir_backend_diff.sh build/zl_language
+          bash tools/mir_opt_diff.sh build/zl_language
+          bash tools/mir_promotion_diff.sh build/zl_language
+          bash tools/mir_opt_check_all.sh build/zl_language
+
+      - name: Native compiler gate (legacy --emit-native path plus benchmark parity)
+        run: bash scripts/native_gate.sh
+
+  macos:
+    name: macOS - build and CTest
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --target zl-tests --parallel
+
+      - name: CTest
+        run: ctest --test-dir build --output-on-failure
+
+  windows:
+    name: Windows - build and CTest
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --target zl-tests --parallel
+
+      - name: CTest
+        run: ctest --test-dir build --output-on-failure

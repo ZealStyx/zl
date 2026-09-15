@@ -31,6 +31,17 @@ tier emits no runtime calls or stack arguments yet - but it is what a future
 `CallRuntime` callee from the C world needs, and a calling frame short of the
 shadow would hand that callee the caller's saved `rbp`.
 
+**The checks now run on every push.** Until now every claim in this
+repository - 44 regressions, the three-way backend parity, the optimiser and
+promotion differentials, the boundary rules, the safety pipeline - was true
+when a maintainer ran the tools locally, and that was it. `.github/workflows/
+ci.yml` runs the same commands on every push and pull request: the Linux job
+takes the full gate (CTest plus the regression corpus, all five differential
+harnesses, and the native compiler gate), and macOS and Windows build and run
+CTest so the portability claim is verified rather than assumed. Nothing in the
+workflow is CI-only, and every gate already exited non-zero on a mismatch - a
+green line is the claim, not a hope.
+
 ## 2026-09-12 - The boundary is enforced, and the compiler knows what runs
 
 The MIR boundary had rules and a component; this phase makes the rules fail the
