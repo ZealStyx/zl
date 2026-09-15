@@ -26,12 +26,33 @@ public:
     // list<string> passed to main() if it declares a parameter (see
     // Compiler::compile / OpCode::PushProgramArgs).
     [[nodiscard]] int run(const Chunk& chunk, const std::vector<std::string>& programArgs = {});
+    // Preferred entry point: same behavior, but the VM can hand closures and
+    // async invocations a reference to this shared owner instead of deep-
+    // copying the whole chunk on every MakeClosure / async call. The bare
+    // reference overload keeps working (callers that keep the chunk alive
+    // themselves), it just pays the old copy cost.
+    [[nodiscard]] int run(std::shared_ptr<const Chunk> chunk, const std::vector<std::string>& programArgs = {});
+    // Shared tail of both run() entry points; `owner` is the shared chunk
+    // ownership when the caller had one.
+    [[nodiscard]] int runImpl(const Chunk& chunk, const std::vector<std::string>& programArgs,
+                              std::shared_ptr<const Chunk> owner);
 
     Value invokeReflectiveMethod(const Value& methodValue, const Value& receiver, const Value& argsList);
     Value invokeReflectiveConstructor(const Value& constructorValue, const Value& argsList);
     Value invokeReflectiveFunction(const Value& functionValue, const Value& argsList);
     Value invokeTaskClosure(const ClosureRef& closure);
     const Chunk* activeChunk() const noexcept { return activeChunk_; }
+    // Ready async frames in this VM's scheduler. Channel blocking uses this
+    // (plus the alive-worker count) to detect that nobody can ever unblock a
+    // send/receive and raise a deadlock error instead of hanging forever.
+    [[nodiscard]] std::size_t schedulerPendingCount() const noexcept { return scheduler_ ? scheduler_->pendingCount() : 0; }
+    // Runs a single ready async frame on this VM's scheduler, if any.
+    // Blocking channel operations pump this while waiting (releasing the
+    // channel lock first) so an async sender/receiver queued behind the very
+    // call that is about to block still runs instead of hanging the program.
+    // Always own-scheduler: g_currentNativeVm is thread-local, so the pump
+    // runs on the same thread that owns the scheduler.
+    [[nodiscard]] bool pumpSchedulerOne() { return scheduler_ ? scheduler_->runOne() : false; }
 
     // Only the wait itself belongs in this scope: callbacks and managed-data
     // access must happen after reactivation, even if the native acquired a lock.
@@ -51,7 +72,12 @@ public:
 private:
     class ProgramScope {
     public:
-        ProgramScope(VM& vm, const Chunk& chunk);
+        // `owner` is the shared ownership of `chunk`, when the caller has it.
+        // A null owner inherits the enclosing scope's owner when both scopes
+        // are for the same chunk object (run() -> execute() nests exactly so),
+        // and is null otherwise - shareActiveChunk() then falls back to
+        // copying, which is the pre-sharing behavior.
+        ProgramScope(VM& vm, const Chunk& chunk, std::shared_ptr<const Chunk> owner = {});
         ~ProgramScope();
         ProgramScope(const ProgramScope&) = delete;
         ProgramScope& operator=(const ProgramScope&) = delete;
@@ -62,7 +88,8 @@ private:
     };
     enum class ExecuteStatus { Completed, Suspended };
     [[nodiscard]] ExecuteStatus execute(const Chunk& chunk, std::size_t startIp, bool stopAtReturn,
-                              const std::vector<std::string>& programArgs, Value* returnValue);
+                              const std::vector<std::string>& programArgs, Value* returnValue,
+                              std::shared_ptr<const Chunk> owner = {});
     // Handler search shared by thrown ZL exceptions and converted runtime
     // faults. Returns false when this run owns no matching handler.
     bool dispatchThrownException(const Chunk& chunk, const ObjectRef& thrown,
@@ -70,7 +97,11 @@ private:
     [[nodiscard]] Value invokeFunction(const Chunk& chunk, std::size_t functionIndex,
                                        const std::vector<Value>& args,
                                        const std::optional<Value>& receiver = std::nullopt,
-                                       const ClosureRef& closure = {});
+                                       const ClosureRef& closure = {},
+                                       std::shared_ptr<const Chunk> owner = {});
+    // The chunk backing every closure/async invocation made from here: the
+    // active scope's shared owner when there is one, a fresh copy otherwise.
+    [[nodiscard]] std::shared_ptr<const Chunk> shareActiveChunk() const;
     ExecutionState::CallFrame makeCallFrame(const Chunk& chunk, const FunctionInfo& fn,
                                            const std::vector<Value>& args,
                                            const std::optional<Value>& receiver = std::nullopt,
@@ -81,7 +112,7 @@ private:
     void pushNativeRoots(const std::vector<Value>& roots);
     void popNativeRoots();
     void appendNativeRoots(std::vector<Value>& roots) const;
-    void drainThreadJoins();
+    void drainThreadJoins(bool bounded = false);
     GCRoots gcRoots() const;
     void beginBlockingNativeCall();
     void endBlockingNativeCall() const;
@@ -125,8 +156,21 @@ private:
     std::vector<std::vector<Value>> nativeRootFrames_;
     const Chunk* activeChunk_{nullptr};
     std::vector<const Chunk*> activePrograms_;
+    // Parallel to activePrograms_: each scope's shared chunk owner (may be
+    // null). Keeping it as a shared_ptr here is what pins the chunk for as
+    // long as any scope - or any closure handed out from under it - lives.
+    std::vector<std::shared_ptr<const Chunk>> activeChunkOwners_;
     DeferredThreadJoins threadJoins_;
     std::uint64_t gcParticipantId_{0};
+    // Nested execute() activations on this VM (native->ZL callbacks such as
+    // Mutex.withLock, reflective invocation, async resumption while blocked).
+    // ZL call frames live on the heap and are capped separately at 100000,
+    // but each nested execute()activation also consumes C++ stack, which
+    // overflows far earlier - so re-entry gets its own, much lower budget.
+    // 1000 activations stay comfortably inside an 8MB stack while no sane
+    // program nests anywhere near that many blocking/callback levels.
+    std::size_t nestedExecuteDepth_{0};
+    static constexpr std::size_t kMaxNestedExecuteDepth = 1000;
 
 };
 

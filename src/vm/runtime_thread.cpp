@@ -1,17 +1,62 @@
 #include "zl/vm/runtime_thread.hpp"
 
+#include <chrono>
+#include <iostream>
+
 namespace zl {
 namespace {
 thread_local DeferredThreadJoins* currentJoins = nullptr;
-}
+
+// How long a teardown join waits for a worker before abandoning it.
+constexpr auto kTeardownJoinBound = std::chrono::seconds(2);
+constexpr auto kTeardownJoinPoll = std::chrono::milliseconds(2);
+} // namespace
 
 ThreadJoinNode::~ThreadJoinNode() {
-    if (!thread.joinable()) return;
-    if (thread.get_id() == std::this_thread::get_id()) thread.detach();
-    else thread.join();
+    // A node destroyed directly (rather than through a joins-queue drain) is
+    // in a teardown context - e.g. the VM is gone and its state teardown
+    // dropped a still-running worker. Never wait forever there.
+    joinOrAbandon();
 }
 
-DeferredThreadJoins::~DeferredThreadJoins() { drain(); }
+void ThreadJoinNode::joinUnbounded() {
+    if (!thread.joinable()) return;
+    if (thread.get_id() == std::this_thread::get_id()) {
+        thread.detach();
+        return;
+    }
+    thread.join();
+}
+
+void ThreadJoinNode::joinOrAbandon() {
+    if (!thread.joinable()) return;
+    if (thread.get_id() == std::this_thread::get_id()) {
+        thread.detach();
+        return;
+    }
+    if (!done) {
+        // No completion flag (should not happen - startWith always sets it):
+        // fall back to a plain join rather than risk an early abandon.
+        thread.join();
+        return;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + kTeardownJoinBound;
+    while (!done->load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            std::cerr << "zl: worker thread still running after "
+                      << std::chrono::duration_cast<std::chrono::seconds>(kTeardownJoinBound).count()
+                      << "s at interpreter shutdown (it is likely blocked forever on a channel"
+                         " receive or similar); abandoning it and exiting\n";
+            gAbandonedWorkerThreads.store(true, std::memory_order_release);
+            thread.detach();
+            return;
+        }
+        std::this_thread::sleep_for(kTeardownJoinPoll);
+    }
+    thread.join();
+}
+
+DeferredThreadJoins::~DeferredThreadJoins() { drainBounded(); }
 
 DeferredThreadJoins* DeferredThreadJoins::bind(DeferredThreadJoins* queue) noexcept {
     return std::exchange(currentJoins, queue);
@@ -28,9 +73,16 @@ void DeferredThreadJoins::drain() noexcept {
     while (pending_) {
         auto node = std::move(pending_);
         pending_ = std::move(node->next);
-        node.reset();
+        // Bounded everywhere: a retired worker's ZL handle is gone, so no one
+        // can ever join it or observe its completion - waiting longer than the
+        // bound only risks hanging the process on a worker blocked forever.
+        // Workers that finish within the bound are joined normally, so the
+        // implicit-join contract holds for every well-behaved program.
+        node->joinOrAbandon();
     }
 }
+
+void DeferredThreadJoins::drainBounded() noexcept { drain(); }
 
 RuntimeThreadState::~RuntimeThreadState() {
     std::unique_ptr<ThreadJoinNode> local;

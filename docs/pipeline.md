@@ -251,7 +251,7 @@ backend parity
 
 and `tools/backend_diff.sh` runs the whole example corpus three ways - reference
 compiler, bytecode backend, native backend - and compares what each run printed
-and exited with. It is currently 50 of 50 identical.
+and exited with. It is currently 51 of 51 identical.
 
 ## Compatibility with the VM
 
@@ -369,10 +369,10 @@ reported rather than described as "passing".
 | `zl-mir-lowering-tests` | stages 1-4 over real ZL programs produce the MIR the language means |
 | `zl-mir-opt-tests`, `zl-mir-opt-pipeline-tests` | the optimiser, per pass and end to end, including the runtime differential |
 | `zl-native-backend-tests` | the native backend executes emitted machine code and agrees with the VM |
-| `tools/mir_backend_diff.sh` | reference AST → bytecode vs the MIR pipeline, on stdout and exit status: **50 of 50 identical** |
-| `tools/backend_diff.sh` | reference vs bytecode backend vs native backend, plus MIR-digest parity per program: **50 of 50 identical** |
-| `tools/mir_opt_diff.sh` | optimised vs unoptimised, run both ways: **50 of 50 identical** |
-| `tools/mir_promotion_diff.sh` | memory form vs value form, run both ways: **50 of 50 identical** |
+| `tools/mir_backend_diff.sh` | reference AST → bytecode vs the MIR pipeline, on stdout and exit status: **51 of 51 identical** |
+| `tools/backend_diff.sh` | reference vs bytecode backend vs native backend, plus MIR-digest parity per program: **51 of 51 identical** |
+| `tools/mir_opt_diff.sh` | optimised vs unoptimised, run both ways: **51 of 51 identical** |
+| `tools/mir_promotion_diff.sh` | memory form vs value form, run both ways: **51 of 51 identical** |
 | `tools/mir_opt_check_all.sh` | optimised vs unoptimised *statically*, over `examples/` and `stdlib/` |
 | `tools/boundary_lint.sh` (CTest `boundary-lint`, `boundary-lint-regressions`) | rules 1-4 above: no backend sees the AST (directly or through the include graph), the lowerer only reads recorded types, the front end is constructed in exactly one place (scanned across the production tree), the legacy IR keeps one consumer |
 | `tools/native_demo.sh` | one program through source → MIR → native IR → disassembly, calling the emitted code and diffing against the VM |

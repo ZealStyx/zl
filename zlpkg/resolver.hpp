@@ -33,6 +33,7 @@ struct ResolvedDependency {
     std::string declaredRef; // git tag/branch/rev as written in the manifest (empty = default branch); unused for Path
     std::string resolvedRef; // git commit sha, or "local" for a Path dependency
     std::string packageVersion; // version declared by the dependency package manifest
+    std::string depsFingerprint; // lockDepsFingerprint() of the dependency's own manifest
     std::filesystem::path dir; // fetched/local content root (repo root, or the path dependency's own root)
 
     // Root to pass to `zl_language --root`: dir/src if that exists,

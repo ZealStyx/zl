@@ -1,0 +1,57 @@
+// ============================================================================
+// Regression fixture - valid/native - NumericKernel
+//
+// The kernel compiled by scripts/native_gate.sh through --emit-native: the
+// emitted C++ must export zl_mir_native_NumericKernel_sumSquares(int64_t) with
+// semantics identical to the VM (see benchmarks/native_numeric_benchmark.cpp,
+// which links the emitted code and diffs it against a reference loop).
+//
+// The same file must also run correctly on the VM for the regression runner.
+// ============================================================================
+
+class NumericKernel {
+    // Compiled to native code: @native opts the function into the restricted
+    // native tier (primitive params/locals, counted loops, comparisons), and
+    // the VM path remains as fallback for the interpreter run.
+    @native
+    static func sumSquares(int n): int {
+        var total = 0
+        var i = 0
+        while (i < n) {
+            total = total + i * i
+            i = i + 1
+        }
+        return total
+    }
+
+    @native
+    static func sumRange(int from, int to): int {
+        var total = 0
+        var i = from
+        while (i < to) {
+            total = total + i
+            i = i + 1
+        }
+        return total
+    }
+
+    func main(): void {
+        // On the VM path the @native kernels are catalog dispatches, not
+        // executable code: the bytecode backend stubs them and reaching one
+        // raises a catchable error (mixed-mode execution is not implemented).
+        // The emitted-C++ path - exercised by scripts/native_gate.sh - is
+        // where the kernels actually compute, diffed there against a
+        // reference loop in benchmarks/native_numeric_benchmark.cpp.
+        try {
+            log(NumericKernel.sumSquares(100))
+        } catch Exception e {
+            log("vm fallback: " + e.message)
+        }
+        try {
+            log(NumericKernel.sumRange(1, 101))
+        } catch Exception e {
+            log("vm fallback: " + e.message)
+        }
+        log("done")
+    }
+}

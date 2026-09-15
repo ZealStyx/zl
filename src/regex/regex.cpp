@@ -99,6 +99,8 @@ private:
     const std::string& source_;
     std::size_t pos_{0};
     int captureCount_{0};
+    int depth_{0};
+    static constexpr int kMaxPatternDepth = 500;
     std::vector<std::string> captureNames_;
 
     bool atEnd() const { return pos_ >= source_.size(); }
@@ -116,6 +118,16 @@ private:
     }
 
     std::shared_ptr<Node> parseAlternation() {
+        // Single choke point for all pattern nesting (groups, lookarounds
+        // and captures all recurse back through here): without a budget,
+        // `((((...` overflows the C++ stack (SIGSEGV) instead of failing to
+        // compile. RAII-scoped: fail() throws and the Parser is discarded.
+        struct DepthGuard {
+            int& depth;
+            ~DepthGuard() { --depth; }
+        };
+        if (++depth_ > kMaxPatternDepth) fail("pattern nesting exceeds the maximum depth");
+        DepthGuard guard{depth_};
         auto left = parseSequence();
         if (peek() != '|') return left;
         auto n = make(NodeKind::Alternation);
@@ -487,6 +499,46 @@ namespace {
 struct CapState { std::vector<int> start; std::vector<int> end; std::vector<bool> set; };
 struct State { std::size_t pos{0}; CapState caps; };
 
+// A backtracking matcher needs a work budget: without one, a pathological
+// pattern (classic ReDoS shapes like `(a+)+b`) explores exponentially many
+// states until the process is OOM-killed, and a long repetition run
+// (`(a)*` against 100k 'a's) recurses once per repetition until the stack
+// overflows. Every matchNode entry buys a step; every matchNode entry and
+// every repeatNode continuation buys a depth unit. Crossing either limit
+// throws, which the Text.*/Regex.* natives already report as a RegexError
+// runtime error instead of a crash.
+struct MatchBudget {
+    std::int64_t steps = 0;
+    int depth = 0;
+};
+constexpr std::int64_t kRegexMaxSteps = 1'000'000;
+constexpr int kRegexMaxDepth = 10'000;
+
+[[noreturn]] void budgetExceeded(const char* what) {
+    throw std::runtime_error(std::string("match budget exceeded (") + what +
+                             "): the pattern backtracks pathologically or the input is too "
+                             "large for this engine");
+}
+
+struct BudgetTicket {
+    MatchBudget& budget;
+    explicit BudgetTicket(MatchBudget& b) : budget(b) {
+        if (++budget.steps > kRegexMaxSteps) budgetExceeded("too many steps");
+        if (++budget.depth > kRegexMaxDepth) budgetExceeded("recursion too deep");
+    }
+    ~BudgetTicket() { --budget.depth; }
+};
+
+// A repeat continuation is a stack frame like any other (repeatNode's `rec`
+// recurses once per repetition), so it buys depth only.
+struct DepthTicket {
+    MatchBudget& budget;
+    explicit DepthTicket(MatchBudget& b) : budget(b) {
+        if (++budget.depth > kRegexMaxDepth) budgetExceeded("recursion too deep");
+    }
+    ~DepthTicket() { --budget.depth; }
+};
+
 static CapState makeCaps(int n) { return CapState{std::vector<int>(n + 1, -1), std::vector<int>(n + 1, -1), std::vector<bool>(n + 1, false)}; }
 static int maxCapture(const std::shared_ptr<Node>& n) {
     int m = 0; if (n->captureIndex > m) m=n->captureIndex; for (auto& c:n->children) m=std::max(m,maxCapture(c)); return m;
@@ -521,21 +573,22 @@ static bool escapeAtom(const std::string& e,std::uint32_t cp){
     switch(e[1]){case 'd':return unicodeDecimalDigit(cp);case 'D':return !unicodeDecimalDigit(cp);case 'w':return unicodeWord(cp);case 'W':return !unicodeWord(cp);case 's':return unicodeSpace(cp);case 'S':return !unicodeSpace(cp);case 't':return cp=='\t';case 'n':return cp=='\n';case 'r':return cp=='\r';case 'f':return cp=='\f';case 'v':return cp=='\v';default:return cp==(unsigned char)e[1];}
 }
 
-static std::vector<State> matchNode(const std::shared_ptr<Node>& n, const std::string& text, State st);
-static std::vector<State> matchSequence(const std::vector<std::shared_ptr<Node>>& nodes,size_t i,const std::string& text,State st){
+static std::vector<State> matchNode(const std::shared_ptr<Node>& n, const std::string& text, State st, MatchBudget& budget);
+static std::vector<State> matchSequence(const std::vector<std::shared_ptr<Node>>& nodes,size_t i,const std::string& text,State st, MatchBudget& budget){
     if(i>=nodes.size()) return {st};
     std::vector<State> out;
-    for(auto &s:matchNode(nodes[i],text,st)) { auto tail=matchSequence(nodes,i+1,text,s); out.insert(out.end(),tail.begin(),tail.end()); }
+    for(auto &s:matchNode(nodes[i],text,st,budget)) { auto tail=matchSequence(nodes,i+1,text,s,budget); out.insert(out.end(),tail.begin(),tail.end()); }
     return out;
 }
-static std::vector<State> repeatNode(const std::shared_ptr<Node>& child,int min,int max,bool greedy,bool possessive,const std::string& text,const State& base){
+static std::vector<State> repeatNode(const std::shared_ptr<Node>& child,int min,int max,bool greedy,bool possessive,const std::string& text,const State& base, MatchBudget& budget){
     std::vector<State> out;
     std::function<void(const State&,int)> rec=[&](const State& s,int count){
+        DepthTicket ticket{budget};
         if (possessive) {
             State cur=s;
             int c=count;
             while (max < 0 || c < max) {
-                auto next=matchNode(child,text,cur);
+                auto next=matchNode(child,text,cur,budget);
                 if(next.empty()) break;
                 auto chosen=next.front();
                 if(chosen.pos==cur.pos) break;
@@ -552,7 +605,7 @@ static std::vector<State> repeatNode(const std::shared_ptr<Node>& child,int min,
             return;
         }
 
-        auto next=matchNode(child,text,s);
+        auto next=matchNode(child,text,s,budget);
         for(auto &ns:next){
             if(ns.pos==s.pos) continue;
             rec(ns,count+1);
@@ -572,25 +625,26 @@ static int fixedWidth(const std::shared_ptr<Node>& n){
       default:return -1;
     }
 }
-static bool matchLookbehind(const std::shared_ptr<Node>& n,const std::string& text,size_t pos,const State& st){ int w=fixedWidth(n); if(w<0||pos<(size_t)w)return false; auto cp=st; cp.pos=pos-w; auto r=matchNode(n,text,cp); for(auto&s:r)if(s.pos==pos)return true; return false; }
-static std::vector<State> matchNode(const std::shared_ptr<Node>& n,const std::string& text,State st){
+static bool matchLookbehind(const std::shared_ptr<Node>& n,const std::string& text,size_t pos,const State& st, MatchBudget& budget){ int w=fixedWidth(n); if(w<0||pos<(size_t)w)return false; auto cp=st; cp.pos=pos-w; auto r=matchNode(n,text,cp,budget); for(auto&s:r)if(s.pos==pos)return true; return false; }
+static std::vector<State> matchNode(const std::shared_ptr<Node>& n,const std::string& text,State st, MatchBudget& budget){
+    BudgetTicket ticket{budget};
     switch(n->kind){
-      case NodeKind::Sequence:return matchSequence(n->children,0,text,st);
-      case NodeKind::Alternation:{std::vector<State> o;for(auto&c:n->children){auto r=matchNode(c,text,st);o.insert(o.end(),r.begin(),r.end());}return o;}
+      case NodeKind::Sequence:return matchSequence(n->children,0,text,st,budget);
+      case NodeKind::Alternation:{std::vector<State> o;for(auto&c:n->children){auto r=matchNode(c,text,st,budget);o.insert(o.end(),r.begin(),r.end());}return o;}
       case NodeKind::Literal:{if(st.pos+n->text.size()>text.size()||text.compare(st.pos,n->text.size(),n->text)!=0)return {};std::uint32_t cp=0;std::size_t w=0;if(!decodeUtf8(text,st.pos,cp,w))return {};st.pos+=w;return {st};}
       case NodeKind::Escape:{std::uint32_t cp=0;std::size_t w=0;if(!decodeUtf8(text,st.pos,cp,w)||!escapeAtom(n->text,cp))return {};st.pos+=w;return {st};}
       case NodeKind::CharacterClass:{std::uint32_t cp=0;std::size_t w=0;if(!decodeUtf8(text,st.pos,cp,w)||!classAtom(n->text,cp))return {};st.pos+=w;return {st};}
       case NodeKind::Any:{std::uint32_t cp=0;std::size_t w=0;if(!decodeUtf8(text,st.pos,cp,w))return {};st.pos+=w;return {st};}
       case NodeKind::AnchorStart:{return st.pos==0?std::vector<State>{st}:std::vector<State>{};}
       case NodeKind::AnchorEnd:{return st.pos==text.size()?std::vector<State>{st}:std::vector<State>{};}
-      case NodeKind::Group: case NodeKind::NamedGroup:{auto base=st;int i=n->captureIndex; if(i>0){base.caps.start[i]=(int)st.pos;base.caps.set[i]=false;}auto r=matchNode(n->children.front(),text,base);for(auto&s:r)if(i>0){s.caps.end[i]=(int)s.pos;s.caps.set[i]=true;}return r;}
-      case NodeKind::AtomicGroup:{auto r=matchNode(n->children.front(),text,st); if(r.empty()) return {}; return {r.front()};}
+      case NodeKind::Group: case NodeKind::NamedGroup:{auto base=st;int i=n->captureIndex; if(i>0){base.caps.start[i]=(int)st.pos;base.caps.set[i]=false;}auto r=matchNode(n->children.front(),text,base,budget);for(auto&s:r)if(i>0){s.caps.end[i]=(int)s.pos;s.caps.set[i]=true;}return r;}
+      case NodeKind::AtomicGroup:{auto r=matchNode(n->children.front(),text,st,budget); if(r.empty()) return {}; return {r.front()};}
       case NodeKind::Backreference:{int i=n->backreferenceIndex; if(i==0&&!n->captureName.empty()) return {}; if(i<=0||i>=(int)st.caps.set.size()||!st.caps.set[i])return {};size_t a=st.caps.start[i],b=st.caps.end[i];if(b<a||b>text.size()||st.pos+b-a>text.size())return {};if(text.compare(st.pos,b-a,text,a,b-a)!=0)return {};st.pos+=b-a;return {st};}
-      case NodeKind::Quantifier:return repeatNode(n->children.front(),n->minimum,n->maximum,n->greedy,n->possessive,text,st);
-      case NodeKind::Lookahead:{for(auto&s:matchNode(n->children.front(),text,st)) { (void)s; return {st}; } return {};}
-      case NodeKind::NegativeLookahead:{return matchNode(n->children.front(),text,st).empty()?std::vector<State>{st}:std::vector<State>{};}
-      case NodeKind::Lookbehind:{return matchLookbehind(n->children.front(),text,st.pos,st)?std::vector<State>{st}:std::vector<State>{};}
-      case NodeKind::NegativeLookbehind:{return matchLookbehind(n->children.front(),text,st.pos,st)?std::vector<State>{}:std::vector<State>{st};}
+      case NodeKind::Quantifier:return repeatNode(n->children.front(),n->minimum,n->maximum,n->greedy,n->possessive,text,st,budget);
+      case NodeKind::Lookahead:{for(auto&s:matchNode(n->children.front(),text,st,budget)) { (void)s; return {st}; } return {};}
+      case NodeKind::NegativeLookahead:{return matchNode(n->children.front(),text,st,budget).empty()?std::vector<State>{st}:std::vector<State>{};}
+      case NodeKind::Lookbehind:{return matchLookbehind(n->children.front(),text,st.pos,st,budget)?std::vector<State>{st}:std::vector<State>{};}
+      case NodeKind::NegativeLookbehind:{return matchLookbehind(n->children.front(),text,st.pos,st,budget)?std::vector<State>{}:std::vector<State>{st};}
     } return {};
 }
 
@@ -601,18 +655,19 @@ static MatchResult materialize(const std::string& text,const State& s){MatchResu
 MatchResult match(const Pattern& pattern, const std::string& text, bool search){
     const int n=maxCapture(pattern.root); auto caps=makeCaps(n); caps.start[0]=0; caps.set[0]=true;
     const size_t first=search?0:0, last=search?text.size():0;
-    for(size_t pos=first;pos<=last;++pos){State st{pos,caps};auto rs=matchNode(pattern.root,text,st);for(auto&s:rs){s.caps.start[0]=(int)pos;s.caps.end[0]=(int)s.pos;s.caps.set[0]=true;return materialize(text,s);} if(!search)break;}
+    // A fresh budget per match attempt: a search scans every start position
+    // (linear work), and the budget is what bounds the backtracking that each
+    // individual position may do.
+    for(size_t pos=first;pos<=last;++pos){MatchBudget budget;State st{pos,caps};auto rs=matchNode(pattern.root,text,st,budget);for(auto&s:rs){s.caps.start[0]=(int)pos;s.caps.end[0]=(int)s.pos;s.caps.set[0]=true;return materialize(text,s);} if(!search)break;}
     return {};
 }
 std::vector<MatchResult> matchAll(const Pattern& pattern,const std::string& text){
-    std::vector<MatchResult> out; size_t pos=0; while(pos<=text.size()){auto r=match(pattern,text,true); // limit search manually by slicing to preserve absolute spans
-        if(!r.matched) break; if(!out.empty() && r.start<pos) { pos++; continue; }
-        out.push_back(r); pos=r.end>r.start?r.end:r.start+1; if(r.end==text.size()&&r.start==text.size()) break;
-        if(pos>text.size()) break; std::string suffix=text.substr(pos); auto rr=match(pattern,suffix,true); if(!rr.matched) break; rr.start+=pos;rr.end+=pos; for(size_t i=1;i<rr.groups.size();++i){} out.push_back(rr); pos=rr.end>rr.start?rr.end:rr.start+1;
-    }
-    // Above loop is intentionally replaced by a simpler deterministic search pass.
-    out.clear();
-    for(size_t start=0;start<=text.size();){auto caps=makeCaps(maxCapture(pattern.root)); caps.start[0]=(int)start; caps.set[0]=true; State st{start,caps};auto rs=matchNode(pattern.root,text,st);if(rs.empty()){++start;continue;}auto winner=rs.front(); winner.caps.start[0]=(int)start; winner.caps.end[0]=(int)winner.pos; winner.caps.set[0]=true; auto r=materialize(text,winner);out.push_back(r);start=r.end>r.start?r.end:r.start+1;}
+    // Deterministic left-to-right search pass: one match attempt per start
+    // position, each with its own budget. (An older slicing loop here ran a
+    // full second pass and was discarded; removing it halves the work and
+    // keeps one attempt from spending another attempt's budget.)
+    std::vector<MatchResult> out;
+    for(size_t start=0;start<=text.size();){auto caps=makeCaps(maxCapture(pattern.root)); caps.start[0]=(int)start; caps.set[0]=true; State st{start,caps};MatchBudget budget;auto rs=matchNode(pattern.root,text,st,budget);if(rs.empty()){++start;continue;}auto winner=rs.front(); winner.caps.start[0]=(int)start; winner.caps.end[0]=(int)winner.pos; winner.caps.set[0]=true; auto r=materialize(text,winner);out.push_back(r);start=r.end>r.start?r.end:r.start+1;}
     return out;
 }
 std::string replace(const Pattern& pattern,const std::string& text,const std::string& replacement){

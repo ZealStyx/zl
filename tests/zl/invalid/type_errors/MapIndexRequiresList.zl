@@ -1,0 +1,13 @@
+// Regression fixture - invalid/type_errors - MapIndexRequiresList
+//
+// Bracket indexing is List<T>-only; Maps use get()/put(). Indexing a Map must
+// fail with "indexed access requires a List<T>" - not with "list index must
+// be an int", which blamed the key for what is really the wrong object type.
+
+class MapIndexRequiresList {
+    func main(): void {
+        var m = new Map<string, int>()
+        m.put("a", 1)
+        log(m["a"])
+    }
+}

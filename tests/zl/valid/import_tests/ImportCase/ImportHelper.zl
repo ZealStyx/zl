@@ -1,0 +1,33 @@
+// Helper module for the ImportCase fixture - declares no entry point, so the
+// regression runner treats this directory's ImportCase.zl as the case.
+
+import Payload
+
+// A generic class exported by this module and used by the importing case.
+class Box<T> {
+    T value
+
+    func Box(T value): void {
+        this.value = value
+    }
+
+    public func get(): T {
+        return this.value
+    }
+}
+
+class ImportHelper {
+    public static int ZERO = 0
+
+    public static func doubled(Box<int> box): int {
+        return box.get() * 2
+    }
+
+    public static func shout(string s): string {
+        return String.upper(s) + "!"
+    }
+
+    public static func payloadLabel(Payload p): string {
+        return p.label
+    }
+}

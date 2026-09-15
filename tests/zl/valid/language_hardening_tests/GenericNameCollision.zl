@@ -1,0 +1,38 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - GenericNameCollision
+//
+// A user-declared generic class may share its name with a builtin generic's
+// TYPE PARAMETER (builtin Result<T, E> declares `E`). The checker's
+// member-signature fixup pass used to resolve signatures at global scope,
+// so builtin `unwrapErr(): E` was misread as the user's generic class `E`
+// and rejected with a bogus "generic type 'E' requires 1 type argument(s)"
+// error pointing at an unrelated user line. Signatures are now resolved in
+// their owning class's context, so the type parameter wins inside Result
+// and the user's E<E<int>> instantiates normally.
+// ============================================================================
+
+class E<T> {
+    public func wrap(T value): E<T> {
+        var out = new E<T>()
+        out.held = value
+        return out
+    }
+    public T held
+}
+
+class GenericNameCollision {
+    func main(): void {
+        var inner = new E<int>()
+        inner.held = 41
+        var outer = new E<E<int>>()
+        outer.held = inner
+        if (outer.held.held + 1 != 42) { throw new Exception("GenericNameCollision: nesting broken") }
+        var wrapped = inner.wrap(7)
+        if (wrapped.held != 7) { throw new Exception("GenericNameCollision: method broken") }
+        // The builtin Result<T, E> whose type parameter collides must still work.
+        var r = new Ok<int, string>(5)
+        if (!r.isOk()) { throw new Exception("GenericNameCollision: Result broken") }
+        if (r.unwrap() != 5) { throw new Exception("GenericNameCollision: unwrap broken") }
+        log("ok")
+    }
+}

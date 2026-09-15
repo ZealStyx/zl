@@ -50,7 +50,7 @@ namespace zl {
         out += t.functionReturnType ? describeTypeAnnotation(*t.functionReturnType) : "void";
         return out;
     }
-    std::string out = t.name == "float" ? "double" : t.name;
+    std::string out = (t.name == "float" || t.name == "decimal") ? "double" : t.name;
     if (!t.typeArgs.empty()) {
         out += "<";
         for (std::size_t i = 0; i < t.typeArgs.size(); ++i) {

@@ -1,0 +1,10 @@
+[package]
+name = "mid"
+version = "0.1.0"
+
+# NOTE: project/zlpkg.lock.committed was generated when this edge pointed at
+# ../leaf (value 99). It now points at ../leaf2 (value 100): the committed
+# lock is stale by design, and zlpkg must detect the retargeted transitive
+# edge and re-resolve instead of trusting the lock and running the old leaf.
+[dependencies]
+leaf = { path = "../leaf2", version = "0.2.0" }

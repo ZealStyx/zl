@@ -277,6 +277,23 @@ void testFolding() {
     require(realSum && realSum->kind == ConstKind::Double && realSum->doubleValue == 4.0,
             "1.5 + 2.5 folds to 4.0");
 
+    // A non-finite double result raises at runtime, so it stays unfolded.
+    Constant huge;
+    huge.kind = ConstKind::Double;
+    huge.doubleValue = 9.0e307;
+    require(!folded(Opcode::Mul, huge, quarter, types.doubleType()).has_value(),
+            "an overflowing double multiply is not folded: the program must still raise");
+    require(!folded(Opcode::Add, huge, huge, types.doubleType()).has_value(),
+            "an overflowing double add is not folded");
+    Constant negBase;
+    negBase.kind = ConstKind::Double;
+    negBase.doubleValue = -1.0;
+    Constant fracExp;
+    fracExp.kind = ConstKind::Double;
+    fracExp.doubleValue = 0.5;
+    require(!folded(Opcode::Pow, negBase, fracExp, types.doubleType()).has_value(),
+            "a domain-error power is not folded: the program must still raise");
+
     Constant hello;
     hello.kind = ConstKind::String;
     hello.stringValue = "hello ";

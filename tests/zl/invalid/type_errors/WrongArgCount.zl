@@ -1,0 +1,13 @@
+// Regression fixture - invalid/type_errors - WrongArgCount
+//
+// Calling a two-parameter function with one argument is a compile error.
+
+class WrongArgCount {
+    static func add(int a, int b): int {
+        return a + b
+    }
+
+    func main(): void {
+        log(WrongArgCount.add(1))
+    }
+}

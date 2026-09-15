@@ -1,0 +1,17 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - DivisionByZero
+//
+// Division by zero must fail as a runtime error (exit 1), not produce an
+// integer trap, inf, or a garbage value. The .expect-termination marker next
+// to this file tells the regression runner that a nonzero exit here is the
+// expected outcome.
+// ============================================================================
+
+class DivisionByZero {
+    func main(): void {
+        var denominator = 0
+        log("about to divide")
+        var q = 10 / denominator
+        log("quotient " + q)
+    }
+}

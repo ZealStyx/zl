@@ -1,0 +1,15 @@
+// Regression fixture - invalid/semantic_errors - MatchNotExhaustive
+//
+// Match exhaustiveness is checked at compile time: an int match with no
+// catch-all and no covering pattern is rejected.
+
+class MatchNotExhaustive {
+    func main(): void {
+        var n = 5
+        var label = match n {
+            0 => "zero"
+            1 => "one"
+        }
+        log(label)
+    }
+}

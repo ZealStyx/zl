@@ -1,0 +1,7 @@
+fib 17711
+loop 299995
+grid 220047
+digits 45
+sorted sum 191000
+first 0
+last 999

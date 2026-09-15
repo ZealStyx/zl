@@ -1,0 +1,8 @@
+// Regression fixture - invalid/syntax_errors - UnclosedBrace
+//
+// A class body that never closes is a syntax error, not a silent accept of a
+// truncated program.
+
+class UnclosedBrace {
+    func main(): void {
+        log("never closed")

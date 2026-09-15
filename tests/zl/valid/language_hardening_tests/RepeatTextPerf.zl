@@ -1,0 +1,30 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - RepeatTextPerf
+//
+// Text.repeatText must run in linear time: the old implementation
+// re-concatenated the whole accumulator per iteration (quadratic), so a
+// 300k repeat took ~40s; the native implementation behind String.repeatText
+// builds the same string in milliseconds. Like LargeLiteral, the case
+// timeout is the actual perf assertion - any reintroduction of the
+// quadratic loop fails loudly here instead of hanging user programs.
+// ============================================================================
+
+import zl.text.Text
+
+class RepeatTextPerf {
+    func main(): void {
+        var r = Text.repeatText("ab", 300000)
+        if (Text.length(r) != 600000) { throw new Exception("RepeatTextPerf: wrong length") }
+        if (Text.substring(r, 0, 6) != "ababab") { throw new Exception("RepeatTextPerf: wrong content") }
+        if (Text.substring(r, 599994, 600000) != "ababab") { throw new Exception("RepeatTextPerf: wrong tail") }
+        if (Text.repeatText("xy", 0) != "") { throw new Exception("RepeatTextPerf: zero count") }
+        if (Text.repeatText("", 100) != "") { throw new Exception("RepeatTextPerf: empty input") }
+        try {
+            Text.repeatText("ab", -1)
+            throw new Exception("RepeatTextPerf: negative count did not raise")
+        } catch Exception e {
+            if (!Text.contains(e.message, "non-negative")) { throw new Exception("RepeatTextPerf: wrong error: " + e.message) }
+        }
+        log("ok")
+    }
+}

@@ -1,0 +1,87 @@
+// ============================================================================
+// Regression fixture - valid/records - NestedRecords
+//
+// Records (data types): construction, field access, structural equality
+// through nesting, records as function arguments and in collections, and
+// pattern matching on record structure.
+// ============================================================================
+
+data Point {
+    x: int
+    y: int
+}
+
+data Segment {
+    start: Point
+    end: Point
+}
+
+data Tagged {
+    label: string
+    point: Point
+}
+
+class NestedRecords {
+    static func manhattan(Point p): int {
+        // abs() is not auto-imported for records - use Math.abs.
+        return Math.abs(p.x) + Math.abs(p.y)
+    }
+
+    static func describe(Segment s): string {
+        return "(" + s.start.x + "," + s.start.y + ")-(" + s.end.x + "," + s.end.y + ")"
+    }
+
+    func main(): void {
+        var a = Point { x: 3, y: 4 }
+        var b = Point { x: 3, y: 4 }
+        var c = Point { x: -3, y: -4 }
+
+        // structural equality, including sign-sensitive fields
+        log(a == b)
+        log(a == c)
+
+        // field access and helpers
+        log(a.x + a.y)
+        log(NestedRecords.manhattan(c))
+
+        // nesting: equality reaches through both levels
+        var s1 = Segment { start: a, end: Point { x: 5, y: 6 } }
+        var s2 = Segment { start: Point { x: 3, y: 4 }, end: Point { x: 5, y: 6 } }
+        log(s1 == s2)
+        log(NestedRecords.describe(s1))
+        log(s1.end.x - s1.start.x)
+
+        // mixed record shapes stay distinct even with equal numbers
+        var tagged = Tagged { label: "origin", point: Point { x: 3, y: 4 } }
+        log(tagged.label)
+        log(tagged.point == a)
+
+        // records inside collections
+        var points = new List<Point>()
+        points.push(a)
+        points.push(c)
+        log(points.length())
+        log(points.get(1) == c)
+
+        var byLabel = new Map<string, Point>()
+        byLabel.put("origin", a)
+        byLabel.put("mirror", c)
+        log(byLabel.get("mirror").y)
+
+        // structural pattern match with bindings
+        var where = match tagged {
+            Tagged { label: "origin", point: p } => "origin at " + p.x + "," + p.y
+            Tagged { label: name, point: _ } => "other: " + name
+            null => "no tag"
+        }
+        log(where)
+
+        var other = Tagged { label: "mirror", point: c }
+        where = match other {
+            Tagged { label: "origin", point: p } => "origin at " + p.x + "," + p.y
+            Tagged { label: name, point: _ } => "other: " + name
+            null => "no tag"
+        }
+        log(where)
+    }
+}

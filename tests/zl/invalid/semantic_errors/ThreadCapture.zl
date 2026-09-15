@@ -1,0 +1,14 @@
+// Regression fixture - invalid/semantic_errors - ThreadCapture
+//
+// The thread capture rule: a thread closure may only reference Shared<T>
+// values (plus Channel/Atomic/Mutex/RwLock/Semaphore/Condition captures).
+// Referencing a plain local across the boundary is a compile error, not a
+// data race.
+
+class ThreadCapture {
+    func main(): void {
+        var report = "plain local"
+        var worker = Thread.start(func() => report)
+        Thread.join(worker)
+    }
+}

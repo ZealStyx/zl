@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <regex>
@@ -20,6 +21,7 @@
 #include "zl/parser/parser.hpp"
 #include "zl/lexer/lexer.hpp"
 #include "zl/vm/vm.hpp"
+#include "zl/vm/runtime_thread.hpp"
 #include "zl/vm/native.hpp"
 #include "zl/compiler/native_compiler.hpp"
 #include "zl/compiler/pipeline.hpp"
@@ -444,7 +446,51 @@ int safetyCheck(const char* file, const char* executable, const std::string& sto
     return finish(0, "verified", "static verification does not discharge runtime obligations");
 }
 
-int main(int argc, char** argv) {
+// Shared exception-to-exit-code mapping for every command that executes a
+// program. Both the default run path and --mir-vm route their vm.run through
+// here so an uncaught ZL exception always becomes a `runtime error:` report
+// with exit 1, never an uncaught C++ exception (SIGABRT).
+int reportRunException(std::exception_ptr ptr) {
+    try {
+        std::rethrow_exception(std::move(ptr));
+    } catch (const zl::SystemExitException& ex) {
+        // System.exit(code) - deliberately NOT caught by zl's own try/catch
+        // (it isn't a std::runtime_error), so it always terminates the program.
+        return ex.code;
+    } catch (const zl::ModuleError& e) {
+        std::cerr << "module error: " << e.what() << "\n";
+        return 1;
+    } catch (const zl::ParseError& e) {
+        std::cerr << "syntax error: " << e.what() << "\n";
+        return 1;
+    } catch (const zl::TypeCheckError& e) {
+        std::cerr << "compile error: " << e.what() << "\n";
+        return 1;
+    } catch (const zl::ZlThrownException& e) {
+        std::string message = e.what();
+        if (e.value()) {
+            auto it = e.value()->fields.find("message");
+            if (it != e.value()->fields.end() && std::holds_alternative<std::string>(it->second)) {
+                message = std::get<std::string>(it->second);
+            }
+            auto traceIt = e.value()->fields.find("stackTrace");
+            if (traceIt != e.value()->fields.end() && std::holds_alternative<std::string>(traceIt->second)) {
+                const auto& trace = std::get<std::string>(traceIt->second);
+                if (!trace.empty()) {
+                    std::cerr << "runtime error: " << message << "\n" << trace << "\n";
+                    return 1;
+                }
+            }
+        }
+        std::cerr << "runtime error: " << message << "\n";
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << "runtime error: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+int zlMain(int argc, char** argv) {
     if (argc >= 2) {
         const std::string command = argv[1];
         if (command == "--safety-check") {
@@ -840,7 +886,16 @@ int main(int argc, char** argv) {
             std::vector<std::string> programArgs;
             for (int i = 3; i < argc; ++i) programArgs.emplace_back(argv[i]);
             zl::VM vm;
-            return vm.run(*result.chunk, programArgs);
+            auto chunk = std::make_shared<zl::Chunk>(std::move(*compiler.result().chunk));
+            // This branch runs before the function-wide try/catch below, so an
+            // uncaught ZL exception here used to escape to std::terminate
+            // (SIGABRT) instead of the normal `runtime error:` report. Route
+            // it through the same shared mapping the default run path uses.
+            try {
+                return vm.run(std::move(chunk), programArgs);
+            } catch (...) {
+                return reportRunException(std::current_exception());
+            }
         }
         if (command == "--emit-native") {
             // Legacy tier, deliberately kept and deliberately not grown: this is
@@ -1126,9 +1181,9 @@ int main(int argc, char** argv) {
             // compared against, so it says so.
             std::cerr << "reference compiler: AST -> bytecode (not the MIR pipeline)\n";
             zl::Compiler astCompiler;
-            zl::Chunk chunk = astCompiler.compile(*compiler.result().program);
+            auto chunk = std::make_shared<zl::Chunk>(astCompiler.compile(*compiler.result().program));
             zl::VM vm;
-            return vm.run(chunk, programArgs);
+            return vm.run(std::move(chunk), programArgs);
         }
 
         // Stages 3-6: MIR, verification, optimisation, the selected backend.
@@ -1148,40 +1203,23 @@ int main(int argc, char** argv) {
         // The executed artifact is bytecode translated from the same verified
         // MIR whichever backend generated code, because the VM is the execution
         // driver in this phase. See docs/pipeline.md.
-        return vm.run(*result.chunk, programArgs);
-    } catch (const zl::SystemExitException& ex) {
-        // System.exit(code) - deliberately NOT caught by zl's own try/catch
-        // (it isn't a std::runtime_error), so it always terminates the program.
-        return ex.code;
-    } catch (const zl::ModuleError& e) {
-        std::cerr << "module error: " << e.what() << "\n";
-        return 1;
-    } catch (const zl::ParseError& e) {
-        std::cerr << "syntax error: " << e.what() << "\n";
-        return 1;
-    } catch (const zl::TypeCheckError& e) {
-        std::cerr << "compile error: " << e.what() << "\n";
-        return 1;
-    } catch (const zl::ZlThrownException& e) {
-        std::string message = e.what();
-        if (e.value()) {
-            auto it = e.value()->fields.find("message");
-            if (it != e.value()->fields.end() && std::holds_alternative<std::string>(it->second)) {
-                message = std::get<std::string>(it->second);
-            }
-            auto traceIt = e.value()->fields.find("stackTrace");
-            if (traceIt != e.value()->fields.end() && std::holds_alternative<std::string>(traceIt->second)) {
-                const auto& trace = std::get<std::string>(traceIt->second);
-                if (!trace.empty()) {
-                    std::cerr << "runtime error: " << message << "\n" << trace << "\n";
-                    return 1;
-                }
-            }
-        }
-        std::cerr << "runtime error: " << message << "\n";
-        return 1;
-    } catch (const std::exception& e) {
-        std::cerr << "runtime error: " << e.what() << "\n";
-        return 1;
+        // Shared ownership lets every closure and async invocation reference
+        // this one chunk instead of deep-copying it per closure.
+        auto chunk = std::make_shared<zl::Chunk>(std::move(*compiler.result().chunk));
+        return vm.run(std::move(chunk), programArgs);
+    } catch (...) {
+        return reportRunException(std::current_exception());
     }
+}
+
+// The real main(): if the interpreter abandoned a deadlocked worker thread at
+// teardown, exit without running static destructors - the abandoned thread may
+// still touch global runtime state (GC heap, scheduler) during its teardown,
+// and a use-after-free at process exit is worse than a clean _Exit.
+int main(int argc, char** argv) {
+    const int code = zlMain(argc, argv);
+    std::cerr.flush();
+    std::cout.flush();
+    if (zl::gAbandonedWorkerThreads.load(std::memory_order_acquire)) std::_Exit(code);
+    return code;
 }

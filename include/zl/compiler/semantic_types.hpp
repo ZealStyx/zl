@@ -29,7 +29,7 @@ enum class ZlType {
 // collection kinds. Anything else unrecognised is a user/generic class.
 [[nodiscard]] inline ZlType zlTypeFromBaseName(const std::string& name) {
     if (name == "int") return ZlType::INT;
-    if (name == "double" || name == "float") return ZlType::DOUBLE;
+    if (name == "double" || name == "float" || name == "decimal") return ZlType::DOUBLE;
     if (name == "string") return ZlType::STRING;
     if (name == "bool") return ZlType::BOOL;
     if (name == "void") return ZlType::VOID_TYPE;

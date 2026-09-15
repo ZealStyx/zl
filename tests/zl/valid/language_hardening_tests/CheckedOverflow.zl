@@ -1,0 +1,17 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - CheckedOverflow
+//
+// Integer arithmetic is checked: overflowing int64 must fail as a runtime
+// error (exit 1), never wrap silently. The .expect-termination marker next to
+// this file tells the regression runner that a nonzero exit here is the
+// expected outcome.
+// ============================================================================
+
+class CheckedOverflow {
+    func main(): void {
+        var max = 9223372036854775807
+        log("about to overflow")
+        var wrapped = max + 1
+        log("silently wrapped to " + wrapped)
+    }
+}

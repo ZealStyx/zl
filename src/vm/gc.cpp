@@ -2,6 +2,7 @@
 #include "zl/vm/runtime_task.hpp"
 #include "zl/compiler/bytecode.hpp"
 
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <type_traits>
@@ -214,22 +215,37 @@ TracingGC::Collection TracingGC::collect(const GCRoots& roots) {
     std::vector<Value> protectedValues;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // One pass over the registry, not one pass per protected id: build a
+        // pointer -> kind index so protected identities resolve in O(1) each
+        // (the old nested loop was O(P*N) under the registry lock).
+        std::unordered_map<const void*, Entry::Kind> liveByPointer;
+        liveByPointer.reserve(entries_.size());
+        for (const auto& entry : entries_) {
+            const void* id = nullptr;
+            switch (entry.kind) {
+                case Entry::Kind::List: id = entry.list.get(); break;
+                case Entry::Kind::Map: id = entry.map.get(); break;
+                case Entry::Kind::Object: id = entry.object.get(); break;
+                case Entry::Kind::Closure: id = entry.closure.get(); break;
+            }
+            liveByPointer.emplace(id, entry.kind);
+        }
         for (const void* protectedId : protectedIds) {
-            for (const auto& entry : entries_) {
-                switch (entry.kind) {
-                    case Entry::Kind::List:
-                        if (entry.list.get() == protectedId) protectedValues.emplace_back(ListRef(entry.list.get()));
-                        break;
-                    case Entry::Kind::Map:
-                        if (entry.map.get() == protectedId) protectedValues.emplace_back(MapRef(entry.map.get()));
-                        break;
-                    case Entry::Kind::Object:
-                        if (entry.object.get() == protectedId) protectedValues.emplace_back(ObjectRef(entry.object.get()));
-                        break;
-                    case Entry::Kind::Closure:
-                        if (entry.closure.get() == protectedId) protectedValues.emplace_back(ClosureRef(entry.closure.get()));
-                        break;
-                }
+            const auto found = liveByPointer.find(protectedId);
+            if (found == liveByPointer.end()) continue;
+            switch (found->second) {
+                case Entry::Kind::List:
+                    protectedValues.emplace_back(ListRef(static_cast<ListBox*>(const_cast<void*>(protectedId))));
+                    break;
+                case Entry::Kind::Map:
+                    protectedValues.emplace_back(MapRef(static_cast<MapBox*>(const_cast<void*>(protectedId))));
+                    break;
+                case Entry::Kind::Object:
+                    protectedValues.emplace_back(ObjectRef(static_cast<ObjectBox*>(const_cast<void*>(protectedId))));
+                    break;
+                case Entry::Kind::Closure:
+                    protectedValues.emplace_back(ClosureRef(static_cast<ClosureBox*>(const_cast<void*>(protectedId))));
+                    break;
             }
         }
     }

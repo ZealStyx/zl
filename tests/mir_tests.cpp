@@ -10,6 +10,7 @@
 #include "zl/mir/verifier.hpp"
 #include "zl/mir/reachability.hpp"
 
+#include <chrono>
 #include <cstdlib>
 #include <optional>
 #include <iostream>
@@ -77,6 +78,56 @@ Constant nilConstant() {
     Constant c;
     c.kind = ConstKind::Nil;
     return c;
+}
+
+// ---------------------------------------------------------------------------
+// Constant interning
+// ---------------------------------------------------------------------------
+
+Constant doubleConstant(double value) {
+    Constant c;
+    c.kind = ConstKind::Double;
+    c.doubleValue = value;
+    return c;
+}
+
+void testConstantInterning() {
+    Module module;
+    // Dedup: equal values share one slot, distinct values do not.
+    const ConstId one = module.internConstant(intConstant(1));
+    require(module.internConstant(intConstant(1)) == one, "equal ints did not share a constant slot");
+    const ConstId two = module.internConstant(intConstant(2));
+    require(two != one, "distinct ints shared a constant slot");
+    require(module.internConstant(stringConstant("1")) != one, "int 1 and string \"1\" shared a slot");
+    require(module.internConstant(doubleConstant(1.0)) != one, "int 1 and double 1.0 shared a slot");
+    require(module.internConstant(boolConstant(true)) != one, "int 1 and bool true shared a slot");
+    require(module.internConstant(nilConstant()) != one, "int 1 and nil shared a slot");
+    // -0.0 == 0.0, so they must intern together (the hash normalizes the sign).
+    require(module.internConstant(doubleConstant(-0.0)) == module.internConstant(doubleConstant(0.0)),
+            "-0.0 and 0.0 did not share a constant slot");
+    // Ids are dense 1-based positions into Module::constants.
+    require(module.constants.size() == module.constantIndex.size(), "constant index drifted from the pool");
+    for (const auto& entry : module.constantIndex) {
+        require(entry.second >= 1 && entry.second <= module.constants.size(), "constant index held a stale id");
+        require(module.constants[entry.second - 1] == entry.first, "constant index pointed at the wrong slot");
+    }
+
+    // Scale: interning used to scan the pool linearly per literal, so a
+    // large literal (a 200k-element list interns one int per index) compiled
+    // in O(n^2) and effectively hung. 100k distinct values plus 100k
+    // re-interns must stay far below any quadratic budget.
+    Module big;
+    const auto start = std::chrono::steady_clock::now();
+    for (std::int64_t i = 0; i < 100000; ++i) {
+        const ConstId id = big.internConstant(intConstant(i));
+        require(id == static_cast<ConstId>(i + 1), "distinct constants did not get dense ids");
+    }
+    for (std::int64_t i = 0; i < 100000; ++i) {
+        require(big.internConstant(intConstant(i)) == static_cast<ConstId>(i + 1),
+                "re-interned constant missed its slot");
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    require(elapsed < std::chrono::seconds(25), "constant interning regressed to superlinear time");
 }
 
 // ---------------------------------------------------------------------------
@@ -2382,6 +2433,7 @@ void testReachabilityDispatchScalesWithTheHierarchy() {
 }
 
 int main() {
+    testConstantInterning();
     testTypeArena();
     testValidModuleVerifies();
     testControlFlowAnalysis();

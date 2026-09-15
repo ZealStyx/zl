@@ -271,6 +271,20 @@ private:
     // dynamic exception chain, and every opcode/terminator has a faithful
     // bytecode spelling.
     bool isSupported(const Function& fn, std::string& reason) {
+        // The lowering marks a function incomplete when it meets a construct
+        // it cannot represent, and SKIPS THE REST OF THE BODY from that point
+        // on (FunctionLowerer::failed). Compiling that prefix as a whole
+        // function silently misbehaves (a truncated `return a + b` becomes a
+        // void return, faulting some far-away caller contract instead). The
+        // incomplete flag exists precisely to stop a backend from treating a
+        // partial translation as a whole one (lowering.hpp), so refuse it
+        // here: the shared stub raises loudly if the function is reached.
+        if (fn.incomplete) {
+            const std::string why = fn.incompleteReasons.empty() ? std::string("unspecified")
+                                                                 : fn.incompleteReasons.front();
+            reason = "incomplete translation of the source body (" + why + ")";
+            return false;
+        }
         if (!fn.blocks.empty() && !fn.blocks.front().exceptionHandlers.empty()) {
             // The entry block has no incoming edge, so nothing would ever
             // install its handlers; the lowering never produces this.
@@ -1418,6 +1432,14 @@ private:
             pushOperand(fn, ins.operands[1], body, line);
             pushOperand(fn, ins.operands[2], body, line);
             body.emit(OpCode::CallNative, nativeIndexByName("Collection.mapSet"), line, 0);
+        } else if (kind == NativeCollKind::Set) {
+            // Sets grow with setAdd, never a positional append: a literal like
+            // `set<string> {"a", "b", "a"}` must dedup to two elements, exactly
+            // as the reference's newSet/setAdd sequence does. Push would keep
+            // the duplicate and store list-style entries.
+            pushOperand(fn, ins.operands[0], body, line);
+            pushOperand(fn, ins.operands[2], body, line);
+            body.emit(OpCode::CallNative, nativeIndexByName("Collection.setAdd"), line, 0);
         } else {
             // list/array: append value (ignore the growing index).
             pushOperand(fn, ins.operands[0], body, line);

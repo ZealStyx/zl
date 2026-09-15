@@ -1,0 +1,12 @@
+// Regression fixture - invalid/type_errors - ListElementType
+//
+// Pushing a string into a List<int> is caught at compile time - generic
+// element types are enforced, not erased silently.
+
+class ListElementType {
+    func main(): void {
+        var xs = new List<int>()
+        xs.push("not an int")
+        log(xs.length())
+    }
+}
