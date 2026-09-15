@@ -2,6 +2,35 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-15 - The native tier honours the arithmetic contract, and the SysV shadow space is real
+
+**The emitted code is fail-closed like the VM.** An external harsh review of
+the toolchain found that the native backend's *emitted* machine code was silent
+where the language is fail-closed: `INT64_MAX + 1` wrapped to `INT64_MIN`,
+`INT64_MIN / -1` reached `idiv` and raised `#DE`, shift counts were masked mod
+64 (`1 << 64` computed `1 << 0`), and float overflow produced a quiet infinity.
+None of it is reachable in executed programs yet (the VM is the only execution
+driver), and the differential harnesses cannot see it because all three of
+their arms run on the VM - so it existed only in the bytes, and the one suite
+that executes bytes had no test for any of it. The emitter now handles each
+case the way the tier's existing zero-divisor guard does: branch to a trap
+(`ud2` → SIGILL) instead of executing the faulting instruction, with the one
+exception the language defines - `INT64_MIN % -1` computes `0`. A non-finite
+double can no longer exist in native code: `fdiv` traps on a zero divisor, and
+every float operation traps when its exponent field comes out all ones.
+`zl-native-backend-tests` gained `testArithmeticTraps`, which executes all
+fifteen fault cases in forked children (a trap is an assertion, not a
+test-suite death) and the healthy boundary values in the parent.
+
+**The System V model no longer denies the shadow space.** `x64SysVTarget`
+recorded `shadowSpace = 0` and a test asserted "System V has no shadow space";
+PSABI 3.2.2 mandates 32 bytes, so both conventions now agree, the field's
+comment says what it means, and every function that calls reserves it in its
+frame. Not observable today - emitted callees never write the shadow, and the
+tier emits no runtime calls or stack arguments yet - but it is what a future
+`CallRuntime` callee from the C world needs, and a calling frame short of the
+shadow would hand that callee the caller's saved `rbp`.
+
 ## 2026-09-12 - The boundary is enforced, and the compiler knows what runs
 
 The MIR boundary had rules and a component; this phase makes the rules fail the

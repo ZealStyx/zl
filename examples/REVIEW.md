@@ -8,6 +8,24 @@ smaller ones that are recorded but left alone.
 Everything below was reproduced against a build of this tree. Each entry says
 what it is, how to see it, and whether it is fixed here or still open.
 
+## Native-tier arithmetic contract — 2026-09-15
+
+A harsh external review of the toolchain (the kind this file exists to
+encourage) found one MAJOR: the native backend's *emitted* code violated the
+language's fail-closed arithmetic contract in four places — int overflow
+wrapped, `INT64_MIN / -1` raised `#DE`, shift counts were masked mod 64, and
+float overflow emitted a quiet infinity. It was latent (the VM is the only
+execution driver, and the `ZLM1` artifact has no consumer) and invisible to
+the differential harnesses (all three arms execute on the VM), which is why it
+survived: only `zl-native-backend-tests` executes emitted bytes, and it had no
+overflow/shift/float-fault case. Fixed at the emitter — the tier's existing
+zero-divisor trap convention, extended (`INT64_MIN % -1` still computes `0`,
+because the VM defines it) — and covered by fifteen executed-byte trap cases
+plus their healthy boundary neighbours, run in forked children. The SysV
+shadow-space model (`shadowSpace = 0`, asserted by a test against PSABI 3.2.2's
+32) was corrected in the same pass, with the reservation wired into the frame
+layout for calling functions.
+
 ## Stabilization update — 2026-09-08
 
 The findings below include the original reproductions. Subsequent hardening has
