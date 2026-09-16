@@ -105,7 +105,8 @@ private:
     ExecutionState::CallFrame makeCallFrame(const Chunk& chunk, const FunctionInfo& fn,
                                            const std::vector<Value>& args,
                                            const std::optional<Value>& receiver = std::nullopt,
-                                           const ClosureRef& closure = {}) const;
+                                           const ClosureRef& closure = {},
+                                           RuntimeTypeBindings extraBindings = {}) const;
     TaskRef scheduleAsyncInvocation(std::shared_ptr<const Chunk> chunk, std::size_t functionIndex,
                                     ExecutionState::CallFrame frame);
     void resumeAsyncInvocation();

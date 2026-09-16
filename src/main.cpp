@@ -2,7 +2,6 @@
 #include <exception>
 #include <fstream>
 #include <iomanip>
-#include <regex>
 #include <set>
 #include <cstdint>
 #include <filesystem>
@@ -12,6 +11,7 @@
 #include <vector>
 
 
+#include "manifest.hpp"
 #include "zl/common/executable_path.hpp"
 #include "zl/common/json.hpp"
 #include "zl/common/stdlib_version.hpp"
@@ -66,34 +66,23 @@ std::vector<std::filesystem::path> discoverLocalPackageRoots(const std::filesyst
     std::vector<std::filesystem::path> roots;
     std::set<std::filesystem::path> visited;
     std::vector<std::filesystem::path> queue{manifestPath};
-    const std::regex pathDep(R"zl(path\s*=\s*"([^"]+)")zl");
 
     while (!queue.empty()) {
         const auto currentManifest = std::filesystem::weakly_canonical(queue.back());
         queue.pop_back();
         if (!visited.insert(currentManifest).second) continue;
 
-        std::ifstream file(currentManifest);
-        if (!file) continue;
-        std::string line;
-        bool inDependencies = false;
-        while (std::getline(file, line)) {
-            const auto comment = line.find('#');
-            if (comment != std::string::npos) line.erase(comment);
-            const auto first = line.find_first_not_of(" \t\r\n");
-            if (first == std::string::npos) continue;
-            const auto last = line.find_last_not_of(" \t\r\n");
-            line = line.substr(first, last - first + 1);
-
-            if (!line.empty() && line.front() == '[' && line.back() == ']') {
-                inDependencies = (line == "[dependencies]");
-                continue;
-            }
-            if (!inDependencies) continue;
-
-            std::smatch match;
-            if (!std::regex_search(line, match, pathDep)) continue;
-            const auto depDir = std::filesystem::weakly_canonical(currentManifest.parent_path() / match[1].str());
+        zlpkg::Manifest manifest;
+        try {
+            manifest = zlpkg::loadManifest(currentManifest);
+        } catch (const zlpkg::ManifestError&) {
+            // A broken nested manifest is skipped rather than failing --check
+            // of an otherwise valid entry file, matching the previous scanner.
+            continue;
+        }
+        for (const auto& dep : manifest.dependencies) {
+            if (dep.kind != zlpkg::Dependency::Kind::Path) continue;
+            const auto depDir = std::filesystem::weakly_canonical(currentManifest.parent_path() / dep.source);
             if (!std::filesystem::exists(depDir) || !std::filesystem::is_directory(depDir)) continue;
 
             const auto src = depDir / "src";
@@ -1034,8 +1023,13 @@ int zlMain(int argc, char** argv) {
                          "every command is the same pipeline (source -> semantic analysis -> MIR ->\n"
                          "verify -> optimise -> backend) with different stages; see docs/pipeline.md\n"
                          "\n"
+                         "`--backend native` generates machine code for the supported subset, but the\n"
+                         "program still executes on the VM. Mixed-mode native execution is not\n"
+                         "implemented yet; use --strict-native to refuse programs the native tier\n"
+                         "cannot compile fully.\n"
+                         "\n"
                          "environment:\n"
-                         "  ZL_BACKEND=<bytecode|native>  backend selection (same as --backend)\n"
+                         "  ZL_BACKEND=<bytecode|native>  backend selection (same as --backend; native still runs on the VM)\n"
                          "  ZL_MIR_OPT=0|1                the MIR optimisation stage on the run path\n"
                          "  ZL_MIR_OPT_PASSES=<spec>      optimiser pipeline: default, none, or a pass list\n"
                          "  ZL_MIR_OPT_CHECK=1            differential check after optimising\n"

@@ -19,6 +19,11 @@ public:
         std::string functionName;
         std::string ownerClassName;
         RuntimeTypeBindings typeBindings;
+        // Method-level type parameter names from FunctionInfo. AssertType
+        // skips a check whose expected type still names one of these after
+        // substitution (an unbound method T), matching the class-parameter
+        // skip for unsubstituted templates.
+        std::vector<std::string> typeParameters;
         std::string returnTypeName;
         std::vector<std::string> ownedLocalNames;
 

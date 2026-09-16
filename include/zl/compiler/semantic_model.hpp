@@ -27,6 +27,7 @@ struct ClassFieldInfo {
 };
 
 struct ClassMethodInfo {
+    std::vector<std::string> typeParams; // method-level type parameters; empty if not generic
     std::vector<ZlType> paramTypes;
     std::vector<std::string> paramClassNames;
     std::vector<bool> paramIsGeneric;

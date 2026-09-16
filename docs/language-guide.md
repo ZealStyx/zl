@@ -274,6 +274,27 @@ machinery that user-defined generics (`class Box<T>`) already use. A mismatched 
 caught by ordinary overload resolution, with the same error-message quality as any other
 method call.
 
+### Generic methods
+
+A method may declare its own type parameters, independently of any class-level ones:
+
+```zl
+class Helpers {
+    public static func firstOf<T>(List<T> items, T fallback): T {
+        if (items.length() == 0) { return fallback }
+        return items.get(0)
+    }
+}
+
+var nums = new List<int>()
+nums.push(41)
+int first = Helpers.firstOf<int>(nums, 0)   // 41
+```
+
+Type arguments at the call site are required — there is no inference from the
+arguments. A method type parameter may not reuse a name already bound as a class
+type parameter (`class Box<T> { func identity<T>(...) }` is a compile error).
+
 **Naming note.** The index/key-assignment method is `put`, not `set`, because `set` is a
 reserved keyword (the lowercase `set<T>` annotation). This is a keyword-collision
 workaround, not a design preference.

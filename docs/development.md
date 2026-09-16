@@ -91,12 +91,16 @@ program, and `zlpkg run` verifies that the adjacent runtime reports a matching v
 - The main executable runs one pipeline: load (`ModuleLoader`), semantic analysis
   (`TypeChecker`), typed lowering to MIR, MIR verification, MIR optimisation, and
   the selected backend. `zl file.zl` is that pipeline with the bytecode backend,
-  whose chunk the VM executes; `zl --backend native file.zl` is the same pipeline
-  with the native backend generating machine code. Every command in `main.cpp` is
-  a set of stage options over `zl::pipeline::Pipeline`
-  (`include/zl/compiler/pipeline.hpp`), not a pipeline of its own. See
-  [`pipeline.md`](pipeline.md) for the stages, their invariants, the backend
-  contract and the exit codes.
+  whose chunk the VM executes. `zl --backend native file.zl` is the same pipeline
+  with the native backend generating machine code for the supported subset, but
+  the program still executes on the VM; mixed-mode native execution is not
+  implemented. Every command in `main.cpp` is a set of stage options over
+  `zl::pipeline::Pipeline` (`include/zl/compiler/pipeline.hpp`), not a pipeline
+  of its own. See [`pipeline.md`](pipeline.md) for the stages, their invariants,
+  the backend contract and the exit codes.
+- The `zl_language` sources are listed explicitly in `CMakeLists.txt` (no
+  `file(GLOB_RECURSE ...)`), so a stray `.cpp` under `src/` does not silently
+  join the link.
 - Errors are reported in three categories: `syntax error`, `compile error`, and
   `runtime error` (plus `module error` for import/package problems).
 - `stdlib/` is copied next to the built binary so a development build can find it.
@@ -116,8 +120,12 @@ program, and `zlpkg run` verifies that the adjacent runtime reports a matching v
 
 C++ unit tests cover the lexer, parser, compiler, VM, IR, MIR, regex engine,
 scheduler, native compiler, and FFI layers; they are declared as separate
-executables in `CMakeLists.txt`. If you extend the language, add tests for the
-affected layer.
+executables in `CMakeLists.txt`. Required tests fail configuration if their
+source is missing rather than being skipped. If you extend the language, add
+tests for the affected layer.
+
+`.github/workflows/ci.yml` configures the tree, builds `zl-tests`, and runs
+`ctest` on every push and pull request.
 
 MIR has six targets, split by what they link:
 
@@ -239,6 +247,18 @@ Both discover the `_lib` module roots themselves and set `ZL_EXTRA_ROOTS`, so a
 program that imports a sibling module is genuinely compared instead of failing to
 load on both paths and being counted as a match. If a corpus program stops being
 compared, that shows up as a change in the counts, not as a silent pass.
+
+### On CI
+
+`.github/workflows/ci.yml` runs exactly the commands above on every push to
+`main` and every pull request. The Linux job is the full gate: the `zl-tests`
+build, the whole CTest suite, the regression corpus
+(`scripts/run_regressions.sh … all`), the five differential harnesses, and the
+native compiler gate. macOS and Windows build and run CTest so the
+"portable, on every platform" claim is verified rather than assumed; the
+native-execution tests guard themselves and skip where executable memory is
+unavailable. Nothing in the workflow is CI-only, and every gate exits
+non-zero on a mismatch, so a green check is the claim above, not a hope.
 
 ## Distribution builds
 

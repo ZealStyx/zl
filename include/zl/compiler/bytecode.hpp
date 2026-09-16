@@ -43,7 +43,9 @@ enum class OpCode : std::uint8_t {
     Jump,          // unconditional jump
     JumpIfFalse,   // pop condition; jump only if it was falsy
 
-    Call,          // operand = index into Chunk::functions; async functions return a Task and schedule execution
+    Call,          // operand = index into Chunk::functions; async functions return a Task and schedule execution.
+                   // operand2 = name-pool index + 1 of a ';'-joined list of resolved
+                   // method-level type arguments (0 = none).
     Return,        // pops the return value, restores the caller's frame, pushes the value back
     CallNative,    // operand = index into the native func registry; pops args, calls into C++, pushes result
     PushProgramArgs, // pushes a list<string> built from the VM's real CLI args (see main.cpp) - used to feed main(args: list<string>)
@@ -102,6 +104,8 @@ enum class OpCode : std::uint8_t {
     // Pops operand2 args, then the receiver object, and resolves the slot
     // directly through the receiver class's compiled vtable. No runtime string
     // construction, class-parent walk, or FunctionInfo linear scan is needed.
+    // operand3 = name-pool index + 1 of a ';'-joined list of resolved
+    // method-level type arguments (0 = none).
     InvokeMethod,
 
     // operand = compile-time index into Chunk::functions for the exact
@@ -110,6 +114,8 @@ enum class OpCode : std::uint8_t {
     // and calls that func directly. `super` therefore has no runtime
     // string construction, parent-chain walk, or FunctionInfo linear scan.
     // Used for both `super(...)` (constructor) and `super.method(...)`.
+    // operand3 = name-pool index + 1 of a ';'-joined list of resolved
+    // method-level type arguments (0 = none), matching InvokeMethod.
     InvokeSuper,
 
     Log,   // pop and print
@@ -139,6 +145,9 @@ struct FunctionInfo {
     // Locals with explicit owned semantics. The compiler records these on the
     // function so the VM can release them deterministically at frame exit.
     std::vector<std::string> ownedLocalNames;
+    // Method-level type parameters only (`func firstOf<T>(...)`). Class-level
+    // parameters arrive via the receiver's type bindings, not this list.
+    std::vector<std::string> typeParameters;
 };
 
 // One bytecode instruction. `operand`'s meaning depends on `op` (see comments

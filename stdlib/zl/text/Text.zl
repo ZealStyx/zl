@@ -1,7 +1,10 @@
 // zl.text.Text - ZL-owned text convenience API.
-// String.* remains the small native string primitive boundary.
+// String.* remains the small native byte-string primitive boundary.
+// Character indexing (length, charAt, substring, reverse, codePointAt, ...)
+// is by Unicode scalar value; search helpers that return offsets
+// (indexOf, lastIndexOf, indexOfFrom, indicesOf) report scalar indices too.
 class Text {
-    public static func length(string value): int { return String.length(value) }
+    public static func length(string value): int { return String.utf8Length(value) }
     public static func isEmpty(string value): bool { return String.length(value) == 0 }
     public static func isNotEmpty(string value): bool { return String.length(value) != 0 }
     public static func upper(string value): string { return String.upper(value) }
@@ -16,20 +19,18 @@ class Text {
         return String.repeatText(value, count)
     }
     public static func contains(string value, string needle): bool { return String.contains(value, needle) }
-    public static func indexOf(string value, string needle): int { return String.indexOf(value, needle) }
-    public static func charAt(string value, int index): string { return String.charAt(value, index) }
-    public static func substring(string value, int start, int length): string { return String.substring(value, start, length) }
+    public static func indexOf(string value, string needle): int {
+        var bytePos = String.indexOf(value, needle)
+        if (bytePos < 0) { return -1 }
+        return String.utf8IndexFromByte(value, bytePos)
+    }
+    public static func charAt(string value, int index): string { return String.utf8CharAt(value, index) }
+    // Third argument is an exclusive end index in Unicode scalars, matching
+    // String.substring's byte-range shape. `Text.substring("hello", 1, 3)` is "el".
+    public static func substring(string value, int start, int length): string { return String.utf8Substring(value, start, length) }
     public static func replace(string value, string from, string to): string { return String.replace(value, from, to) }
     public static func remove(string value, string fragment): string { return String.replace(value, fragment, "") }
-    public static func reverse(string value): string {
-        var result = ""
-        var i = String.length(value) - 1
-        while i >= 0 {
-            result = result + String.charAt(value, i)
-            i = i - 1
-        }
-        return result
-    }
+    public static func reverse(string value): string { return String.utf8Reverse(value) }
     public static func toInt(string value): int { return String.toInt(value) }
     public static func toFloat(string value): double { return String.toFloat(value) }
     public static func toBool(string value): bool { return Bool.parse(value) }
@@ -61,25 +62,27 @@ class Text {
         return result
     }
     public static func padLeft(string value, int width, string fill): string {
-        if String.length(fill) == 0 { throw new Exception("Text.padLeft fill must not be empty") }
-        var missing = width - String.length(value)
+        if String.utf8Length(fill) == 0 { throw new Exception("Text.padLeft fill must not be empty") }
+        var missing = width - String.utf8Length(value)
         if missing <= 0 { return value }
         var prefix = ""
         var i = 0
+        var fillLen = String.utf8Length(fill)
         while i < missing {
-            prefix = prefix + String.charAt(fill, i % String.length(fill))
+            prefix = prefix + String.utf8CharAt(fill, i % fillLen)
             i = i + 1
         }
         return prefix + value
     }
     public static func padRight(string value, int width, string fill): string {
-        if String.length(fill) == 0 { throw new Exception("Text.padRight fill must not be empty") }
-        var missing = width - String.length(value)
+        if String.utf8Length(fill) == 0 { throw new Exception("Text.padRight fill must not be empty") }
+        var missing = width - String.utf8Length(value)
         if missing <= 0 { return value }
         var suffix = ""
         var i = 0
+        var fillLen = String.utf8Length(fill)
         while i < missing {
-            suffix = suffix + String.charAt(fill, i % String.length(fill))
+            suffix = suffix + String.utf8CharAt(fill, i % fillLen)
             i = i + 1
         }
         return value + suffix
@@ -118,8 +121,8 @@ class Text {
     public static func words(string value): List<string> {
         var result = new List<string>()
         var current = ""
-        for i in 0..String.length(value) {
-            var c = String.charAt(value, i)
+        for i in 0..String.utf8Length(value) {
+            var c = String.utf8CharAt(value, i)
             if (c == " " || c == "\t" || c == "\n" || c == "\r") {
                 if (current != "") { result.push(current) }
                 current = ""
@@ -133,8 +136,8 @@ class Text {
 
     public static func chars(string value): List<string> {
         var result = new List<string>()
-        for i in 0..String.length(value) {
-            result.push(String.charAt(value, i))
+        for i in 0..String.utf8Length(value) {
+            result.push(String.utf8CharAt(value, i))
         }
         return result
     }
@@ -166,20 +169,28 @@ class Text {
 
     // --- Searching ----------------------------------------------------------
 
-    public static func lastIndexOf(string value, string needle): int { return String.lastIndexOf(value, needle) }
+    public static func lastIndexOf(string value, string needle): int {
+        var bytePos = String.lastIndexOf(value, needle)
+        if (bytePos < 0) { return -1 }
+        return String.utf8IndexFromByte(value, bytePos)
+    }
     public static func indexOfFrom(string value, string needle, int start): int {
-        return String.indexOfFrom(value, needle, start)
+        var byteStart = String.utf8ByteIndex(value, start)
+        var bytePos = String.indexOfFrom(value, needle, byteStart)
+        if (bytePos < 0) { return -1 }
+        return String.utf8IndexFromByte(value, bytePos)
     }
 
     public static func indicesOf(string value, string needle): List<int> {
         var result = new List<int>()
-        if (String.length(needle) == 0) { return result }
+        if (String.utf8Length(needle) == 0) { return result }
         var from = 0
-        while (from <= String.length(value) - String.length(needle)) {
-            var found = String.indexOfFrom(value, needle, from)
+        var needleLen = String.utf8Length(needle)
+        while (from <= String.utf8Length(value) - needleLen) {
+            var found = Text.indexOfFrom(value, needle, from)
             if (found < 0) { return result }
             result.push(found)
-            from = found + String.length(needle)
+            from = found + needleLen
         }
         return result
     }
@@ -210,8 +221,8 @@ class Text {
     // --- Case helpers --------------------------------------------------------
 
     public static func capitalize(string value): string {
-        if (String.length(value) == 0) { return value }
-        return String.upper(String.charAt(value, 0)) + String.substring(value, 1, String.length(value))
+        if (String.utf8Length(value) == 0) { return value }
+        return String.upper(String.utf8CharAt(value, 0)) + String.utf8Substring(value, 1, String.utf8Length(value))
     }
 
     public static func title(string value): string {
@@ -229,46 +240,47 @@ class Text {
     public static func slice(string value, int start, int end): string {
         var from = start
         var to = end
+        var n = String.utf8Length(value)
         if (from < 0) { from = 0 }
-        if (to > String.length(value)) { to = String.length(value) }
+        if (to > n) { to = n }
         if (to <= from) { return "" }
-        return String.substring(value, from, to)
+        return String.utf8Substring(value, from, to)
     }
 
     public static func take(string value, int count): string { return Text.slice(value, 0, count) }
-    public static func drop(string value, int count): string { return Text.slice(value, count, String.length(value)) }
+    public static func drop(string value, int count): string { return Text.slice(value, count, String.utf8Length(value)) }
 
     public static func padCenter(string value, int width, string fill): string {
-        var missing = width - String.length(value)
+        var missing = width - String.utf8Length(value)
         if (missing <= 0) { return value }
         var left = missing / 2
-        return Text.padRight(Text.padLeft(value, String.length(value) + left, fill), width, fill)
+        return Text.padRight(Text.padLeft(value, String.utf8Length(value) + left, fill), width, fill)
     }
 
     public static func truncate(string value, int width, string ellipsis): string {
-        if (String.length(value) <= width) { return value }
-        if (width <= String.length(ellipsis)) { return Text.take(ellipsis, width) }
-        return Text.take(value, width - String.length(ellipsis)) + ellipsis
+        if (String.utf8Length(value) <= width) { return value }
+        if (width <= String.utf8Length(ellipsis)) { return Text.take(ellipsis, width) }
+        return Text.take(value, width - String.utf8Length(ellipsis)) + ellipsis
     }
 
     // --- Characters ------------------------------------------------------------
 
-    public static func codePointAt(string value, int index): int { return String.codePointAt(value, index) }
-    public static func fromCodePoint(int code): string { return String.fromCodePoint(code) }
+    public static func codePointAt(string value, int index): int { return String.utf8CodePointAt(value, index) }
+    public static func fromCodePoint(int code): string { return String.utf8FromCodePoint(code) }
 
     public static func isDigits(string value): bool {
-        if (String.length(value) == 0) { return false }
-        for i in 0..String.length(value) {
-            var code = String.codePointAt(value, i)
+        if (String.utf8Length(value) == 0) { return false }
+        for i in 0..String.utf8Length(value) {
+            var code = String.utf8CodePointAt(value, i)
             if (code < 48 || code > 57) { return false }
         }
         return true
     }
 
     public static func isAlpha(string value): bool {
-        if (String.length(value) == 0) { return false }
-        for i in 0..String.length(value) {
-            var code = String.codePointAt(value, i)
+        if (String.utf8Length(value) == 0) { return false }
+        for i in 0..String.utf8Length(value) {
+            var code = String.utf8CodePointAt(value, i)
             var upper = code >= 65 && code <= 90
             var lower = code >= 97 && code <= 122
             if (!upper && !lower) { return false }

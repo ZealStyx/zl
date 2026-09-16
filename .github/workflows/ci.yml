@@ -1,0 +1,246 @@
+# The checks in docs/development.md, on every push.
+#
+# Everything here is the same command a developer runs by hand - the build
+# target, the CTest suite, and the shell gates. No check in this file is
+# special-cased for CI, and no gate that prints "identical" but exits 0 can
+# hide here: every one of them returns non-zero on a mismatch, so a red line
+# is a real regression and a green line is the claim, not a hope.
+#
+# The Linux job runs the full gate (CTest plus the corpus and differential
+# harnesses, which are language-semantics checks and therefore platform
+# independent). macOS and Windows build and run the CTest suite so the
+# "portable, on every platform" promise in docs/development.md is verified
+# rather than assumed; the native-execution tests guard themselves with
+# ZL_NATIVE_CAN_EXECUTE and skip where executable memory is unavailable.
+#
+# Two details are deliberate, and easy to remove by accident:
+#   --parallel 4, not a bare --parallel. zl-tests is 36 executables, and
+#     unbounded parallelism starts one compiler per source file at once, which
+#     exhausts a small runner's memory and dies with "Killed signal terminated
+#     program cc1plus" - a resource failure that reads like a code failure.
+#   ctest -C Release. The Windows generator is multi-config, so without an
+#     explicit configuration ctest looks for the test binaries in a directory
+#     that was never written. It is inert on single-config generators.
+#
+# Every build pipes through tee so that a failing build can publish its
+# compiler errors as annotations and into the job summary. A red build is
+# otherwise only diagnosable by downloading the log archive, which is a
+# needlessly slow way to learn that one file did not compile - and impossible
+# from an environment that cannot reach the log host.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push on the same ref supersedes the older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux - full gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+
+      - name: Build (core plus every test executable and fixture)
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build build --config Release --target zl-tests --parallel 4 2>&1 | tee build.log
+
+      - name: CTest (unit suites, boundary lint, safety pipeline, report and parity checks)
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest --test-dir build --output-on-failure -C Release --timeout 300 2>&1 | tee ctest.log
+
+      - name: Regression corpus (tests/zl/valid and tests/zl/invalid, including package-manager cases)
+        run: bash scripts/run_regressions.sh build/zl_language all
+
+      - name: Differential harnesses (examples corpus)
+        run: |
+          bash tools/backend_diff.sh build/zl_language
+          bash tools/mir_backend_diff.sh build/zl_language
+          bash tools/mir_opt_diff.sh build/zl_language
+          bash tools/mir_promotion_diff.sh build/zl_language
+          bash tools/mir_opt_check_all.sh build/zl_language
+
+      - name: Native compiler gate (legacy --emit-native path plus benchmark parity)
+        run: bash scripts/native_gate.sh
+
+      - name: Failures, as annotations
+        if: failure()
+        shell: bash
+        run: |
+          # Emit each failure as a workflow-command annotation. Unlike the log
+          # archive - which has to be downloaded - annotations are readable
+          # through the checks API, so a red build or a red test on a platform
+          # we cannot reproduce locally is still diagnosable.
+          #
+          # Test results first, then compiler errors: if the build failed the
+          # CTest log does not exist, and if it passed the build log is noise.
+          # The patterns are anchored on real diagnostics ('error:', MSVC's
+          # 'error C1234') - a bare 'error' matches filenames like error.cpp and
+          # buries the one line that matters behind a wall of progress output.
+          # Each grep needs '|| true'. Steps run under `bash -e -o pipefail`
+          # here, so a pipeline whose grep matches nothing - the ordinary case
+          # when the build succeeds and only a test fails - exits non-zero and
+          # would abort this step before it reported anything at all.
+          {
+            grep -hE 'Test #[0-9]+|\*\*\*Failed|Errors while running CTest|tests passed|tests failed' ctest.log 2>/dev/null | head -25 || true
+            grep -hE 'error:|error C[0-9]+|fatal error' build.log 2>/dev/null | head -25 || true
+          } > failures.txt
+          n=0
+          while IFS= read -r line; do
+            n=$((n + 1))
+            [ "$n" -le 30 ] || break
+            line="${line//'%'/%25}"
+            line="${line//$'\r'/%0D}"
+            line="${line//$'\n'/%0A}"
+            printf '::error::%s\n' "$line"
+          done < failures.txt
+          {
+            echo '### Failures'
+            echo
+            echo '```'
+            cat failures.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  macos:
+    name: macOS - build and CTest
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+
+      - name: Build
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build build --config Release --target zl-tests --parallel 4 2>&1 | tee build.log
+
+      - name: CTest
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest --test-dir build --output-on-failure -C Release --timeout 300 2>&1 | tee ctest.log
+
+      - name: Failures, as annotations
+        if: failure()
+        shell: bash
+        run: |
+          # Emit each failure as a workflow-command annotation. Unlike the log
+          # archive - which has to be downloaded - annotations are readable
+          # through the checks API, so a red build or a red test on a platform
+          # we cannot reproduce locally is still diagnosable.
+          #
+          # Test results first, then compiler errors: if the build failed the
+          # CTest log does not exist, and if it passed the build log is noise.
+          # The patterns are anchored on real diagnostics ('error:', MSVC's
+          # 'error C1234') - a bare 'error' matches filenames like error.cpp and
+          # buries the one line that matters behind a wall of progress output.
+          # Each grep needs '|| true'. Steps run under `bash -e -o pipefail`
+          # here, so a pipeline whose grep matches nothing - the ordinary case
+          # when the build succeeds and only a test fails - exits non-zero and
+          # would abort this step before it reported anything at all.
+          {
+            grep -hE 'Test #[0-9]+|\*\*\*Failed|Errors while running CTest|tests passed|tests failed' ctest.log 2>/dev/null | head -25 || true
+            grep -hE 'error:|error C[0-9]+|fatal error' build.log 2>/dev/null | head -25 || true
+          } > failures.txt
+          n=0
+          while IFS= read -r line; do
+            n=$((n + 1))
+            [ "$n" -le 30 ] || break
+            line="${line//'%'/%25}"
+            line="${line//$'\r'/%0D}"
+            line="${line//$'\n'/%0A}"
+            printf '::error::%s\n' "$line"
+          done < failures.txt
+          {
+            echo '### Failures'
+            echo
+            echo '```'
+            cat failures.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  windows:
+    name: Windows - build and CTest
+    runs-on: windows-latest
+    # MSVC needs roughly three times the wall clock of the Linux job for the
+    # same zl-tests target: several of the 36 executables each compile the
+    # whole runtime source set, and there is no ccache on the runner. 30
+    # minutes was not enough to finish the build, which reads as a hang.
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+
+      - name: Build
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build build --config Release --target zl-tests --parallel 4 2>&1 | tee build.log
+
+      - name: CTest
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest --test-dir build --output-on-failure -C Release --timeout 300 2>&1 | tee ctest.log
+
+      - name: Failures, as annotations
+        if: failure()
+        shell: bash
+        run: |
+          # Emit each failure as a workflow-command annotation. Unlike the log
+          # archive - which has to be downloaded - annotations are readable
+          # through the checks API, so a red build or a red test on a platform
+          # we cannot reproduce locally is still diagnosable.
+          #
+          # Test results first, then compiler errors: if the build failed the
+          # CTest log does not exist, and if it passed the build log is noise.
+          # The patterns are anchored on real diagnostics ('error:', MSVC's
+          # 'error C1234') - a bare 'error' matches filenames like error.cpp and
+          # buries the one line that matters behind a wall of progress output.
+          # Each grep needs '|| true'. Steps run under `bash -e -o pipefail`
+          # here, so a pipeline whose grep matches nothing - the ordinary case
+          # when the build succeeds and only a test fails - exits non-zero and
+          # would abort this step before it reported anything at all.
+          {
+            grep -hE 'Test #[0-9]+|\*\*\*Failed|Errors while running CTest|tests passed|tests failed' ctest.log 2>/dev/null | head -25 || true
+            grep -hE 'error:|error C[0-9]+|fatal error' build.log 2>/dev/null | head -25 || true
+          } > failures.txt
+          n=0
+          while IFS= read -r line; do
+            n=$((n + 1))
+            [ "$n" -le 30 ] || break
+            line="${line//'%'/%25}"
+            line="${line//$'\r'/%0D}"
+            line="${line//$'\n'/%0A}"
+            printf '::error::%s\n' "$line"
+          done < failures.txt
+          {
+            echo '### Failures'
+            echo
+            echo '```'
+            cat failures.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

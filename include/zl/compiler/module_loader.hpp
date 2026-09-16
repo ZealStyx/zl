@@ -8,6 +8,7 @@
 
 #include "zl/parser/ast.hpp"
 #include "zl/compiler/module_graph.hpp"
+#include "zl/compiler/source_root.hpp"
 
 namespace zl {
 
@@ -31,11 +32,12 @@ public:
 // must still follow the existing "class name matches file name" rule
 // (checked against that file's own basename, not the dotted import path).
 //
-// The source root is: the nearest ancestor directory literally named `src`,
-// walking up from the entry file; if none is found (e.g. today's flat
-// `examples/*.zl` files with no imports), the entry file's own directory is
-// used, which keeps existing single-file/no-import programs working exactly
-// as before.
+// The source root is resolveProjectSourceRoot(entryFile): the nearest
+// ancestor directory literally named `src`, walking up from the entry file
+// but stopping at a `zlpkg.toml` or `.git` project boundary. If none is
+// found (e.g. today's flat `examples/*.zl` files with no imports), the
+// entry file's own directory is used, which keeps existing
+// single-file/no-import programs working exactly as before.
 class ModuleLoader {
 public:
     // `extraRoots`, if non-empty, are searched IN ORDER after the project's

@@ -206,6 +206,11 @@ struct Function {
     // records the substitution in `genericArguments` instead.
     bool isGenericTemplate{false};
     std::vector<std::string> typeParameters;
+    // Method-level type parameters only (`func firstOf<T>`). Distinct from
+    // `typeParameters`, which is the enclosing class's list and must stay
+    // size-matched with a receiver's type arguments. A method-only generic
+    // on a non-generic class still sets isGenericTemplate.
+    std::vector<std::string> methodTypeParameters;
     std::vector<std::uint32_t> genericArguments;
     ExceptionBehavior exceptionBehavior{ExceptionBehavior::Unknown};
     // Captured variables, for closures only.

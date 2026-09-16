@@ -120,9 +120,10 @@ struct CallingConvention {
 
     // Required stack alignment (bytes) at the point a `call` executes.
     std::uint32_t stackAlignment{16};
-    // Bytes the caller must reserve above the return address for the callee
-    // to spill its register arguments into (Win64's 32-byte shadow space); 0
-    // where the convention has none.
+    // Bytes the caller must keep at the top of its own frame at the moment a
+    // `call` executes so the callee may spill into [rsp, rsp+shadowSpace):
+    // the x86-64 shadow space. Both conventions mandate 32 (System V: PSABI
+    // 3.2.2; Win64: the ABI's shadow space); 0 where the convention has none.
     std::uint32_t shadowSpace{0};
     // Bytes below the stack pointer a leaf function may use without adjusting
     // rsp. The backend does not currently exploit it; it is recorded because

@@ -92,7 +92,11 @@ void testEnqueueValidationAndConcurrentFeed() {
     const int perThread = 500;
     std::vector<std::thread> feeders;
     for (int t = 0; t < threads; ++t) {
-        feeders.emplace_back([&scheduler, &ran] {
+        // perThread is captured explicitly. Reading a const int with a
+        // constant initializer is not an odr-use, so the standard needs no
+        // capture at all - but MSVC rejects that with C3493 ("cannot be
+        // implicitly captured") unless the variable is named here.
+        feeders.emplace_back([&scheduler, &ran, perThread] {
             for (int i = 0; i < perThread; ++i) {
                 scheduler.enqueue(std::make_shared<zl::AsyncFrame>([&ran] { ++ran; }));
             }
