@@ -2,7 +2,6 @@
 
 #include <array>
 #include <cstdint>
-#include <functional>
 
 namespace zl::mir {
 
@@ -125,164 +124,172 @@ const char* terminatorKindName(TerminatorKind kind) noexcept {
     return "<invalid-terminator>";
 }
 
+namespace {
+
+constexpr std::size_t kOpcodeShapeCount = static_cast<std::size_t>(Opcode::Log) + 1;
+
+using OpcodeShapeTable = std::array<OpcodeShape, kOpcodeShapeCount>;
+
+// A plain function, not a lambda held in a local variable. MSVC does not
+// deduce the type of a closure declared inside another lambda whose return
+// type is itself being deduced, so it parsed the first call to it as a
+// function-style cast (C2440) and reported it as used before it was
+// initialized (C3536). A named function has no closure type and nothing to
+// deduce, so the table is built identically on every compiler.
+//
+// Field order is producesResult, optionalResult, mayThrow, hasSideEffects:
+// optionalResult defaults to false here and is enabled below for the
+// void-omission family only. (Passing throws_/effects positionally into
+// optionalResult/mayThrow made every throwing opcode accept a missing temp and
+// left hasSideEffects false for the whole table.)
+void setOpcodeShape(OpcodeShapeTable& shapes, Opcode op, std::uint8_t operands,
+                    bool variadic, bool result, bool throws_, bool effects) {
+    shapes[static_cast<std::size_t>(op)] =
+        OpcodeShape{op, operands, variadic, result, false, throws_, effects};
+}
+
+} // namespace
+
 const OpcodeShape& opcodeShape(Opcode opcode) noexcept {
     // Built once. The table is indexed by the numeric opcode, so every
     // enumerator must appear here; the default entry (Nop's shape) makes a
     // missing row detectable as "claims zero operands and no result", which the
     // verifier rejects for any opcode that is used with operands.
-    static const auto table = [] {
-        constexpr std::size_t count = static_cast<std::size_t>(Opcode::Log) + 1;
-        std::array<OpcodeShape, count> shapes{};
-        // std::function rather than `auto`: the enclosing lambda's return type
-        // is itself being deduced, and MSVC does not finish deducing an
-        // auto-typed closure declared inside it before that closure is first
-        // called. It then parses `set(Opcode::Nop, ...)` as a function-style
-        // cast (C2440) and reports `set` as used before it is initialized
-        // (C3536). An explicit type removes the nested deduction entirely.
-        const std::function<void(Opcode, std::uint8_t, bool, bool, bool, bool)> set =
-            [&shapes](Opcode op, std::uint8_t operands, bool variadic, bool result, bool throws_, bool effects) {
-            // Field order is producesResult, optionalResult, mayThrow,
-            // hasSideEffects: optionalResult defaults to false here and is
-            // enabled below for the void-omission family only. (Passing
-            // throws_/effects positionally into optionalResult/mayThrow made
-            // every throwing opcode accept a missing temp and left
-            // hasSideEffects false for the whole table.)
-            shapes[static_cast<std::size_t>(op)] =
-                OpcodeShape{op, operands, variadic, result, false, throws_, effects};
-        };
+    static const OpcodeShapeTable table = [] {
+        OpcodeShapeTable shapes{};
 
-        set(Opcode::Nop, 0, false, false, false, false);
+        setOpcodeShape(shapes, Opcode::Nop, 0, false, false, false, false);
 
-        set(Opcode::Add, 2, false, true, false, false);
-        set(Opcode::Sub, 2, false, true, false, false);
-        set(Opcode::Mul, 2, false, true, false, false);
-        set(Opcode::Div, 2, false, true, true, false);
-        set(Opcode::Mod, 2, false, true, true, false);
-        set(Opcode::Pow, 2, false, true, false, false);
-        set(Opcode::Neg, 1, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Add, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Sub, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Mul, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Div, 2, false, true, true, false);
+        setOpcodeShape(shapes, Opcode::Mod, 2, false, true, true, false);
+        setOpcodeShape(shapes, Opcode::Pow, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Neg, 1, false, true, false, false);
 
-        set(Opcode::BitAnd, 2, false, true, false, false);
-        set(Opcode::BitOr, 2, false, true, false, false);
-        set(Opcode::BitXor, 2, false, true, false, false);
-        set(Opcode::BitNot, 1, false, true, false, false);
-        set(Opcode::Shl, 2, false, true, false, false);
-        set(Opcode::Shr, 2, false, true, false, false);
-        set(Opcode::Ushr, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::BitAnd, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::BitOr, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::BitXor, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::BitNot, 1, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Shl, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Shr, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Ushr, 2, false, true, false, false);
 
-        set(Opcode::Eq, 2, false, true, false, false);
-        set(Opcode::Ne, 2, false, true, false, false);
-        set(Opcode::Lt, 2, false, true, false, false);
-        set(Opcode::Le, 2, false, true, false, false);
-        set(Opcode::Gt, 2, false, true, false, false);
-        set(Opcode::Ge, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Eq, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Ne, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Lt, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Le, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Gt, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Ge, 2, false, true, false, false);
 
-        set(Opcode::Not, 1, false, true, false, false);
-        set(Opcode::And, 2, false, true, false, false);
-        set(Opcode::Or, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Not, 1, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::And, 2, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Or, 2, false, true, false, false);
 
-        set(Opcode::Widen, 1, false, true, false, false);
-        set(Opcode::Refine, 1, false, true, true, false);
-        set(Opcode::TypeTest, 1, false, true, false, false);
-        set(Opcode::NullCheck, 1, false, true, true, false);
-        set(Opcode::IsNull, 1, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Widen, 1, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Refine, 1, false, true, true, false);
+        setOpcodeShape(shapes, Opcode::TypeTest, 1, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::NullCheck, 1, false, true, true, false);
+        setOpcodeShape(shapes, Opcode::IsNull, 1, false, true, false, false);
 
-        set(Opcode::Load, 0, false, true, false, false);
-        set(Opcode::Store, 1, false, false, false, true);
+        setOpcodeShape(shapes, Opcode::Load, 0, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Store, 1, false, false, false, true);
 
-        set(Opcode::FieldLoad, 1, false, true, true, false);
-        set(Opcode::FieldStore, 2, false, false, true, true);
-        set(Opcode::IndexLoad, 2, false, true, true, false);
-        set(Opcode::IndexStore, 3, false, false, true, true);
-        set(Opcode::StaticLoad, 0, false, true, false, false);
-        set(Opcode::StaticStore, 1, false, false, false, true);
+        setOpcodeShape(shapes, Opcode::FieldLoad, 1, false, true, true, false);
+        setOpcodeShape(shapes, Opcode::FieldStore, 2, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::IndexLoad, 2, false, true, true, false);
+        setOpcodeShape(shapes, Opcode::IndexStore, 3, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::StaticLoad, 0, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::StaticStore, 1, false, false, false, true);
 
-        set(Opcode::Alloc, 0, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Alloc, 0, false, true, false, false);
 
-        set(Opcode::Call, 0, true, true, true, true);
-        set(Opcode::InvokeMethod, 1, true, true, true, true);
-        set(Opcode::InvokeSuper, 1, true, true, true, true);
-        set(Opcode::InvokeStatic, 0, true, true, true, true);
-        set(Opcode::CallIndirect, 1, true, true, true, true);
-        set(Opcode::CallNative, 0, true, true, true, true);
-        set(Opcode::MakeClosure, 0, true, true, false, false);
+        setOpcodeShape(shapes, Opcode::Call, 0, true, true, true, true);
+        setOpcodeShape(shapes, Opcode::InvokeMethod, 1, true, true, true, true);
+        setOpcodeShape(shapes, Opcode::InvokeSuper, 1, true, true, true, true);
+        setOpcodeShape(shapes, Opcode::InvokeStatic, 0, true, true, true, true);
+        setOpcodeShape(shapes, Opcode::CallIndirect, 1, true, true, true, true);
+        setOpcodeShape(shapes, Opcode::CallNative, 0, true, true, true, true);
+        setOpcodeShape(shapes, Opcode::MakeClosure, 0, true, true, false, false);
 
-        set(Opcode::Await, 1, false, true, true, true);
-        set(Opcode::TaskCreate, 1, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::Await, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::TaskCreate, 1, false, true, false, false);
 
-        set(Opcode::TaskSpawn, 1, false, true, true, true);
-        set(Opcode::TaskBlock, 1, false, true, true, true);
-        set(Opcode::TaskIgnore, 1, false, false, true, true);
-        set(Opcode::TaskCancel, 1, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::TaskSpawn, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::TaskBlock, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::TaskIgnore, 1, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::TaskCancel, 1, false, false, true, true);
 
-        set(Opcode::ThreadStart, 1, false, true, true, true);
-        set(Opcode::ThreadJoin, 1, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::ThreadStart, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::ThreadJoin, 1, false, false, true, true);
         // Volatile read of the atomic done flag: marked as having side effects
         // so it is never CSE'd, DCE'd, or reordered across a join/start.
-        set(Opcode::ThreadIsAlive, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::ThreadIsAlive, 1, false, true, true, true);
 
-        set(Opcode::ChannelCreate, 1, false, true, true, true);
-        set(Opcode::ChannelSend, 2, false, false, true, true);
-        set(Opcode::ChannelReceive, 1, false, true, true, true);
-        set(Opcode::ChannelSize, 1, false, true, true, true);
-        set(Opcode::ChannelSendAsync, 2, false, true, true, true);
-        set(Opcode::ChannelReceiveAsync, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::ChannelCreate, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::ChannelSend, 2, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::ChannelReceive, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::ChannelSize, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::ChannelSendAsync, 2, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::ChannelReceiveAsync, 1, false, true, true, true);
 
-        set(Opcode::MutexWithLock, 2, false, true, true, true);
-        set(Opcode::RwLockWithRead, 2, false, true, true, true);
-        set(Opcode::RwLockWithWrite, 2, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::MutexWithLock, 2, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::RwLockWithRead, 2, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::RwLockWithWrite, 2, false, true, true, true);
 
         // Atomic loads are volatile reads: side effects keep them ordered and
         // undeleted, matching the seq_cst contract.
-        set(Opcode::AtomicLoad, 1, false, true, true, true);
-        set(Opcode::AtomicStore, 2, false, false, true, true);
-        set(Opcode::AtomicAdd, 2, false, true, true, true);
-        set(Opcode::AtomicLoadBool, 1, false, true, true, true);
-        set(Opcode::AtomicStoreBool, 2, false, false, true, true);
-        set(Opcode::AtomicLoadDouble, 1, false, true, true, true);
-        set(Opcode::AtomicStoreDouble, 2, false, false, true, true);
-        set(Opcode::AtomicLoadRef, 1, false, true, true, true);
-        set(Opcode::AtomicStoreRef, 2, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::AtomicLoad, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::AtomicStore, 2, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::AtomicAdd, 2, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::AtomicLoadBool, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::AtomicStoreBool, 2, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::AtomicLoadDouble, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::AtomicStoreDouble, 2, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::AtomicLoadRef, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::AtomicStoreRef, 2, false, false, true, true);
 
-        set(Opcode::SemaphoreAcquire, 1, false, false, true, true);
-        set(Opcode::SemaphoreRelease, 1, false, false, true, true);
-        set(Opcode::SemaphoreAvailable, 1, false, true, true, true);
-        set(Opcode::SemaphoreSetPermits, 2, false, false, true, true);
-        set(Opcode::SemaphoreTryAcquire, 1, false, true, true, true);
-        set(Opcode::SemaphoreReleaseMany, 2, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::SemaphoreAcquire, 1, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::SemaphoreRelease, 1, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::SemaphoreAvailable, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::SemaphoreSetPermits, 2, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::SemaphoreTryAcquire, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::SemaphoreReleaseMany, 2, false, false, true, true);
 
-        set(Opcode::ConditionWait, 1, false, false, true, true);
-        set(Opcode::ConditionWaitFor, 2, false, true, true, true);
-        set(Opcode::ConditionNotifyOne, 1, false, false, true, true);
-        set(Opcode::ConditionNotifyAll, 1, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::ConditionWait, 1, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::ConditionWaitFor, 2, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::ConditionNotifyOne, 1, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::ConditionNotifyAll, 1, false, false, true, true);
 
-        set(Opcode::SharedCreate, 1, false, true, false, false);
-        set(Opcode::SharedGet, 1, false, true, true, true);
-        set(Opcode::SharedSet, 2, false, false, true, true);
-        set(Opcode::SharedWithLock, 2, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::SharedCreate, 1, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::SharedGet, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::SharedSet, 2, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::SharedWithLock, 2, false, true, true, true);
 
-        set(Opcode::FfiCall, 0, true, true, true, true);
+        setOpcodeShape(shapes, Opcode::FfiCall, 0, true, true, true, true);
         // A borrow validates liveness and pins nothing: like Refine, it throws
         // but has no side effect of its own.
-        set(Opcode::HandleBorrow, 1, false, true, true, false);
-        set(Opcode::HandleConsume, 1, false, true, true, true);
-        set(Opcode::HandleClose, 1, false, false, true, true);
-        set(Opcode::CallbackRegister, 1, false, true, true, true);
-        set(Opcode::CallbackInvoke, 1, true, true, true, true);
-        set(Opcode::CallbackClose, 1, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::HandleBorrow, 1, false, true, true, false);
+        setOpcodeShape(shapes, Opcode::HandleConsume, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::HandleClose, 1, false, false, true, true);
+        setOpcodeShape(shapes, Opcode::CallbackRegister, 1, false, true, true, true);
+        setOpcodeShape(shapes, Opcode::CallbackInvoke, 1, true, true, true, true);
+        setOpcodeShape(shapes, Opcode::CallbackClose, 1, false, false, true, true);
 
-        set(Opcode::Move, 0, false, true, false, true);
-        set(Opcode::Borrow, 1, false, false, false, true);
-        set(Opcode::EndBorrow, 0, false, false, false, true);
+        setOpcodeShape(shapes, Opcode::Move, 0, false, true, false, true);
+        setOpcodeShape(shapes, Opcode::Borrow, 1, false, false, false, true);
+        setOpcodeShape(shapes, Opcode::EndBorrow, 0, false, false, false, true);
         // Drop has two spellings with the same meaning: a value operand (drop
         // this value) or no operand plus a slot (release this slot's storage -
         // the end-of-lifetime form lowering emits for owned locals). The
         // minimum is therefore 0; the verifier's Drop rule decides which shape
         // it is looking at and checks each form's own requirements.
-        set(Opcode::Drop, 0, true, false, false, true);
+        setOpcodeShape(shapes, Opcode::Drop, 0, true, false, false, true);
 
-        set(Opcode::NewCollection, 0, false, true, false, false);
-        set(Opcode::RangeInBounds, 3, false, true, true, false);
-        set(Opcode::Log, 1, false, false, false, true);
+        setOpcodeShape(shapes, Opcode::NewCollection, 0, false, true, false, false);
+        setOpcodeShape(shapes, Opcode::RangeInBounds, 3, false, true, true, false);
+        setOpcodeShape(shapes, Opcode::Log, 1, false, false, false, true);
 
         // A call defines a temp unless the callee returns void; an `await`
         // defines one unless the task's payload is void. The same void-omission

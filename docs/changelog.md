@@ -36,6 +36,27 @@ generator on Windows, where `ctest` would otherwise look in the wrong
 configuration directory), its explicit `-DBUILD_TESTING=ON`, and a per-test
 `--timeout`.
 
+**The cross-platform promise was unverified, and the first CI run found it
+broken in six places.** macOS and Windows had never been built by CI, and both
+failed. `fork` and `_exit` were called without including `<unistd.h>`, which
+glibc's `<sys/wait.h>` supplies transitively and libc++ does not. `NOMINMAX`
+was undefined, so the `min` and `max` macros in `windows.h` turned
+`std::numeric_limits<T>::max()` and `std::min`/`std::max` into syntax errors at
+the call site rather than at the macro. `std::filesystem::path::preferred_separator`
+was appended to a `std::string`, but it is `wchar_t` on Windows. `popen` and
+`pclose` were called unguarded where MSVC declares only `_popen`/`_pclose`. And
+a closure held in a local `auto` inside another lambda - whose return type is
+itself being deduced - is not typed in time by MSVC, so the first call to it is
+parsed as a function-style cast; that table is now filled by a named function.
+Every one of these is invisible to g++, which is precisely why they survived:
+the suite that could have caught them did not exist until now.
+
+Diagnosing them required a change to the workflow as well. The build is teed to
+a log and its errors are re-emitted as `::error::` annotations, because the log
+archive is not reachable from every environment and annotations are. Two of the
+six fixes were wrong on the first attempt and CI said so, which is the argument
+for having the run in the first place.
+
 **The CI gate was executed end to end for the first time.** The workflow had
 never run - it was assembled from documented commands because no `cmake` was
 available here. With one installed, the Linux job's every step is now verified
