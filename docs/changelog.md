@@ -57,6 +57,19 @@ archive is not reachable from every environment and annotations are. Two of the
 six fixes were wrong on the first attempt and CI said so, which is the argument
 for having the run in the first place.
 
+**Known remaining, and not caused by this work.** macOS and Windows now build
+for the first time and each runs 37 of the 40 CTest cases green. Three macOS
+cases and two Windows cases still fail, and they are recorded here rather than
+skipped or hidden. `zl-native-backend-tests` faults on macOS; the backend emits
+x86-64 while those runners are arm64, and macOS requires `MAP_JIT` for
+executable memory, so execution is now guarded out - yet it still faults at
+startup, which means something outside the execution path is also involved and
+is not yet identified. `zl-runtime-hardening-vm-tests` segfaults on both
+platforms and `zl-runtime-scheduler-tests` fails on macOS only. None of the
+three is touched by this branch: they were failing before there was a CI run to
+see them, and the honest description of the cross-platform promise is that it
+was never tested rather than that it held.
+
 **The CI gate was executed end to end for the first time.** The workflow had
 never run - it was assembled from documented commands because no `cmake` was
 available here. With one installed, the Linux job's every step is now verified
