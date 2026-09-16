@@ -10,6 +10,15 @@ file(WRITE "${CMAKE_BINARY_DIR}/stdlib/VERSION" "${ZL_VERSION_STRING}\n")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# windows.h defines min and max as macros unless NOMINMAX is defined, which
+# turns std::numeric_limits<T>::max(), std::min and std::max into syntax errors
+# (C2589 / C2059) in every translation unit that includes it -- MSVC's error
+# points at the innocent call site, not at the macro. Defined here rather than
+# per file because a source that included windows.h first would still break.
+if(MSVC)
+    add_compile_definitions(NOMINMAX)
+endif()
+
 # Keep the public headers visible to every target, including standalone tools.
 # This also makes the project robust against older/stale per-target CMake state.
 include_directories(${CMAKE_SOURCE_DIR}/include)

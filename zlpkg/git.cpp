@@ -153,7 +153,10 @@ std::filesystem::path settle(const std::filesystem::path& scratchDir, const std:
     std::error_code canonEc;
     const std::filesystem::path cacheAbs = std::filesystem::weakly_canonical(cacheRoot, canonEc);
     const std::filesystem::path finalAbs = std::filesystem::weakly_canonical(finalDir.parent_path(), canonEc);
-    const std::string prefix = cacheAbs.string() + std::filesystem::path::preferred_separator;
+    // preferred_separator is char on POSIX and wchar_t on Windows, and
+    // std::string has no operator+ for wchar_t, so the separator is narrowed
+    // explicitly rather than relying on it being a char.
+    const std::string prefix = cacheAbs.string() + static_cast<char>(std::filesystem::path::preferred_separator);
     if (!canonEc && !finalAbs.string().empty() && finalAbs != cacheAbs &&
         finalAbs.string().rfind(prefix, 0) != 0) {
         throw GitError("dependency cache path '" + finalDir.string() + "' escapes the cache root");

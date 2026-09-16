@@ -131,7 +131,11 @@ const OpcodeShape& opcodeShape(Opcode opcode) noexcept {
     static const auto table = [] {
         constexpr std::size_t count = static_cast<std::size_t>(Opcode::Log) + 1;
         std::array<OpcodeShape, count> shapes{};
-        auto set = [&](Opcode op, std::uint8_t operands, bool variadic, bool result, bool throws_, bool effects) {
+        // Captures shapes rather than [&]: a by-reference default capture
+        // captures `set` itself in its own initializer, which MSVC rejects
+        // with C3536 ("cannot be used before it is initialized") even though
+        // the body is never evaluated during that initialization.
+        auto set = [&shapes](Opcode op, std::uint8_t operands, bool variadic, bool result, bool throws_, bool effects) {
             // Field order is producesResult, optionalResult, mayThrow,
             // hasSideEffects: optionalResult defaults to false here and is
             // enabled below for the void-omission family only. (Passing

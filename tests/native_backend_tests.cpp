@@ -34,6 +34,11 @@
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/mman.h>
 #include <sys/wait.h>
+// fork() and _exit() live in <unistd.h>. On glibc, <sys/wait.h> pulls it in
+// transitively, so the omission is invisible on Linux; on macOS it is not,
+// and the build fails with "no member named 'fork' in the global namespace".
+// Included explicitly rather than relying on that transitive path.
+#include <unistd.h>
 #include <cerrno>
 #define ZL_NATIVE_CAN_EXECUTE 1
 #else
