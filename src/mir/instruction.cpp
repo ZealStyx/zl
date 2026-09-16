@@ -1,6 +1,8 @@
 #include "zl/mir/instruction.hpp"
 
 #include <array>
+#include <cstdint>
+#include <functional>
 
 namespace zl::mir {
 
@@ -131,11 +133,14 @@ const OpcodeShape& opcodeShape(Opcode opcode) noexcept {
     static const auto table = [] {
         constexpr std::size_t count = static_cast<std::size_t>(Opcode::Log) + 1;
         std::array<OpcodeShape, count> shapes{};
-        // Captures shapes rather than [&]: a by-reference default capture
-        // captures `set` itself in its own initializer, which MSVC rejects
-        // with C3536 ("cannot be used before it is initialized") even though
-        // the body is never evaluated during that initialization.
-        auto set = [&shapes](Opcode op, std::uint8_t operands, bool variadic, bool result, bool throws_, bool effects) {
+        // std::function rather than `auto`: the enclosing lambda's return type
+        // is itself being deduced, and MSVC does not finish deducing an
+        // auto-typed closure declared inside it before that closure is first
+        // called. It then parses `set(Opcode::Nop, ...)` as a function-style
+        // cast (C2440) and reports `set` as used before it is initialized
+        // (C3536). An explicit type removes the nested deduction entirely.
+        const std::function<void(Opcode, std::uint8_t, bool, bool, bool, bool)> set =
+            [&shapes](Opcode op, std::uint8_t operands, bool variadic, bool result, bool throws_, bool effects) {
             // Field order is producesResult, optionalResult, mayThrow,
             // hasSideEffects: optionalResult defaults to false here and is
             // enabled below for the void-omission family only. (Passing

@@ -3057,12 +3057,22 @@ Value sysExec(const std::vector<Value>& args) {
     const std::string& command = requireString(args[0], "System.exec");
     std::array<char, 256> buffer{};
     std::string result;
+    // MSVC declares the pipe-of-a-command functions with a leading underscore;
+    // the bare POSIX names are not in its headers.
+#ifdef _WIN32
+    FILE* pipe = _popen(command.c_str(), "r");
+#else
     FILE* pipe = popen(command.c_str(), "r");
+#endif
     if (!pipe) throw std::runtime_error("System.exec: failed to start \"" + command + "\"");
     while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
         result += buffer.data();
     }
+#ifdef _WIN32
+    _pclose(pipe);
+#else
     pclose(pipe);
+#endif
     return result;
 }
 
