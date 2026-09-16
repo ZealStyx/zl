@@ -21,6 +21,11 @@
 #   ctest -C Release. The Windows generator is multi-config, so without an
 #     explicit configuration ctest looks for the test binaries in a directory
 #     that was never written. It is inert on single-config generators.
+#
+# Every build pipes through tee so that a failing build can publish its
+# compiler errors into the job summary. A red build is otherwise only
+# diagnosable by downloading the log archive, which is a needlessly slow way
+# to learn that one file did not compile.
 
 name: CI
 
@@ -47,7 +52,10 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 
       - name: Build (core plus every test executable and fixture)
-        run: cmake --build build --config Release --target zl-tests --parallel 4
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build build --config Release --target zl-tests --parallel 4 2>&1 | tee build.log
 
       - name: CTest (unit suites, boundary lint, safety pipeline, report and parity checks)
         run: ctest --test-dir build --output-on-failure -C Release --timeout 300
@@ -66,6 +74,18 @@ jobs:
       - name: Native compiler gate (legacy --emit-native path plus benchmark parity)
         run: bash scripts/native_gate.sh
 
+      - name: Build errors, into the summary
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo '### Compiler and build errors'
+            echo
+            echo '```'
+            grep -E 'error|Error' build.log | head -40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   macos:
     name: macOS - build and CTest
     runs-on: macos-latest
@@ -78,10 +98,25 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 
       - name: Build
-        run: cmake --build build --config Release --target zl-tests --parallel 4
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build build --config Release --target zl-tests --parallel 4 2>&1 | tee build.log
 
       - name: CTest
         run: ctest --test-dir build --output-on-failure -C Release --timeout 300
+
+      - name: Build errors, into the summary
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo '### Compiler and build errors'
+            echo
+            echo '```'
+            grep -E 'error|Error' build.log | head -40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   windows:
     name: Windows - build and CTest
@@ -95,7 +130,22 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 
       - name: Build
-        run: cmake --build build --config Release --target zl-tests --parallel 4
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build build --config Release --target zl-tests --parallel 4 2>&1 | tee build.log
 
       - name: CTest
         run: ctest --test-dir build --output-on-failure -C Release --timeout 300
+
+      - name: Build errors, into the summary
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo '### Compiler and build errors'
+            echo
+            echo '```'
+            grep -E 'error|Error' build.log | head -40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
