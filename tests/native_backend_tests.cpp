@@ -31,7 +31,13 @@
 #include <string>
 #include <vector>
 
-#if defined(__unix__) || defined(__APPLE__)
+// Executing the emitted code needs a host the backend can actually target,
+// and the native backend emits x86-64 only (SysV and Win64). A POSIX-ish host
+// is therefore not sufficient: on arm64 macOS - which is what the CI runners
+// are - mmap() succeeds, the jump is taken, and the process dies in a
+// SIGSEGV that reads as a crash in the test rather than as an unsupported
+// platform. The architecture check is what makes the guard mean what it says.
+#if (defined(__unix__) || defined(__APPLE__)) && defined(__x86_64__)
 #include <sys/mman.h>
 #include <sys/wait.h>
 // fork() and _exit() live in <unistd.h>. On glibc, <sys/wait.h> pulls it in
