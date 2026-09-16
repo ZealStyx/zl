@@ -2,6 +2,48 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-16 - Generic methods land, and the CI gate is run for the first time
+
+**Method-level type parameters close O16.** `static func firstOf<T>(List<T>
+items, T fallback): T` used to be a syntax error (`Expected '(' after func name
+-- got "<"`), which is why `Generics.zl` wrote one helper per element type: only
+generic *classes* existed. The parser now accepts type parameters on function
+declarations and explicit type arguments at the call site; the checker
+instantiates them for both static and instance calls, rejects a method type
+parameter that collides with a class type parameter, and the bindings are
+threaded through bytecode, MIR and the VM. Static `Call` is the acceptance
+path. Covered by `GenericMethods.zl` plus type-mismatch and name-collision
+fixtures.
+
+**The documented regression command now works when it is run as documented.**
+`scripts/run_regressions.sh` moved to `scripts/` before it looked at its first
+argument, so the invocation in `docs/development.md` and in the CI workflow -
+`bash scripts/run_regressions.sh build/zl_language all` - always failed with
+`error: 'build/zl_language' is not an executable file`: a relative path was
+being resolved against `scripts/`, where no `build/` exists. The compiler path
+is now resolved against the calling directory before the script changes its
+own. Worth noting *why* this survived review: every previous check passed an
+absolute path, so the command was never once executed in the form it is
+documented and run in CI.
+
+**The two parallel review branches are one line of history again.** One branch
+carried the native-tier and CI work, the other the module-root, UTF-8 `Text`,
+git-URL-allowlist, O2-lambda and generic-method fixes; they shared a merge base
+and conflicted in exactly one file, `.github/workflows/ci.yml`, which both had
+added independently. Resolved by keeping the full three-platform matrix and
+adopting the sibling's `-C Release` (required by the multi-config Visual Studio
+generator on Windows, where `ctest` would otherwise look in the wrong
+configuration directory), its explicit `-DBUILD_TESTING=ON`, and a per-test
+`--timeout`.
+
+**The CI gate was executed end to end for the first time.** The workflow had
+never run - it was assembled from documented commands because no `cmake` was
+available here. With one installed, the Linux job's every step is now verified
+against this tree: configure, `zl-tests` (36 targets), CTest 40/40, the
+regression corpus 49/49 with the package-manager cases included, all five
+differential harnesses (51/51 backend and MIR paths, 77 optimiser cases), and
+the native gate. Every step passes.
+
 ## 2026-09-15 - The native tier honours the arithmetic contract, and the SysV shadow space is real
 
 **The emitted code is fail-closed like the VM.** An external harsh review of

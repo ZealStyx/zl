@@ -40,6 +40,11 @@
 
 set -u
 
+# Remember where the caller invoked us from before moving to the script's own
+# directory. This script runs with its cwd at scripts/, so a relative compiler
+# path such as build/zl_language must be resolved against the caller's
+# directory (the repository root) -- not against scripts/.
+INVOCATION_DIR="$(pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
@@ -49,6 +54,8 @@ if [[ $# -lt 1 ]]; then
 fi
 
 ZL="$1"
+# Resolve a relative path against $INVOCATION_DIR; see the note above.
+[[ "$ZL" == /* ]] || ZL="$INVOCATION_DIR/$ZL"
 if [[ ! -x "$ZL" ]]; then
     echo "error: '$ZL' is not an executable file" >&2
     exit 2

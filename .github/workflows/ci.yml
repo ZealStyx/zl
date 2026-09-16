@@ -12,6 +12,15 @@
 # "portable, on every platform" promise in docs/development.md is verified
 # rather than assumed; the native-execution tests guard themselves with
 # ZL_NATIVE_CAN_EXECUTE and skip where executable memory is unavailable.
+#
+# Two details are deliberate, and easy to remove by accident:
+#   --parallel 4, not a bare --parallel. zl-tests is 36 executables, and
+#     unbounded parallelism starts one compiler per source file at once, which
+#     exhausts a small runner's memory and dies with "Killed signal terminated
+#     program cc1plus" - a resource failure that reads like a code failure.
+#   ctest -C Release. The Windows generator is multi-config, so without an
+#     explicit configuration ctest looks for the test binaries in a directory
+#     that was never written. It is inert on single-config generators.
 
 name: CI
 
@@ -38,7 +47,7 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 
       - name: Build (core plus every test executable and fixture)
-        run: cmake --build build --config Release --target zl-tests --parallel
+        run: cmake --build build --config Release --target zl-tests --parallel 4
 
       - name: CTest (unit suites, boundary lint, safety pipeline, report and parity checks)
         run: ctest --test-dir build --output-on-failure -C Release --timeout 300
@@ -69,7 +78,7 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 
       - name: Build
-        run: cmake --build build --config Release --target zl-tests --parallel
+        run: cmake --build build --config Release --target zl-tests --parallel 4
 
       - name: CTest
         run: ctest --test-dir build --output-on-failure -C Release --timeout 300
@@ -86,7 +95,7 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 
       - name: Build
-        run: cmake --build build --config Release --target zl-tests --parallel
+        run: cmake --build build --config Release --target zl-tests --parallel 4
 
       - name: CTest
         run: ctest --test-dir build --output-on-failure -C Release --timeout 300
