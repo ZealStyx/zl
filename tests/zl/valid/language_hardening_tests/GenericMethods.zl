@@ -1,0 +1,47 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - GenericMethods
+//
+// Method-level type parameters (`func firstOf<T>(...)`) parse, type-check, and
+// run. Explicit type arguments at the call site instantiate the template;
+// dispatch still uses the unsubstituted GENERIC_OBJECT slot.
+// ============================================================================
+
+class GenericMethods {
+    public static func firstOf<T>(List<T> items, T fallback): T {
+        if (items.length() == 0) { return fallback }
+        return items.get(0)
+    }
+
+    public static func identity<T>(T value): T {
+        return value
+    }
+
+    public func pick<T>(T a, T b): T {
+        return a
+    }
+
+    public func echo<T>(T value): T {
+        return value
+    }
+
+    func main(): void {
+        var nums = new List<int>()
+        nums.push(41)
+        nums.push(42)
+        int first = GenericMethods.firstOf<int>(nums, 0)
+        if (first != 41) { throw new Exception("GenericMethods: firstOf broken") }
+        int n = GenericMethods.identity<int>(7)
+        if (n != 7) { throw new Exception("GenericMethods: identity broken") }
+        var self = new GenericMethods()
+        int picked = self.pick<int>(9, 8)
+        if (picked != 9) { throw new Exception("GenericMethods: pick broken") }
+        int echoed = self.echo<int>(11)
+        if (echoed != 11) { throw new Exception("GenericMethods: echo broken") }
+        var doubled = nums.transform(func(int x): int => x * 2)
+        if (doubled.length() != 2) { throw new Exception("GenericMethods: transform length broken") }
+        if (doubled.get(0) != 82) { throw new Exception("GenericMethods: transform broken") }
+        if (nums.length() != 2) { throw new Exception("GenericMethods: length broken") }
+        if (nums.get(1) != 42) { throw new Exception("GenericMethods: get broken") }
+        log("ok")
+    }
+}

@@ -1,0 +1,32 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - LambdaFuncParam
+//
+// An untyped lambda parameter holding a func value must be callable:
+// `func(f) => f(21)` used to report `undefined func 'f'` because UNKNOWN
+// locals were not treated as value calls.
+// ============================================================================
+
+class LambdaFuncParam {
+    func check(bool cond, string what): void {
+        if (!cond) {
+            throw new Exception("LambdaFuncParam failed: " + what)
+        }
+    }
+
+    func namedCall(func f): int {
+        return f(21)
+    }
+
+    func main(): void {
+        var self = new LambdaFuncParam()
+        var apply = func(f) => f(21)
+        self.check(apply(func(x) => x * 2) == 42, "untyped lambda param call")
+
+        var applyTyped = func(func(int): int g, int n) => g(n)
+        self.check(applyTyped(func(int x): int => x + 1, 41) == 42, "typed lambda param call")
+
+        self.check(self.namedCall(func(x) => x * 2) == 42, "named func-typed param call")
+
+        log("ok")
+    }
+}

@@ -1,5 +1,6 @@
 #include "zl/native/emit.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <unordered_map>
 
@@ -135,6 +136,9 @@ constexpr std::uint8_t kSetE = 0x94, kSetNE = 0x95, kSetL = 0x9c, kSetLE = 0x9e,
                        kSetG = 0x9f, kSetGE = 0x9d, kSetB = 0x92, kSetBE = 0x96,
                        kSetA = 0x97, kSetAE = 0x93, kSetNP = 0x9b, kSetP = 0x9a;
 constexpr std::uint8_t kJE = 0x84;
+constexpr std::uint8_t kJNE = 0x85;
+constexpr std::uint8_t kJNO = 0x81;
+constexpr std::uint8_t kJA = 0x87;
 
 // ---------------------------------------------------------------------------
 // Function emitter
@@ -190,7 +194,22 @@ struct FunctionEmitter {
             vregOffset[fn.vregs[i].id] = offset;
         }
         const std::size_t used = static_cast<std::size_t>(-offset);
-        frameSize = ((used + 15) / 16) * 16;
+        // A caller must keep the convention's shadow space at the top of its
+        // own frame at the moment a `call` executes: a C-compiled callee may
+        // legally spill into [rsp, rsp+shadowSpace). Emitted callees never
+        // write there (they touch only their own frame), and this tier emits
+        // no runtime calls or stack arguments yet, so the reservation is not
+        // observable today - but the moment a CallRuntime callee from the C
+        // world lands, a calling frame shorter than the shadow space would
+        // hand that callee the caller's saved rbp to clobber. Reserve it in
+        // every function that calls.
+        bool hasCall = false;
+        for (const auto& block : fn.blocks)
+            for (const auto& ins : block.instructions)
+                if (ins.opcode == LirOpcode::Call || ins.opcode == LirOpcode::CallRuntime)
+                    hasCall = true;
+        const std::size_t minimum = hasCall ? target.cc.shadowSpace : 0;
+        frameSize = ((std::max(used, minimum) + 15) / 16) * 16;
     }
 
     std::int32_t offsetOf(VReg v) const { return vregOffset.at(v); }
@@ -235,6 +254,43 @@ struct FunctionEmitter {
         if (v == kNoVReg) return;
         if (cls == ValueClass::Float) a.movsdMemReg(offsetOf(v), reg);
         else a.movMemReg(offsetOf(v), reg);
+    }
+
+    // The language is fail-closed: the VM reports unrepresentable arithmetic
+    // results as catchable ArithmeticErrors. This tier has no unwind tables
+    // (docs/native-backend.md, "deliberately missing"), so the emitted code
+    // cannot throw; its contract for an arithmetic fault is the one the
+    // division guards already used - branch to a `ud2`, which terminates the
+    // process with SIGILL rather than wrapping silently or faulting deeper
+    // in the hardware.
+
+    // OF is set (signed overflow). Call after add/sub/mul/neg, whose two-
+    // operand forms set OF exactly when the signed result is unrepresentable.
+    void trapOnOverflowFlag() {
+        const std::size_t ok = a.jccRel32(kJNO);
+        a.ud2();
+        a.patchRel32(ok, a.here());
+    }
+
+    // The bit pattern of a double is in scratchI0 and must survive this
+    // check - FNeg's sign-flipped result lives there until it is written back
+    // to xmm - so the mask goes into scratchI1 (free after the xor, or
+    // unused) and the and-compare runs on scratchI2. A double is non-finite
+    // (infinity or NaN) exactly when its exponent field (bits 62..52) is all
+    // ones. The jump-over is what keeps the finite path out of the trap -
+    // the trap sits in the fall-through, so a jump-TO the trap here would
+    // send every finite value into it. Returns the trap's position so a
+    // second check can branch to the same `ud2`.
+    std::size_t trapOnNonFiniteInGpr() {
+        a.movRegReg(scratchI2, scratchI0);
+        a.movRegImm64(scratchI1, 0x7FF0000000000000ull);
+        a.andRegReg(scratchI2, scratchI1);
+        a.cmpRegReg(scratchI2, scratchI1);
+        const std::size_t ok = a.jccRel32(kJNE);
+        const std::size_t trapAt = a.here();
+        a.ud2();
+        a.patchRel32(ok, a.here());
+        return trapAt;
     }
 
     bool emitIntCompare(const LirInstruction& ins, std::uint8_t cc) {
@@ -312,6 +368,14 @@ struct FunctionEmitter {
                     case LirOpcode::IOr:  a.orRegReg(scratchI0, scratchI1); break;
                     default:              a.xorRegReg(scratchI0, scratchI1); break;
                 }
+                // The VM throws a catchable ArithmeticError when +, - or *
+                // produces an unrepresentable result; the bitwise ops cannot
+                // overflow, so only the three arithmetic forms get the trap.
+                // Plain add/sub/imul would wrap, which is not the language's
+                // meaning.
+                if (ins.opcode == LirOpcode::IAdd || ins.opcode == LirOpcode::ISub ||
+                    ins.opcode == LirOpcode::IMul)
+                    trapOnOverflowFlag();
                 storeResult(ins.result, ValueClass::Integer, scratchI0);
                 return true;
             }
@@ -319,28 +383,65 @@ struct FunctionEmitter {
             case LirOpcode::IDiv:
             case LirOpcode::IMod: {
                 // The divisor must be in a register that is not rdx (cqo
-                // clobbers it), and a zero divisor must not execute idiv: the
-                // hardware raises #DE, which on this tier has no handler. The
-                // check branches over the divide to a trap.
+                // clobbers it), and idiv must not execute in two cases the
+                // hardware would trap on: a zero divisor (#DE), and
+                // INT64_MIN / -1, whose quotient does not fit in int64
+                // (overflow #DE). The VM reports both as catchable
+                // ArithmeticErrors; this tier has no unwind tables, so both
+                // get the trap. INT64_MIN % -1 is the exception: the VM
+                // defines it as 0, so it is computed, not trapped.
                 if (!loadOperand(ins.operands[1], ValueClass::Integer, scratchI1)) return false;
                 if (!loadOperand(ins.operands[0], ValueClass::Integer, scratchI0)) return false;
                 a.testRegReg(scratchI1, scratchI1);
-                const std::size_t jz = a.jccRel32(kJE);
+                const std::size_t jz = a.jccRel32(kJE);             // divisor == 0 -> trap
+                a.cmpRegImm32(scratchI1, -1);
+                const std::size_t jneDivisor = a.jccRel32(kJNE);    // divisor != -1 -> divide
+                a.movRegImm64(scratchI2, 0x8000000000000000ull);
+                a.cmpRegReg(scratchI0, scratchI2);
+                const std::size_t jneDividend = a.jccRel32(kJNE);   // dividend != INT64_MIN -> divide
+                if (ins.opcode == LirOpcode::IMod) {
+                    // INT64_MIN % -1 == 0, as the VM defines it.
+                    a.movRegImm64(scratchI0, 0);
+                    storeResult(ins.result, ValueClass::Integer, scratchI0);
+                    const std::size_t skip = a.jmpRel32();          // -> done
+                    const std::size_t trapAt = a.here();
+                    a.ud2();                                        // .trap: zero divisor
+                    a.patchRel32(jz, trapAt);
+                    const std::size_t divideAt = a.here();
+                    a.patchRel32(jneDivisor, divideAt);
+                    a.patchRel32(jneDividend, divideAt);
+                    a.cqo();
+                    a.idivReg(scratchI1);
+                    // Remainder in rdx.
+                    storeResult(ins.result, ValueClass::Integer, 2u);
+                    const std::size_t skip2 = a.jmpRel32();         // -> done
+                    a.patchRel32(skip, a.here());
+                    a.patchRel32(skip2, a.here());
+                    return true;
+                }
+                // INT64_MIN / -1: overflow. The fall-through lands in the
+                // trap, which the zero divisor reaches the same way.
+                const std::size_t trapAt = a.here();
+                a.ud2();                                            // .trap
+                a.patchRel32(jz, trapAt);
+                const std::size_t divideAt = a.here();
+                a.patchRel32(jneDivisor, divideAt);
+                a.patchRel32(jneDividend, divideAt);
                 a.cqo();
                 a.idivReg(scratchI1);
-                // Quotient in rax, remainder in rdx.
-                const unsigned resultReg = ins.opcode == LirOpcode::IDiv ? 0u : 2u;
-                storeResult(ins.result, ValueClass::Integer, resultReg);
-                const std::size_t over = a.jmpRel32();
-                a.patchRel32(jz, a.here());
-                a.ud2();
-                a.patchRel32(over, a.here());
+                // Quotient in rax.
+                storeResult(ins.result, ValueClass::Integer, 0u);
+                const std::size_t skip = a.jmpRel32();              // -> done
+                a.patchRel32(skip, a.here());
                 return true;
             }
 
             case LirOpcode::INeg: {
                 if (!loadOperand(ins.operands[0], ValueClass::Integer, scratchI0)) return false;
                 a.negReg(scratchI0);
+                // OF is set exactly when the operand was INT64_MIN - the one
+                // negation the VM reports as an overflow error.
+                trapOnOverflowFlag();
                 storeResult(ins.result, ValueClass::Integer, scratchI0);
                 return true;
             }
@@ -365,23 +466,55 @@ struct FunctionEmitter {
                 if (scratchI1 != 1) return fail("shift needs rcx as the second scratch register");
                 if (!loadOperand(ins.operands[0], ValueClass::Integer, scratchI0)) return false;
                 if (!loadOperand(ins.operands[1], ValueClass::Integer, scratchI1)) return false;
+                // The VM rejects counts outside 0..63; x86 would silently
+                // mask the count to its low six bits, so `1 << 64` would
+                // compute `1 << 0` - not the language's meaning. One unsigned
+                // compare covers both ends: a negative count is a huge
+                // unsigned number.
+                a.cmpRegImm32(scratchI1, 63);
+                const std::size_t ja = a.jccRel32(kJA);
                 const unsigned ext = ins.opcode == LirOpcode::IShl ? 4u
                                    : ins.opcode == LirOpcode::IShr ? 7u // arithmetic: ZL `>>` is signed
                                                                    : 5u; // logical: `>>>`
                 a.shiftByCl(ext, scratchI0);
                 storeResult(ins.result, ValueClass::Integer, scratchI0);
+                // The invalid path jumps forward to the trap, so the valid
+                // path must jump over it - the trap sits between the check
+                // and the return code the emitter is about to append.
+                const std::size_t skip = a.jmpRel32();
+                const std::size_t trapAt = a.here();
+                a.ud2();
+                a.patchRel32(ja, trapAt);
+                a.patchRel32(skip, a.here());
                 return true;
             }
 
             case LirOpcode::FAdd: case LirOpcode::FSub: case LirOpcode::FMul: case LirOpcode::FDiv: {
                 if (!loadOperand(ins.operands[0], ValueClass::Float, scratchF0)) return false;
                 if (!loadOperand(ins.operands[1], ValueClass::Float, scratchF1)) return false;
+                std::size_t zeroDivisorJe = 0;
+                if (ins.opcode == LirOpcode::FDiv) {
+                    // The VM throws on a zero divisor before dividing. IEEE
+                    // would instead produce an infinity, which the language
+                    // has no room for - so trap on the zero bit pattern
+                    // (both -0.0 and +0.0 are all-zero bits).
+                    a.movqGprXmm(scratchI0, scratchF1);
+                    a.testRegReg(scratchI0, scratchI0);
+                    zeroDivisorJe = a.jccRel32(kJE);
+                }
                 switch (ins.opcode) {
                     case LirOpcode::FAdd: a.addsd(scratchF0, scratchF1); break;
                     case LirOpcode::FSub: a.subsd(scratchF0, scratchF1); break;
                     case LirOpcode::FMul: a.mulsd(scratchF0, scratchF1); break;
                     default:              a.divsd(scratchF0, scratchF1); break;
                 }
+                // The VM throws when a floating-point result is not finite
+                // (overflow to infinity, NaN from a domain error). Check the
+                // exponent field before the result reaches a frame slot.
+                a.movqGprXmm(scratchI0, scratchF0);
+                const std::size_t trapAt = trapOnNonFiniteInGpr();
+                if (ins.opcode == LirOpcode::FDiv)
+                    a.patchRel32(zeroDivisorJe, trapAt);
                 storeResult(ins.result, ValueClass::Float, scratchF0);
                 return true;
             }
@@ -392,6 +525,12 @@ struct FunctionEmitter {
                 a.movqGprXmm(scratchI0, scratchF0);
                 a.movRegImm64(scratchI1, 0x8000000000000000ull);
                 a.xorRegReg(scratchI0, scratchI1);
+                // The tier's invariant: a non-finite double never exists,
+                // because every producer traps. A non-finite input would
+                // break it, so the flipped pattern is checked before it
+                // leaves the GPR - the corner the VM does not need, because
+                // its values cannot be non-finite either.
+                trapOnNonFiniteInGpr();
                 a.movqXmmGpr(scratchF0, scratchI0);
                 storeResult(ins.result, ValueClass::Float, scratchF0);
                 return true;

@@ -363,6 +363,17 @@ InterfaceMethodSig Parser::parseInterfaceMethodSig() {
         sig.line = nameTok.line;
     }
 
+    // interface method type parameters: `firstOf<T>(...)`. No constraints in v1.
+    if (!sig.isOperator && match({TokenType::LT})) {
+        Token first = expect(TokenType::IDENTIFIER, "Expected a type parameter name");
+        sig.typeParams.push_back(first.lexeme);
+        while (match({TokenType::COMMA})) {
+            Token next = expect(TokenType::IDENTIFIER, "Expected a type parameter name after ','");
+            sig.typeParams.push_back(next.lexeme);
+        }
+        expectTypeAngleClose("Expected '>' to close type parameter list");
+    }
+
     expect(TokenType::LPAREN, "Expected '(' after interface method/operator name");
     if (!check(TokenType::RPAREN)) {
         sig.params.push_back(parseFunctionParam());
@@ -584,13 +595,26 @@ NodePtr Parser::parseOperatorDecl(AccessModifier access, std::vector<Annotation>
 NodePtr Parser::parseFunctionDecl(AccessModifier access, std::vector<Annotation> annotations) {
     Token fnTok = advance(); // consume 'func' or 'func' - both map to KW_FUNC
     Token nameTok = expect(TokenType::IDENTIFIER, "Expected a func name");
-    expect(TokenType::LPAREN, "Expected '(' after func name");
 
     auto node = std::make_unique<FunctionDecl>();
     node->line = fnTok.line;
     node->name = nameTok.lexeme;
     node->access = access;
     node->annotations = std::move(annotations);
+
+    // Method type parameters: `func firstOf<T>(...)`. Unambiguous here — a
+    // named declaration is followed by '<' or '(', never a comparison.
+    if (match({TokenType::LT})) {
+        Token first = expect(TokenType::IDENTIFIER, "Expected a type parameter name");
+        node->typeParams.push_back(first.lexeme);
+        while (match({TokenType::COMMA})) {
+            Token next = expect(TokenType::IDENTIFIER, "Expected a type parameter name after ','");
+            node->typeParams.push_back(next.lexeme);
+        }
+        expectTypeAngleClose("Expected '>' to close type parameter list");
+    }
+
+    expect(TokenType::LPAREN, "Expected '(' after func name");
 
     if (!check(TokenType::RPAREN)) {
         node->params.push_back(parseFunctionParam());

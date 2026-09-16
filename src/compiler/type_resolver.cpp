@@ -147,7 +147,7 @@ ZlType TypeResolver::resolveType(const TypeAnnotation& annotation,
         // annotation is an ordinary instantiation and must be built, not
         // deferred - otherwise `List<string>` in a plain class resolves to a
         // key with no registered shape and appears to have no methods.
-        const bool selfGenericReference = n == classIt->name &&
+        const bool selfGenericReference = n == currentClassName && n == classIt->name &&
             annotation.typeArgs.size() == classIt->typeParams.size() &&
             !currentClassTypeParams.empty();
         if (selfGenericReference) {

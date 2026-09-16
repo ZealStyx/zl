@@ -10,16 +10,102 @@ file(WRITE "${CMAKE_BINARY_DIR}/stdlib/VERSION" "${ZL_VERSION_STRING}\n")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# windows.h defines min and max as macros unless NOMINMAX is defined, which
+# turns std::numeric_limits<T>::max(), std::min and std::max into syntax errors
+# (C2589 / C2059) in every translation unit that includes it -- MSVC's error
+# points at the innocent call site, not at the macro. Defined here rather than
+# per file because a source that included windows.h first would still break.
+if(MSVC)
+    add_compile_definitions(NOMINMAX)
+endif()
+
 # Keep the public headers visible to every target, including standalone tools.
 # This also makes the project robust against older/stale per-target CMake state.
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
 # Add source files
-# Collect all .cpp sources under src/ recursively and create executable
-file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
+# Explicit list: a stray .cpp dropped under src/ must be added here on
+# purpose rather than silently joining the link (GLOB_RECURSE hid that).
+set(SOURCES
+    ${CMAKE_SOURCE_DIR}/src/common/error.cpp
+    ${CMAKE_SOURCE_DIR}/src/common/type_name.cpp
+    ${CMAKE_SOURCE_DIR}/src/common_stdlib_version.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/builtin_library.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/bytecode.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/compilation_plan.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/compiler.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/dispatch_table.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/generic_instantiation.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/ir.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/ir_lowering.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/ir_optimizer.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/machine_code.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/module_graph.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/module_loader.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/native_catalog.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/native_compiler.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/native_ffi_declarations.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/operator_rules.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/overload_resolver.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/pipeline.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/semantic_model.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/semantic_types.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/thread_capture.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/type_checker.cpp
+    ${CMAKE_SOURCE_DIR}/src/compiler/type_resolver.cpp
+    ${CMAKE_SOURCE_DIR}/src/lexer/lexer.cpp
+    ${CMAKE_SOURCE_DIR}/src/main.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/analysis.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/builder.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/dataflow.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/differential.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/effects.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/folding.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/function.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/instruction.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/lowering.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/opt_constant.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/opt_dead.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/opt_simplify.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/pass_manager.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/printer.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/reachability.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/safety.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/ssa.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/type.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/verifier.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/vm_backend.cpp
+    ${CMAKE_SOURCE_DIR}/src/native/emit.cpp
+    ${CMAKE_SOURCE_DIR}/src/native/lir.cpp
+    ${CMAKE_SOURCE_DIR}/src/native/pipeline.cpp
+    ${CMAKE_SOURCE_DIR}/src/native/select.cpp
+    ${CMAKE_SOURCE_DIR}/src/native/target.cpp
+    ${CMAKE_SOURCE_DIR}/src/parser/ast.cpp
+    ${CMAKE_SOURCE_DIR}/src/parser/expression_parser.cpp
+    ${CMAKE_SOURCE_DIR}/src/parser/parser.cpp
+    ${CMAKE_SOURCE_DIR}/src/parser/type_lookahead.cpp
+    ${CMAKE_SOURCE_DIR}/src/regex/regex.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/execution_state.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/gc.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/gc_safepoint.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/native.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/native_boundary.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/native_library.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/native_resource.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/runtime_exception.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/runtime_scheduler.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/runtime_task.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/runtime_task_executor.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/runtime_thread.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/runtime_type_checks.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/type_contracts.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/value.cpp
+    ${CMAKE_SOURCE_DIR}/src/vm/vm.cpp
+)
 
-# Create executable
-add_executable(zl_language ${SOURCES})
+# Create executable. zlpkg/manifest.cpp is the single TOML parser; --check
+# uses it to discover local path dependencies instead of a second regex scan.
+add_executable(zl_language ${SOURCES} ${CMAKE_SOURCE_DIR}/zlpkg/manifest.cpp)
 
 # --- Target organization (Objective 8) --------------------------------------
 # Everything registered below joins exactly one bucket, and the buckets are the
@@ -43,7 +129,7 @@ set(ZL_OPTIONAL_TARGETS "")
 list(APPEND ZL_CORE_TARGETS zl_language)
 
 # Include directories
-target_include_directories(zl_language PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(zl_language PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/zlpkg)
 target_compile_definitions(zl_language PRIVATE ZL_VERSION_STRING="${ZL_VERSION_STRING}")
 
 if(WIN32)
@@ -68,11 +154,20 @@ add_custom_command(TARGET zl_language POST_BUILD
 )
 
 # --- zlpkg: the package manager CLI (Phase 6) -------------------------------
-# Deliberately its own target/sources under zlpkg/ (NOT under src/, which
-# the glob above already sweeps up) - it's a standalone tool that talks to
-# zl_language only as a subprocess (see zlpkg/commands.cpp), so it has no
-# business linking against the interpreter's own sources/headers.
-file(GLOB ZLPKG_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/zlpkg/*.cpp)
+# Deliberately its own target/sources under zlpkg/ (NOT under src/) - it's a
+# standalone tool that talks to zl_language only as a subprocess (see
+# zlpkg/commands.cpp), so it has no business linking against the
+# interpreter's own sources/headers. `manifest.cpp` is also compiled into
+# zl_language so `--check` uses the same TOML parser.
+set(ZLPKG_SOURCES
+    ${CMAKE_SOURCE_DIR}/zlpkg/commands.cpp
+    ${CMAKE_SOURCE_DIR}/zlpkg/git.cpp
+    ${CMAKE_SOURCE_DIR}/zlpkg/lockfile.cpp
+    ${CMAKE_SOURCE_DIR}/zlpkg/main.cpp
+    ${CMAKE_SOURCE_DIR}/zlpkg/manifest.cpp
+    ${CMAKE_SOURCE_DIR}/zlpkg/process.cpp
+    ${CMAKE_SOURCE_DIR}/zlpkg/resolver.cpp
+)
 add_executable(zlpkg ${ZLPKG_SOURCES})
 target_include_directories(zlpkg PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_definitions(zlpkg PRIVATE ZL_VERSION_STRING="${ZL_VERSION_STRING}")
@@ -176,6 +271,15 @@ zl_add_required_test(zl-machine-code-tests tests/machine_code_tests.cpp src/comp
 
 zl_add_required_test(zl-regex-engine-tests tests/regex_engine_tests.cpp src/regex/regex.cpp)
 zl_add_required_test(zl-regex-unicode-tests tests/regex_unicode_tests.cpp src/regex/regex.cpp)
+
+# Source-root walk: an ancestor named `src` above a zlpkg.toml/.git boundary
+# must not become the import root.
+zl_add_required_test(zl-module-root-tests tests/module_root_tests.cpp)
+
+# Git dependency URL allowlist (https/ssh/scp-like only).
+zl_add_required_test(zl-zlpkg-git-url-tests tests/zlpkg_git_url_tests.cpp
+    zlpkg/git.cpp zlpkg/process.cpp zlpkg/manifest.cpp)
+target_include_directories(zl-zlpkg-git-url-tests PRIVATE ${CMAKE_SOURCE_DIR}/zlpkg)
 
 zl_add_required_test(zl-runtime-scheduler-tests tests/runtime_scheduler_tests.cpp
     src/vm/runtime_scheduler.cpp
@@ -391,7 +495,7 @@ if(UNIX AND NOT APPLE)
     find_program(RPMBUILD_EXECUTABLE rpmbuild)
     if(RPMBUILD_EXECUTABLE)
         list(APPEND CPACK_GENERATOR "RPM")
-        set(CPACK_RPM_PACKAGE_LICENSE "Proprietary")
+        set(CPACK_RPM_PACKAGE_LICENSE "PolyForm-Noncommercial-1.0.0")
         set(CPACK_RPM_PACKAGE_GROUP "Development/Languages")
         set(CPACK_RPM_PACKAGE_ARCHITECTURE "${CMAKE_SYSTEM_PROCESSOR}")
     endif()

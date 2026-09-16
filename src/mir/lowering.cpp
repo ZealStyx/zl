@@ -1113,6 +1113,7 @@ struct FunctionLowerer {
                 refineArguments(arguments, *calleeFunction, 0, loc);
             }
             const TempId temp = fb.emitInvokeStatic(callee, std::move(arguments), returnsVoid ? 0 : resultType, loc);
+            setLastInstructionName(node.resolvedTypeArgNames);
             return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
         }
 
@@ -1161,6 +1162,7 @@ struct FunctionLowerer {
         const TempId temp = fb.emitCall(callee, std::move(callArguments), returnsVoid ? 0 : resultType, loc,
                                         callArguments.empty() ? std::vector<TypeId>{}
                                                               : typeArgumentsFor(callee, callArguments.front()));
+        setLastInstructionName(node.resolvedTypeArgNames);
         return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
     }
 
@@ -1241,6 +1243,7 @@ struct FunctionLowerer {
         const TempId temp = fb.emitInvokeMethod(receiver, className, node.methodName,
                                                 std::move(arguments), returnsVoid ? 0 : resultType, loc,
                                                 receiverType ? receiverType->arguments : std::vector<TypeId>{});
+        setLastInstructionName(node.resolvedTypeArgNames);
         return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
     }
 
@@ -1269,6 +1272,7 @@ struct FunctionLowerer {
         const TempId temp = fb.emitInvokeSuper(self, callee, std::move(arguments),
                                                returnsVoid ? 0 : resultType, loc,
                                                typeArgumentsFor(callee, self));
+        setLastInstructionName(node.resolvedTypeArgNames);
         return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
     }
 
@@ -2109,6 +2113,18 @@ struct FunctionLowerer {
     }
 
     // --- helpers ----------------------------------------------------------
+    void setLastInstructionName(const std::vector<std::string>& names) {
+        if (names.empty()) return;
+        auto& instructions = fb.block(fb.currentBlock()).instructions;
+        if (instructions.empty()) return;
+        std::string joined = names.front();
+        for (std::size_t i = 1; i < names.size(); ++i) {
+            joined += ';';
+            joined += names[i];
+        }
+        instructions.back().name = std::move(joined);
+    }
+
     [[nodiscard]] FunctionId lookupFunction(const std::string& qualifiedName) const {
         const auto it = ctx.functionIds.find(qualifiedName);
         if (it != ctx.functionIds.end()) return it->second;
@@ -2812,7 +2828,8 @@ bool containsNode(const zl::AstNode* haystack, const zl::AstNode* needle) {
     }
 }
 
-void collectLambdas(const zl::AstNode* node, LoweringContext& ctx, const std::string& ownerClass) {
+void collectLambdas(const zl::AstNode* node, LoweringContext& ctx, const std::string& ownerClass,
+                    const std::vector<std::string>& extraParams = {}) {
     if (!node) return;
     if (node->kind == zl::NodeKind::LambdaExpr) {
         const auto& lambda = static_cast<const zl::LambdaExpr&>(*node);
@@ -2822,13 +2839,17 @@ void collectLambdas(const zl::AstNode* node, LoweringContext& ctx, const std::st
             const FunctionId id = ctx.builder.addFunction(name.str()).function().id;
             ctx.lambdaIds[&lambda] = id;
             ctx.lambdaOrder.push_back(&lambda);
-            ctx.lambdaTypeParams[&lambda] = ctx.typeParamsFor(ownerClass);
+            auto params = ctx.typeParamsFor(ownerClass);
+            params.insert(params.end(), extraParams.begin(), extraParams.end());
+            ctx.lambdaTypeParams[&lambda] = std::move(params);
         }
     }
     // Every container kind, at every depth: a lambda passed straight into a call
     // (`Thread.start(func() => ...)`) sits inside a CallExpr, not inside a
     // BlockStmt, and a closure body can contain further closures.
-    zl::forEachChild(node, [&](const zl::AstNode* child) { collectLambdas(child, ctx, ownerClass); });
+    zl::forEachChild(node, [&](const zl::AstNode* child) {
+        collectLambdas(child, ctx, ownerClass, extraParams);
+    });
 }
 
 void declareLayouts(LoweringContext& ctx) {
@@ -2924,7 +2945,9 @@ void declareFunction(LoweringContext& ctx, const zl::FunctionDecl& function, con
     if (!ctx.options.lowerGenericTemplates && !ctx.typeParamsFor(ownerClass).empty()) return;
 
     FunctionBuilder fb = ctx.builder.addFunction(ctx.qualifiedName(function));
-    const std::vector<std::string> typeParams = ctx.typeParamsFor(ownerClass);
+    const std::vector<std::string> classParams = ctx.typeParamsFor(ownerClass);
+    std::vector<std::string> typeParams = classParams;
+    typeParams.insert(typeParams.end(), function.typeParams.begin(), function.typeParams.end());
     TypeConverter converter{ctx.builder.types(), typeParams};
 
     fb.setAsync(function.isAsync);
@@ -2937,7 +2960,11 @@ void declareFunction(LoweringContext& ctx, const zl::FunctionDecl& function, con
                  : function.access == zl::AccessModifier::PROTECTED ? MemberAccess::Protected
                                                                     : MemberAccess::Public);
     fb.setLocation(SourceLocation{function.sourceFile, static_cast<std::uint32_t>(function.line), 0});
-    if (!typeParams.empty()) fb.setGenericTemplate(typeParams);
+    if (!classParams.empty()) fb.setGenericTemplate(classParams);
+    if (!function.typeParams.empty()) {
+        fb.function().isGenericTemplate = true;
+        fb.function().methodTypeParameters = function.typeParams;
+    }
     for (const auto& annotation : function.annotations) {
         if (annotation.name == "native") fb.setNative(true);
     }
@@ -2958,11 +2985,11 @@ void declareFunction(LoweringContext& ctx, const zl::FunctionDecl& function, con
         // building `this` as Object "Shared" would make it unassignable to the
         // Shared<int> a call site actually passes.
         std::string selfName = ownerClass;
-        if (!typeParams.empty()) {
+        if (!classParams.empty()) {
             selfName += "<";
-            for (std::size_t i = 0; i < typeParams.size(); ++i) {
+            for (std::size_t i = 0; i < classParams.size(); ++i) {
                 if (i) selfName += ",";
-                selfName += typeParams[i];
+                selfName += classParams[i];
             }
             selfName += ">";
         }
@@ -2976,7 +3003,7 @@ void declareFunction(LoweringContext& ctx, const zl::FunctionDecl& function, con
     }
 
     ctx.functionIds[fb.function().name] = fb.function().id;
-    if (function.body) collectLambdas(function.body.get(), ctx, ownerClass);
+    if (function.body) collectLambdas(function.body.get(), ctx, ownerClass, function.typeParams);
 }
 
 // Declares a lambda's MIR function: its flags and its capture list.
@@ -3174,7 +3201,8 @@ void collectWrittenLocals(const zl::AstNode* node, std::unordered_set<std::strin
 void lowerFunctionBody(LoweringContext& ctx, const zl::FunctionDecl& function, const std::string& ownerClass) {
     const auto found = ctx.functionIds.find(ctx.qualifiedName(function));
     if (found == ctx.functionIds.end()) return;
-    const std::vector<std::string> typeParams = ctx.typeParamsFor(ownerClass);
+    std::vector<std::string> typeParams = ctx.typeParamsFor(ownerClass);
+    typeParams.insert(typeParams.end(), function.typeParams.begin(), function.typeParams.end());
 
     FunctionLowerer lowerer(ctx, found->second, typeParams);
     lowerer.ownerClass = ownerClass;

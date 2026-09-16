@@ -1,0 +1,41 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - Utf8Text
+//
+// Text.* indexes Unicode scalars. String.* stays a byte boundary, so a
+// two-byte UTF-8 character is one Text character and two String bytes.
+// Reverse must not split a multi-byte scalar.
+// ============================================================================
+
+import zl.text.Text
+
+class Utf8Text {
+    func check(bool cond, string what): void {
+        if (!cond) {
+            throw new Exception("Utf8Text failed: " + what)
+        }
+    }
+
+    func main(): void {
+        var self = new Utf8Text()
+        var e = Text.fromCodePoint(233)
+        self.check(String.length(e) == 2, "é is two UTF-8 bytes")
+        self.check(Text.length(e) == 1, "é is one scalar")
+        self.check(Text.codePointAt(e, 0) == 233, "codePointAt é")
+        self.check(Text.charAt(e, 0) == e, "charAt returns the whole character")
+
+        var word = "h" + e + "llo"
+        self.check(Text.length(word) == 5, "héllo scalar length")
+        self.check(String.length(word) == 6, "héllo byte length")
+        self.check(Text.charAt(word, 1) == e, "charAt(1) is é")
+        self.check(Text.substring(word, 0, 2) == "h" + e, "substring scalars")
+        self.check(Text.reverse(word) == "oll" + e + "h", "reverse keeps é intact")
+        self.check(Text.indexOf(word, e) == 1, "indexOf scalar index")
+        self.check(Text.chars(word).length() == 5, "chars is one entry per scalar")
+
+        var smile = Text.fromCodePoint(128512)
+        self.check(Text.length(smile) == 1, "U+1F600 is one scalar")
+        self.check(Text.reverse("a" + smile + "b") == "b" + smile + "a", "reverse supplementary")
+
+        log("ok")
+    }
+}

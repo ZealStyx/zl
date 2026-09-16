@@ -182,6 +182,10 @@ private:
     }
     std::size_t addName(const std::string& name) { return chunk_.addName(name); }
     std::size_t addConst(const Value& value) { return chunk_.addConstant(value); }
+    std::size_t methodTypeArgOperand(const std::string& name) {
+        if (name.empty()) return 0;
+        return addName(name) + 1;
+    }
 
     // -----------------------------------------------------------------------
     // Registration
@@ -256,6 +260,7 @@ private:
             // argument check compares against, so "" (skip) made every
             // higher-order call reject its lambda as returning the wrong type.
             info.returnTypeName = module_.types.render(fn.returnType);
+            info.typeParameters = fn.methodTypeParameters;
             info.dispatchSignature.name = fn.simpleName;
             if (fn.isNative) {
                 fnInfo_[i].supported = false;
@@ -1157,11 +1162,11 @@ private:
             }
             for (std::size_t i = 1; i < ins.operands.size(); ++i)
                 pushOperand(fn, ins.operands[i], body, line);
-            body.emit(OpCode::Call, calleeId - 1, line);
+            body.emit(OpCode::Call, calleeId - 1, line, methodTypeArgOperand(ins.name));
         } else {
             for (std::size_t i = 0; i < ins.operands.size(); ++i)
                 pushOperand(fn, ins.operands[i], body, line);
-            body.emit(OpCode::Call, calleeId - 1, line);
+            body.emit(OpCode::Call, calleeId - 1, line, methodTypeArgOperand(ins.name));
         }
         // Result (the callee's return value is always pushed by the VM).
         if (ins.result != kNoTemp) defineTemp(ins.result, body, line);
@@ -1201,7 +1206,7 @@ private:
                                           : ins.target.className;
         const std::size_t slot =
             resolveMethodSlot(className, ins.target.methodName, ins.operands, ins.location);
-        body.emit(OpCode::InvokeMethod, slot, line, ins.operands.size() - 1);
+        body.emit(OpCode::InvokeMethod, slot, line, ins.operands.size() - 1, methodTypeArgOperand(ins.name));
         if (ins.result != kNoTemp) defineTemp(ins.result, body, line);
         else body.emit(OpCode::Pop, 0, line);
     }
@@ -1211,7 +1216,8 @@ private:
         pushOperand(fn, ins.operands[0], body, line); // receiver
         for (std::size_t i = 1; i < ins.operands.size(); ++i)
             pushOperand(fn, ins.operands[i], body, line);
-        body.emit(OpCode::InvokeSuper, ins.target.function - 1, line, ins.operands.size() - 1);
+        body.emit(OpCode::InvokeSuper, ins.target.function - 1, line, ins.operands.size() - 1,
+                  methodTypeArgOperand(ins.name));
         if (ins.result != kNoTemp) defineTemp(ins.result, body, line);
         else body.emit(OpCode::Pop, 0, line);
     }
@@ -1219,7 +1225,7 @@ private:
     void emitInvokeStatic(const Function& fn, const Instruction& ins, Body& body) {
         const std::size_t line = ins.location.line;
         for (const Operand& op : ins.operands) pushOperand(fn, op, body, line);
-        body.emit(OpCode::Call, ins.target.function - 1, line);
+        body.emit(OpCode::Call, ins.target.function - 1, line, methodTypeArgOperand(ins.name));
         if (ins.result != kNoTemp) defineTemp(ins.result, body, line);
         else body.emit(OpCode::Pop, 0, line);
     }

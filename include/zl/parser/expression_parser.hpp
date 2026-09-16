@@ -20,6 +20,9 @@ private:
     NodePtr parsePratt(int minBindingPower);
     NodePtr parseCall();
     NodePtr parsePrimary();
+    // Parses `<T, U>` when the next tokens are a generic call-site argument
+    // list followed by '('. Returns empty when the lookahead does not match.
+    std::vector<TypeAnnotation> parseOptionalCallTypeArgs();
     NodePtr parseCollectionLiteral();
     NodePtr parseDataLiteral(const Token& nameTok);
     NodePtr parseLambdaExpr();

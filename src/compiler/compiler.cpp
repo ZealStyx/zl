@@ -13,6 +13,19 @@
 #include <cstdint>
 
 namespace zl {
+namespace {
+
+std::size_t typeArgNameOperand(Chunk& chunk, const std::vector<std::string>& names) {
+    if (names.empty()) return 0;
+    std::string joined = names.front();
+    for (std::size_t i = 1; i < names.size(); ++i) {
+        joined += ';';
+        joined += names[i];
+    }
+    return chunk.addName(joined) + 1;
+}
+
+} // namespace
 
 std::size_t Compiler::emit(OpCode op, std::size_t operand, std::size_t line, std::size_t operand2, std::size_t operand3) {
     chunk_.code.push_back(Instruction{op, operand, line, operand2, operand3});
@@ -107,6 +120,7 @@ Chunk Compiler::compile(const Program& program) {
         std::string qualifiedName = fn->ownerClassName + "." + signature.describe();
         FunctionInfo info{std::move(qualifiedName), std::move(paramNames), std::move(parameterTypeNames),
                           ((fn->returnType.name.empty() && fn->returnType.unionOf.empty()) ? "void" : runtimeTypeName(fn->returnType)), 0, fn->isStatic, fn->isAsync};
+        info.typeParameters = fn->typeParams;
         info.ownerClassName = fn->ownerClassName;
         info.isNative = std::any_of(fn->annotations.begin(), fn->annotations.end(), [](const Annotation& a) { return a.name == "native"; });
         info.dispatchSignature = signature;
@@ -1330,7 +1344,8 @@ void Compiler::compileCall(const CallExpr* node) {
             });
         if (staticIt != chunk_.functions.end()) {
             for (const auto& arg : node->arguments) compileExpression(arg.get());
-            emit(OpCode::Call, static_cast<std::size_t>(staticIt - chunk_.functions.begin()), node->line);
+            emit(OpCode::Call, static_cast<std::size_t>(staticIt - chunk_.functions.begin()), node->line,
+                 typeArgNameOperand(chunk_, node->resolvedTypeArgNames));
             return;
         }
 
@@ -1374,7 +1389,7 @@ void Compiler::compileCall(const CallExpr* node) {
     // resolution itself, just looks up the exact signature it was told.
     const std::size_t functionIndex = resolveFunctionIndex(currentClassName_, node->resolvedDispatch);
     for (const auto& arg : node->arguments) compileExpression(arg.get());
-    emit(OpCode::Call, functionIndex, node->line);
+    emit(OpCode::Call, functionIndex, node->line, typeArgNameOperand(chunk_, node->resolvedTypeArgNames));
 }
 
 // Assignment targets the lexical binding resolved by the checker. Validate
@@ -1619,7 +1634,8 @@ void Compiler::compileMethodCall(const MethodCallExpr* node) {
     for (const auto& arg : node->arguments) compileExpression(arg.get());
 
     std::size_t slot = methodSlot(node->resolvedDispatch);
-    emit(OpCode::InvokeMethod, slot, node->line, node->arguments.size());
+    emit(OpCode::InvokeMethod, slot, node->line, node->arguments.size(),
+         typeArgNameOperand(chunk_, node->resolvedTypeArgNames));
 }
 
 void Compiler::compileThisExpr(const ThisExpr* node) {
@@ -1653,7 +1669,8 @@ void Compiler::compileSuperMethodCallExpr(const SuperMethodCallExpr* node) {
     for (const auto& arg : node->arguments) compileExpression(arg.get());
 
     const std::size_t functionIndex = resolveFunctionIndex(currentParentClassName_, node->resolvedDispatch);
-    emit(OpCode::InvokeSuper, functionIndex, node->line, node->arguments.size());
+    emit(OpCode::InvokeSuper, functionIndex, node->line, node->arguments.size(),
+         typeArgNameOperand(chunk_, node->resolvedTypeArgNames));
 }
 
 } // namespace zl

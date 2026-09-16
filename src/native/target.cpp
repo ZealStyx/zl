@@ -53,7 +53,11 @@ TargetMachine makeSysV() {
     cc.intScratch = {kRax, kRcx, kRdx};
     cc.floatScratch = {kXmm8, kXmm9};
     cc.stackAlignment = 16;
-    cc.shadowSpace = 0;
+    // PSABI 3.2.2: at the moment a `call` executes, the top 32 bytes of the
+    // caller's frame are shadow space the callee may spill into. (This used
+    // to be recorded as 0 - "System V has no shadow space" - which was wrong
+    // and would have handed a future C callee the caller's saved rbp.)
+    cc.shadowSpace = 32;
     cc.redZone = 128;
     cc.calleePopsArguments = false;
 

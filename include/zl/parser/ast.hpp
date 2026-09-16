@@ -130,6 +130,7 @@ struct Annotation {
 // type only, no body (interfaces declare a contract, not an implementation).
 struct InterfaceMethodSig {
     std::string name;
+    std::vector<std::string> typeParams; // from `method<T>(...)`; empty if not generic
     std::vector<Param> params;
     TypeAnnotation returnType;
     bool isOperator{false};
@@ -300,6 +301,7 @@ struct FunctionDecl : AstNode {
     std::string name;
     bool isOperator{false};
     TokenType operatorToken{TokenType::UNKNOWN};
+    std::vector<std::string> typeParams; // from `func firstOf<T>(...)`; empty if not generic
     std::vector<Param> params;
     TypeAnnotation returnType;   // name == "void" if none was written
     NodePtr body;                 // a BlockStmt
@@ -472,6 +474,9 @@ struct BinaryExpr : AstNode {
 struct CallExpr : AstNode {
     std::string namespaceName; // e.g. "Math" in Math.sqrt(x); empty for a plain user-func call
     std::string calleeName;
+    std::vector<TypeAnnotation> typeArgs; // from `firstOf<int>(...)`; empty if omitted
+    // Resolved method-level type arguments (canonical names) filled by the checker.
+    mutable std::vector<std::string> resolvedTypeArgNames;
     std::vector<NodePtr> arguments;
     // Filled in by TypeChecker::inferCall (Phase 2, method overloading):
     // the signature suffix of the SPECIFIC overload chosen for this call
@@ -597,6 +602,8 @@ struct FieldAssignExpr : AstNode {
 struct MethodCallExpr : AstNode {
     NodePtr object;         // the expression producing the object
     std::string methodName;
+    std::vector<TypeAnnotation> typeArgs; // from `items.map<U>(...)`; empty if omitted
+    mutable std::vector<std::string> resolvedTypeArgNames;
     std::vector<NodePtr> arguments;
     mutable DispatchSignature resolvedDispatch; // see CallExpr::resolvedDispatch
     mutable bool isTaskMethod{false};
@@ -626,6 +633,8 @@ struct SuperCallExpr : AstNode {
 // parent's version", resolved once at compile time).
 struct SuperMethodCallExpr : AstNode {
     std::string methodName;
+    std::vector<TypeAnnotation> typeArgs; // from `super.method<T>(...)`; empty if omitted
+    mutable std::vector<std::string> resolvedTypeArgNames;
     std::vector<NodePtr> arguments;
     mutable DispatchSignature resolvedDispatch; // see CallExpr::resolvedDispatch
     SuperMethodCallExpr() : AstNode(NodeKind::SuperMethodCallExpr) {}

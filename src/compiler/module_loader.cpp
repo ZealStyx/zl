@@ -47,20 +47,7 @@ ModuleLoader::ModuleLoader(std::filesystem::path entryFile, std::filesystem::pat
                                        : std::vector<std::filesystem::path>{std::move(stdlibRoot)}) {}
 
 std::filesystem::path ModuleLoader::resolveSourceRoot() const {
-    auto dir = std::filesystem::absolute(entryFile_).parent_path();
-    // Walk up looking for a directory literally named "src" (the Java-like
-    // convention the roadmap calls for: `src/io/github/test/AppTest.zl`).
-    for (std::filesystem::path p = dir;;) {
-        if (p.filename() == "src") return p;
-        std::filesystem::path parent = p.parent_path();
-        if (parent == p) break; // reached the filesystem root without finding one
-        p = parent;
-    }
-    // No "src" ancestor - fall back to the entry file's own directory. This
-    // is what keeps every existing import-free `.zl` file (examples/*.zl,
-    // and any other single-file/no-package program) working exactly as
-    // before: with no imports, this root is never even consulted.
-    return dir;
+    return resolveProjectSourceRoot(entryFile_);
 }
 
 std::filesystem::path ModuleLoader::resolveImportPath(const ImportDecl& imp, const std::filesystem::path& importingFile) const {
