@@ -23,9 +23,10 @@
 #     that was never written. It is inert on single-config generators.
 #
 # Every build pipes through tee so that a failing build can publish its
-# compiler errors into the job summary. A red build is otherwise only
-# diagnosable by downloading the log archive, which is a needlessly slow way
-# to learn that one file did not compile.
+# compiler errors as annotations and into the job summary. A red build is
+# otherwise only diagnosable by downloading the log archive, which is a
+# needlessly slow way to learn that one file did not compile - and impossible
+# from an environment that cannot reach the log host.
 
 name: CI
 
@@ -74,10 +75,23 @@ jobs:
       - name: Native compiler gate (legacy --emit-native path plus benchmark parity)
         run: bash scripts/native_gate.sh
 
-      - name: Build errors, into the summary
+      - name: Build errors, as annotations
         if: failure()
         shell: bash
         run: |
+          # Emit each compiler error as a workflow-command annotation. Unlike
+          # the log archive - which has to be downloaded - annotations are
+          # readable through the checks API, so a red build on a platform we
+          # cannot reproduce locally is still diagnosable.
+          n=0
+          while IFS= read -r line; do
+            n=$((n + 1))
+            [ "$n" -le 25 ] || break
+            line="${line//'%'/%25}"
+            line="${line//$'\r'/%0D}"
+            line="${line//$'\n'/%0A}"
+            printf '::error::%s\n' "$line"
+          done < <(grep -E 'error|Error' build.log | head -25)
           {
             echo '### Compiler and build errors'
             echo
@@ -106,10 +120,23 @@ jobs:
       - name: CTest
         run: ctest --test-dir build --output-on-failure -C Release --timeout 300
 
-      - name: Build errors, into the summary
+      - name: Build errors, as annotations
         if: failure()
         shell: bash
         run: |
+          # Emit each compiler error as a workflow-command annotation. Unlike
+          # the log archive - which has to be downloaded - annotations are
+          # readable through the checks API, so a red build on a platform we
+          # cannot reproduce locally is still diagnosable.
+          n=0
+          while IFS= read -r line; do
+            n=$((n + 1))
+            [ "$n" -le 25 ] || break
+            line="${line//'%'/%25}"
+            line="${line//$'\r'/%0D}"
+            line="${line//$'\n'/%0A}"
+            printf '::error::%s\n' "$line"
+          done < <(grep -E 'error|Error' build.log | head -25)
           {
             echo '### Compiler and build errors'
             echo
@@ -138,10 +165,23 @@ jobs:
       - name: CTest
         run: ctest --test-dir build --output-on-failure -C Release --timeout 300
 
-      - name: Build errors, into the summary
+      - name: Build errors, as annotations
         if: failure()
         shell: bash
         run: |
+          # Emit each compiler error as a workflow-command annotation. Unlike
+          # the log archive - which has to be downloaded - annotations are
+          # readable through the checks API, so a red build on a platform we
+          # cannot reproduce locally is still diagnosable.
+          n=0
+          while IFS= read -r line; do
+            n=$((n + 1))
+            [ "$n" -le 25 ] || break
+            line="${line//'%'/%25}"
+            line="${line//$'\r'/%0D}"
+            line="${line//$'\n'/%0A}"
+            printf '::error::%s\n' "$line"
+          done < <(grep -E 'error|Error' build.log | head -25)
           {
             echo '### Compiler and build errors'
             echo
