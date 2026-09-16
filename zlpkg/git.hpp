@@ -45,4 +45,12 @@ GitFetchResult fetchGit(const std::string& url, const std::string& ref,
 // them.
 bool verifyGitCache(const std::filesystem::path& dir, const std::string& sha);
 
+// True when `url` is an allowed git remote for a zlpkg.toml `git = "..."`
+// value. The string is attacker-controllable (it may come from a transitive
+// dependency's own manifest), so helper transports (`ext::`) and the
+// unauthenticated `http://`, `git://`, and `file://` schemes are rejected.
+// Only `https://`, `ssh://`, and the scp-like `user@host:path` spelling
+// are accepted.
+[[nodiscard]] bool isAllowedGitDependencyUrl(const std::string& url);
+
 } // namespace zlpkg

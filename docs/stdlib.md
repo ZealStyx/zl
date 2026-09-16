@@ -154,12 +154,13 @@ native string boundary; the regex and formatting engines stay native.
 aliases bound to the very same callbacks; those duplicates have been removed so
 each operation has exactly one name.
 
-Indices and lengths are **bytes, not characters**. `Text.length("héllo")` is `6`,
-because `é` is two UTF-8 bytes, and `charAt` / `substring` / `indexOf` index on the
-same byte basis. `upper` and `lower` only case ASCII. Keep this in mind for any
-non-ASCII input, and do not use `Text.reverse` on it — it reverses bytes and so
-emits the two bytes of a multi-byte character in the wrong order, producing invalid
-UTF-8. See `examples/REVIEW.md` (O18).
+`Text.*` character indexing (`length`, `charAt`, `substring`, `reverse`,
+`codePointAt`, `fromCodePoint`, and search helpers that return offsets) is by
+Unicode scalar value. `Text.length("héllo")` is `5`; `Text.charAt("héllo", 1)`
+is `"é"`; `Text.reverse` keeps multi-byte scalars intact. `String.*` remains
+the byte-string primitive boundary, so `String.length("héllo")` is `6`.
+`upper` and `lower` only case ASCII. See `examples/REVIEW.md` (O18) and
+`tests/zl/valid/language_hardening_tests/Utf8Text.zl`.
 
 `string` has no methods of its own: `s.length()` is a compile error, so use the
 `Text.length(s)` free-function form.

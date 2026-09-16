@@ -117,4 +117,15 @@ long TypeLookahead::scanAnnotation(std::size_t pos) const {
     return static_cast<long>(cursor.pos);
 }
 
+bool TypeLookahead::looksLikeGenericCallArgs(std::size_t from) const {
+    Cursor cursor{from, 0};
+    if (!consume(cursor, TokenType::LT)) return false;
+    if (!scanAnnotationCursor(cursor, 0)) return false;
+    while (consume(cursor, TokenType::COMMA)) {
+        if (!scanAnnotationCursor(cursor, 0)) return false;
+    }
+    if (!consumeAngleClose(cursor)) return false;
+    return cursor.atTokenBoundary() && matches(cursor, TokenType::LPAREN);
+}
+
 } // namespace zl

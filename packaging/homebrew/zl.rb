@@ -4,7 +4,7 @@ class Zl < Formula
   url "https://github.com/REPLACE_WITH_OWNER/REPLACE_WITH_REPOSITORY/archive/refs/tags/v#{version}.tar.gz"
   version "0.1.0"
   sha256 "REPLACE_WITH_RELEASE_TARBALL_SHA256"
-  license "Proprietary"
+  license "PolyForm-Noncommercial-1.0.0"
 
   depends_on "cmake" => :build
   depends_on "ninja" => :build

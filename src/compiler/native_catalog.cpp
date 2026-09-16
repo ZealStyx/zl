@@ -163,6 +163,14 @@ std::vector<NativeSignature> buildSignatureTable() {
     sigs.push_back({NativeId::STRING_CODEPOINTAT, "String.codePointAt", {ZlType::STRING, ZlType::INT}, ZlType::INT});
     sigs.push_back({NativeId::STRING_FROMCODEPOINT, "String.fromCodePoint", {ZlType::INT}, ZlType::STRING});
     sigs.push_back({NativeId::STRING_REPEAT, "String.repeatText", {ZlType::STRING, ZlType::INT}, ZlType::STRING});
+    sigs.push_back({NativeId::STRING_UTF8LENGTH, "String.utf8Length", {ZlType::STRING}, ZlType::INT});
+    sigs.push_back({NativeId::STRING_UTF8CHARAT, "String.utf8CharAt", {ZlType::STRING, ZlType::INT}, ZlType::STRING});
+    sigs.push_back({NativeId::STRING_UTF8SUBSTRING, "String.utf8Substring", {ZlType::STRING, ZlType::INT, ZlType::INT}, ZlType::STRING});
+    sigs.push_back({NativeId::STRING_UTF8REVERSE, "String.utf8Reverse", {ZlType::STRING}, ZlType::STRING});
+    sigs.push_back({NativeId::STRING_UTF8CODEPOINTAT, "String.utf8CodePointAt", {ZlType::STRING, ZlType::INT}, ZlType::INT});
+    sigs.push_back({NativeId::STRING_UTF8FROMCODEPOINT, "String.utf8FromCodePoint", {ZlType::INT}, ZlType::STRING});
+    sigs.push_back({NativeId::STRING_UTF8BYTEINDEX, "String.utf8ByteIndex", {ZlType::STRING, ZlType::INT}, ZlType::INT});
+    sigs.push_back({NativeId::STRING_UTF8INDEXFROMBYTE, "String.utf8IndexFromByte", {ZlType::STRING, ZlType::INT}, ZlType::INT});
     sigs.push_back({NativeId::FILESYSTEM_READFILE, "FileSystem.readFile",   {ZlType::STRING},                      ZlType::STRING});
     sigs.push_back({NativeId::FILESYSTEM_WRITEFILE, "FileSystem.writeFile",  {ZlType::STRING, ZlType::STRING},      ZlType::VOID_TYPE});
     sigs.push_back({NativeId::FILESYSTEM_APPENDFILE, "FileSystem.appendFile", {ZlType::STRING, ZlType::STRING},      ZlType::VOID_TYPE});
