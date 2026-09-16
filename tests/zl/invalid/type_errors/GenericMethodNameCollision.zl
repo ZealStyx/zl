@@ -1,0 +1,13 @@
+// Regression fixture - invalid/type_errors - GenericMethodNameCollision
+//
+// A method type parameter that reuses a class type parameter is rejected.
+
+class GenericMethodNameCollision<T> {
+    public static func firstOf<T>(List<T> items, T fallback): T {
+        return fallback
+    }
+
+    func main(): void {
+        log("unreachable")
+    }
+}

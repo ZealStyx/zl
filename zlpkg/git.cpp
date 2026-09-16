@@ -26,18 +26,19 @@ std::string randomSuffix() {
     return oss.str();
 }
 
-// Git URL transport allowlist. A zlpkg.toml `git = "..."` value is
-// attacker-controllable (it may come from a transitive dependency's own
-// manifest), so it must never reach git as an arbitrary transport string:
-// git honors helper transports such as `ext::sh -c ...` that execute
-// commands by design. Only the ordinary network/local transports and the
-// scp-like ssh spelling are accepted.
-bool isAllowedGitUrl(const std::string& url) {
+} // namespace
+
+bool isAllowedGitDependencyUrl(const std::string& url) {
     if (url.empty() || url.front() == '-' || url.front() == '/') return false;
     for (unsigned char c : url) {
         if (c < 0x20 || c == 0x7F) return false; // no control characters
     }
-    static const char* kAllowedSchemes[] = {"https://", "http://", "ssh://", "git://", "file://"};
+    // Authenticated/encrypted remotes only. `http://` is plaintext,
+    // `git://` is unauthenticated, `file://` (and a leading '/') is a
+    // local path, and helper transports such as `ext::sh -c ...` execute
+    // commands by design. git's `http::` / `git::` helper spellings are
+    // rejected because they do not match these prefixes either.
+    static const char* kAllowedSchemes[] = {"https://", "ssh://"};
     for (const char* scheme : kAllowedSchemes) {
         if (url.rfind(scheme, 0) == 0) return true;
     }
@@ -56,6 +57,8 @@ bool isAllowedGitUrl(const std::string& url) {
     }
     return false;
 }
+
+namespace {
 
 // A ref (tag/branch/commit) is passed to `git checkout` as one argv element,
 // so shell syntax cannot leak through; the remaining risk is the ref being
@@ -85,10 +88,10 @@ bool isPinnedSha(const std::string& sha) {
 }
 
 void validateGitRemote(const std::string& url, const std::string& ref) {
-    if (!isAllowedGitUrl(url)) {
-        throw GitError("git dependency URL '" + url + "' is not allowed: only https://, http://, "
-                       "ssh://, git://, file:// and user@host:path URLs are accepted "
-                       "(helper transports such as ext:: are rejected)");
+    if (!isAllowedGitDependencyUrl(url)) {
+        throw GitError("git dependency URL '" + url + "' is not allowed: only https://, "
+                       "ssh:// and user@host:path URLs are accepted "
+                       "(http://, git://, file:// and helper transports such as ext:: are rejected)");
     }
     if (!isAllowedGitRef(ref)) {
         throw GitError("git dependency ref '" + ref + "' is not allowed: refs must not start with '-' "

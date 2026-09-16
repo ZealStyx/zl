@@ -35,13 +35,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 
       - name: Build (core plus every test executable and fixture)
         run: cmake --build build --config Release --target zl-tests --parallel
 
       - name: CTest (unit suites, boundary lint, safety pipeline, report and parity checks)
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure -C Release --timeout 300
 
       - name: Regression corpus (tests/zl/valid and tests/zl/invalid, including package-manager cases)
         run: bash scripts/run_regressions.sh build/zl_language all
@@ -66,13 +66,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 
       - name: Build
         run: cmake --build build --config Release --target zl-tests --parallel
 
       - name: CTest
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure -C Release --timeout 300
 
   windows:
     name: Windows - build and CTest
@@ -83,10 +83,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 
       - name: Build
         run: cmake --build build --config Release --target zl-tests --parallel
 
       - name: CTest
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure -C Release --timeout 300

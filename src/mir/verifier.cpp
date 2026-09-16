@@ -580,7 +580,8 @@ private:
             checkTypeParamScope(parameter.type, "parameter " + std::to_string(i), kNoBlock, -1, parameter.location);
         }
 
-        if (function_.isGenericTemplate && function_.typeParameters.empty()) {
+        if (function_.isGenericTemplate && function_.typeParameters.empty() &&
+            function_.methodTypeParameters.empty()) {
             error("function is marked as a generic template but declares no type parameters",
                   kNoBlock, -1, function_.location);
         }
@@ -624,11 +625,15 @@ private:
         const Type* type = typeOf(id);
         if (!type) return;
         if (type->kind == TypeKind::TypeParam) {
-            if (function_.typeParameters.empty()) {
+            const bool inClass = std::find(function_.typeParameters.begin(), function_.typeParameters.end(),
+                                           type->name) != function_.typeParameters.end();
+            const bool inMethod = std::find(function_.methodTypeParameters.begin(),
+                                            function_.methodTypeParameters.end(), type->name) !=
+                                  function_.methodTypeParameters.end();
+            if (function_.typeParameters.empty() && function_.methodTypeParameters.empty()) {
                 error(what + " uses generic parameter '" + type->name +
                       "' but the function is not a generic template", block, index, loc);
-            } else if (std::find(function_.typeParameters.begin(), function_.typeParameters.end(), type->name) ==
-                       function_.typeParameters.end()) {
+            } else if (!inClass && !inMethod) {
                 error(what + " uses generic parameter '" + type->name +
                       "' which the function does not declare", block, index, loc);
             }
@@ -2265,6 +2270,14 @@ private:
                 // member; the call is through that member, not the union.
                 const Type* calleeType = typeOf(refinedTypeAt(id, callee));
                 if (!calleeType) return;
+                // An untyped lambda parameter is UNKNOWN until a func
+                // annotation is written (`func(f) => f(21)`). The type checker
+                // already treats that as a value call; the runtime checks
+                // callability. Rejecting it here would undo that and report
+                // "not callable" for programs the front end accepted.
+                if (calleeType->kind == TypeKind::Unknown || calleeType->kind == TypeKind::TypeParam) {
+                    return;
+                }
                 if (calleeType->kind != TypeKind::Function) {
                     error("call_indirect through " + render(callee.type) + ", which is not callable",
                           id, index, loc);

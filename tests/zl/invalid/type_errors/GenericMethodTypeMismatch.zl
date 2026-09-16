@@ -1,0 +1,16 @@
+// Regression fixture - invalid/type_errors - GenericMethodTypeMismatch
+//
+// Instantiating firstOf<int> produces an int; assigning that result to a
+// string is a compile-time type error.
+
+class GenericMethodTypeMismatch {
+    public static func firstOf<T>(List<T> items, T fallback): T {
+        return fallback
+    }
+
+    func main(): void {
+        var nums = new List<int>()
+        string s = GenericMethodTypeMismatch.firstOf<int>(nums, 0)
+        log(s)
+    }
+}
