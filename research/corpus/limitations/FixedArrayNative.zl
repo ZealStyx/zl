@@ -1,8 +1,9 @@
-// Limitation: passing a fixed array through the native Collection.* primitives
-// loses the element type (list<unknown>), which the MIR verifier rejects as a
-// type-flow violation. The reference AST compiler accepts the same program.
-// See the known "list<unknown> stored in an array[2]<int> slot" gap recorded in
-// docs/status/mir-safety-evaluation.md.
+// Previously recorded as limitation: passing a fixed array through the native
+// Collection.* primitives was said to lose the element type (list<unknown>),
+// which the MIR verifier would reject. Fixed by src/mir/type.cpp isCollectionType
+// now including Array (case TypeKind::Array). This fixture now verifies clean
+// and runs on both pipelines. Kept here as regression that the fix holds.
+// See P1-5 in TASKS.md and docs/status/mir-safety-evaluation.md update.
 class FixedArrayNative {
     func main(): void {
         array[5]<int> fixed = [1, 2, 3, 4, 5]

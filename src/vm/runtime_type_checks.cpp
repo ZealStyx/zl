@@ -203,17 +203,26 @@ bool reflectiveMatchesSpec(const Value& value, const TypeName& spec, const Chunk
         if ((*closure)->parameterTypeNames.size() != expectedParamCount) return false;
         for (std::size_t i = 0; i < expectedParamCount; ++i) {
             const auto actual = parseTypeName((*closure)->parameterTypeNames[i]);
+            // P0-1: an untyped lambda parameter is stored as "unknown" (or "object"
+            // for compatibility). A typed expectation such as func(int):int must
+            // accept that dynamic actual - the type checker already skips UNKNOWN
+            // in validateFunctionTypeAssignment, and the runtime should mirror
+            // that permissiveness. Otherwise func(x) => x*2 fails a
+            // func(int):int assertion even though it is safe to call.
+            if (isDynamicTypeName(actual)) continue;
             if (!typeNamesEqual(actual, spec.args[i])) return false;
         }
         // A dynamic ("unknown"/"object") expected return accepts any actual
-        // return: the caller promised to handle whatever comes back. Parameter
-        // positions stay exactly equal (invariance is what keeps a
-        // func(unknown) expectation from accepting a func(int) value whose
-        // body would then receive values it cannot handle).
+        // return: the caller promised to handle whatever comes back. Conversely,
+        // an actual return that is dynamic (untyped lambda) should be accepted
+        // by any concrete expectation - the body will produce a value that the
+        // caller can handle, and the historical bare-func compatibility relies
+        // on this.
         if (isDynamicTypeName(spec.args.back())) return true;
         std::string returnType = (*closure)->returnTypeName.empty() ? "void" : (*closure)->returnTypeName;
         if ((*closure)->isAsync) returnType = "Task<" + returnType + ">";
         const auto actualReturn = parseTypeName(returnType);
+        if (isDynamicTypeName(actualReturn)) return true;
         return typeNamesEqual(actualReturn, spec.args.back());
     }
     if (name == "Task") {
