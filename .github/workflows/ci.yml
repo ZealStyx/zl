@@ -97,7 +97,11 @@ jobs:
           # when the build succeeds and only a test fails - exits non-zero and
           # would abort this step before it reported anything at all.
           {
-            grep -hE 'Test #[0-9]+|\*\*\*Failed|Errors while running CTest|tests passed|tests failed' ctest.log 2>/dev/null | head -25 || true
+            # Do not grep every `Test #N` progress line. CTest pads `Test  #1`
+            # vs `Test #10`, GitHub keeps ten annotations per step, and leftover
+            # failures then hide behind a window of passing tests.
+            grep -hE '\*\*\*(Failed|Exception|Timeout)|The following tests FAILED|[0-9]+ tests failed out of|Errors while running CTest' ctest.log 2>/dev/null | head -40 || true
+            awk '/The following tests FAILED/,/^[[:space:]]*$/' ctest.log 2>/dev/null | head -40 || true
             grep -hE 'error:|error C[0-9]+|fatal error' build.log 2>/dev/null | head -25 || true
           } > failures.txt
           n=0
@@ -116,6 +120,14 @@ jobs:
             cat failures.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload CTest log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-log-Linux
+          path: ctest.log
+          if-no-files-found: ignore
 
   macos:
     name: macOS - build and CTest
@@ -159,7 +171,11 @@ jobs:
           # when the build succeeds and only a test fails - exits non-zero and
           # would abort this step before it reported anything at all.
           {
-            grep -hE 'Test #[0-9]+|\*\*\*Failed|Errors while running CTest|tests passed|tests failed' ctest.log 2>/dev/null | head -25 || true
+            # Do not grep every `Test #N` progress line. CTest pads `Test  #1`
+            # vs `Test #10`, GitHub keeps ten annotations per step, and leftover
+            # failures then hide behind a window of passing tests.
+            grep -hE '\*\*\*(Failed|Exception|Timeout)|The following tests FAILED|[0-9]+ tests failed out of|Errors while running CTest' ctest.log 2>/dev/null | head -40 || true
+            awk '/The following tests FAILED/,/^[[:space:]]*$/' ctest.log 2>/dev/null | head -40 || true
             grep -hE 'error:|error C[0-9]+|fatal error' build.log 2>/dev/null | head -25 || true
           } > failures.txt
           n=0
@@ -178,6 +194,14 @@ jobs:
             cat failures.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload CTest log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-log-macOS
+          path: ctest.log
+          if-no-files-found: ignore
 
   windows:
     name: Windows - build and CTest
@@ -225,7 +249,11 @@ jobs:
           # when the build succeeds and only a test fails - exits non-zero and
           # would abort this step before it reported anything at all.
           {
-            grep -hE 'Test #[0-9]+|\*\*\*Failed|Errors while running CTest|tests passed|tests failed' ctest.log 2>/dev/null | head -25 || true
+            # Do not grep every `Test #N` progress line. CTest pads `Test  #1`
+            # vs `Test #10`, GitHub keeps ten annotations per step, and leftover
+            # failures then hide behind a window of passing tests.
+            grep -hE '\*\*\*(Failed|Exception|Timeout)|The following tests FAILED|[0-9]+ tests failed out of|Errors while running CTest' ctest.log 2>/dev/null | head -40 || true
+            awk '/The following tests FAILED/,/^[[:space:]]*$/' ctest.log 2>/dev/null | head -40 || true
             grep -hE 'error:|error C[0-9]+|fatal error' build.log 2>/dev/null | head -25 || true
           } > failures.txt
           n=0
@@ -244,3 +272,11 @@ jobs:
             cat failures.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload CTest log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-log-Windows
+          path: ctest.log
+          if-no-files-found: ignore
