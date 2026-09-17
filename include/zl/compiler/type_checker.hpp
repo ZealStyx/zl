@@ -537,6 +537,7 @@ private:
     FunctionExpectation currentLambdaExpectation_;
     ZlType lastFunctionReturnType_{ZlType::UNKNOWN};
     std::string lastFunctionReturnClassName_;
+    bool lastFunctionHadReturn_{false};
     std::vector<ZlType> currentReturnFunctionParamTypes_;
     std::vector<std::string> currentReturnFunctionParamClassNames_;
     ZlType currentReturnFunctionReturnType_{ZlType::UNKNOWN};

@@ -2,6 +2,229 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-17 - Easy set: P0-1 block-body lambda, P0-2 double folding, P2-1 collection printing, P2-2 Time.format, P1-5 fixed arrays, S1-S3 stale claims
+
+Five tasks with best value-to-risk ratio plus one latent bug, fixed together.
+
+**P0-1 · Block-body lambda with untyped parameter broken on both pipelines.** `func(x){return x*2}` is valid ZL and worked as arrow form `func(x)=>x*2`, but block form failed: MIR pipeline refused the whole program with `[mir.return] void function returns value`, AST pipeline compiled then died at runtime with `argument count mismatch`. Root cause in `src/compiler/type_checker.cpp`: `checkReturnStmt` only recorded a return when its type was known, so `return x*2` where `x` is untyped (UNKNOWN) was invisible to `inferLambdaExpr`, which then fell back to `NIL`/`void` return type instead of keeping `UNKNOWN` like arrow form does. Fixed by tracking `lastFunctionHadReturn_` in `include/zl/compiler/type_checker.hpp` / `type_checker.cpp`: set flag for any `<lambda>` return regardless of type, and when flag true keep `inferredReturnResult` as `UNKNOWN` instead of `NIL`. Runtime also made permissive in `src/vm/runtime_type_checks.cpp`: an actual `func` whose param/return is `unknown`/`object` now matches a typed expectation `func(int):int` — the type checker already skips UNKNOWN in `validateFunctionTypeAssignment`, runtime mirrors it. Reproducer `class Lam3 { static func twice(func f):int {return f(3)} func main():void {log(Lam3.twice(func(x){return x*2}))}}` now prints `6` on both pipelines. Pinned by `tests/zl/valid/language_hardening_tests/LambdaBlockBody.zl` covering block vs arrow, bare vs typed callee.
+
+**P0-2 · Legacy IR double folding used `std::to_string` (6 decimals).** `rewriteInstructionConstants` in `src/compiler/ir_optimizer.cpp:301,375,427,715` wrote a folded double with `std::to_string` (fixed 6 decimals) and `parseConst` read back with `stod`, silently rounding any constant needing more precision. Latent: only consumer is legacy `--emit-native` tier which currently refuses double-returning `@native` functions, so no miscompile yet — one feature away. Fixed by using `zl::doubleToShortestString` (exact, shortest, same spelling as language) for all double symbol sites.
+
+**P2-1 · Generic collections printed internal storage.** `log(list)` printed `List{__native: [3.14, 1]}` because `formatValueInner` in `src/vm/value.cpp` walked wrapper object fields. `Serialize.encode` already had wrapper look-through for `List`/`Map`/`Set` via `__native`. Reused that look-through in printer: detects `List`/`Map`/`Set` class name, unwraps `__native` list storage, prints `[3.14, 1]`, `{"pi":3.14}`, `[1,2]`. Gates: `TestList.zl` manual check and existing `DoubleFormatting.zl` collection checks.
+
+**P2-2 · `Time.format` unknown tokens failed silently.** `Time.format(0, "%Y-%m-%d")` returned `"%Y-%m-%d"` unchanged; ZL tokens are `YYYY-MM-DD` (`docs/stdlib.md:237-250`, REVIEW O10). Easiest way to print a wrong date confidently. Fixed in `src/vm/native.cpp` `formatCivilTime`: `%` followed by letter now throws `Time.format: unknown token '%...' in pattern ... expected YYYY, MM, DD, HH, mm, ss`. Lone `%` at end still kept as literal for backward compat. Docs updated in `docs/stdlib.md`. Gates: `TestTime.zl` checks valid pattern and strftime-shaped pattern raises.
+
+**P1-5 · Fixed arrays through `Collection.*` gap no longer reproduces.** `research/corpus/limitations/FixedArrayNative.zl` said element type lost (`array[5]<int>` → `list<unknown>`) and verifier rejects. Does not: fixture verifies clean and runs on MIR today after `isCollectionType` fix including `Array` in `src/mir/type.cpp`. Corpus file rewritten to note fix and kept as regression, `research/report.md` §2.6/§2.7 and `docs/status/mir-safety-evaluation.md` corrected.
+
+**S1-S3 · Stale claims.** O19 `INT64_MIN` cannot be written as literal — fixed: parser folds `-9223372036854775808` into one negative literal (`src/parser/expression_parser.cpp:102`), pinned by `Int64Min.zl`. Doc still said deliberately not fixed with workaround. S2 block-bodied lambdas cannot declare typed parameters — both `func(int x){return x*2}` and `func(int x):int{return x*2}` compile and run; real gap was P0-1 untyped param. S3 fixed-array verifier rejection — already fixed (P1-5). Deleted from `TASKS.md`, write-ups corrected in `examples/REVIEW.md` and `research/report.md`.
+
+## 2026-09-17 - Doubles print as the shortest decimal that reads back (F9)
+
+`log(3.14)` printed `3.1400000000000001`. The arithmetic was never wrong - the
+printer was. `valueToString` formatted every double with 17 significant digits
+(`std::numeric_limits<double>::max_digits10`), which round-trips but is the
+*longest* decimal that does; the examples then documented that spelling as
+"the shortest decimal that reads back as the same binary double", which is
+exactly backwards. It is the first double a beginner prints (`examples/REVIEW.md`,
+F9).
+
+**One formatter, and it is the shortest one.** `doubleToShortestString`
+(`src/vm/value.cpp`) spells a finite double as the shortest digit string that
+parses back to the same bits: `log(3.14)` is `3.14`, `Math.PI` is
+`3.141592653589793`, and `0.1 + 0.2` is still `0.30000000000000004`, because
+that digit really is there. Nothing was traded away - `String.toFloat` of any
+printed form returns the identical double, and `Serialize.decode` of any
+encoded one returns it too.
+
+The digits come from `std::to_chars` in scientific form where the toolchain's
+`<charconv>` supports floating point, and from a precision-ascending `strtod`
+round-trip loop where it does not (GCC 10, older libc++). The *style* - fixed
+versus scientific - is decided in this file rather than left to `to_chars`,
+whose choice is not pinned by the standard and differs between libraries:
+libstdc++ writes `123456789012345680` for a value another library writes as
+`1.2345678901234568e+17`. Since `examples/run_all.sh` compares bytes on three
+platforms, the spelling of a program's output cannot be allowed to depend on
+the host it was built on. The rule is printf `%g`'s / Python's `repr`: fixed
+while the decimal point sits in `-3..17`, scientific outside it. Both digit
+sources were compared over 1.5M values - random bit patterns, denormals,
+`DBL_MAX`, powers of ten - for exact round-trip, identical digit strings, and
+that style rule; the committed checks are the unit test in
+`tests/runtime_type_tests.cpp` and the ZL fixture below.
+
+Behaviour that did *not* change is worth stating, because it looks like it
+should have. A whole-valued double already printed without a fraction (17
+significant digits of `1.0` is `1`), so `log(1.0)` is still `1` and `-0.0` is
+still `-0` - the assertions `LiteralFoldParity.zl` makes about zero are
+untouched. The fixed/scientific cutoffs also match what `%g` at 17 digits did,
+so `1e+21`, `10000000000000000` and `0.0001` are byte-identical to before.
+What changes is only ever digits that were not needed: `3.1400000000000001`
+becomes `3.14`, `9.9999999999999995e-08` becomes `1e-07`,
+`1.0000000000000001e-05` becomes `1e-05`, and `123456789012345678.0` keeps its
+`1.2345678901234568e+17`.
+
+**The JSON encoder carried its own `setprecision(17)`.** `Serialize.encode`
+serialized a double with more digits than `log` showed for the same value, so a
+value had two spellings depending on which door it left through. It now calls
+the same formatter; `{"pi":3.1400000000000001}` is `{"pi":3.14}`, and decoding
+still round-trips.
+
+Pinned by `tests/zl/valid/language_hardening_tests/DoubleFormatting.zl`, which
+is self-checking and runs under all four configurations (MIR, reference AST,
+unoptimized MIR, `--backend native`) through `tests/double_format_parity.py` -
+ctest `double-format-parity`, mirroring `backend-fold-parity`. Expected output
+in `DataTypes.zl` and `MathLib.zl` is updated, as are `examples/README.md`,
+`docs/language-guide.md`, and the F9 verdict in `examples/REVIEW.md`.
+
+## 2026-09-17 - Windows and macOS CTest: the leftover failures are real bugs
+
+The first CI run recorded three leftover CTest failures rather than skipping
+them. They were host-target mistakes, not "the suite does not run there".
+
+**A host with no encoder is select-only, not a pipeline error.**
+`compileMirToNative` always called `emitModule` after a successful selection.
+Win64 is described and has no encoder, so every Windows host failed with
+`no machine-code encoder for target 'x86_64-pc-windows-msvc'` even though
+`PipelineOptions.selectOnly` already documented that outcome. Emit is now
+skipped when `encoderAvailable()` is false; the native IR is the result, and
+SysV bytes are not produced under a Windows name. `zl-native-backend-tests`
+compiles fixtures against `x64SysVTarget()` (the one encoder) instead of
+`hostTarget()`, and pins the Win64 select-only path with
+`testNoEncoderIsSelectOnly`. An unknown host (macOS arm64) no longer walks
+off `lir.functions.front()` after `require()` continues: that was the 0.02s
+SegFault. The compiler pipeline cross-compiles Unknown hosts to SysV so
+`--backend native` stays a real backend rather than a hard error on every
+non-x86 machine.
+
+**An async frame cannot resume twice, even when `std::function` move is a copy.**
+libc++'s small-object `std::function` may leave the source callable after a
+move, so `AsyncFrame::resume` taking `std::move(resume_)` made the second
+resume run the continuation again instead of throwing. It now `swap`s the
+continuation out, which empties the member on every library. That was the
+macOS-only `zl-runtime-scheduler-tests` failure at 0.03s.
+
+**The hardening VM is a shared owner, not a stack object.** `VM` is
+`enable_shared_from_this`; the suite stack-allocated one and then
+dereferenced `optional<Chunk>` after a successful compile. It now
+`make_shared`s both the VM and the chunk (the entry point Await actually
+needs) and quotes the boundary-lint bash path so Git's `Program Files` bash
+on Windows is not split by `cmd.exe`.
+
+## 2026-09-16 - Generic methods land, and the CI gate is run for the first time
+
+**Method-level type parameters close O16.** `static func firstOf<T>(List<T>
+items, T fallback): T` used to be a syntax error (`Expected '(' after func name
+-- got "<"`), which is why `Generics.zl` wrote one helper per element type: only
+generic *classes* existed. The parser now accepts type parameters on function
+declarations and explicit type arguments at the call site; the checker
+instantiates them for both static and instance calls, rejects a method type
+parameter that collides with a class type parameter, and the bindings are
+threaded through bytecode, MIR and the VM. Static `Call` is the acceptance
+path. Covered by `GenericMethods.zl` plus type-mismatch and name-collision
+fixtures.
+
+**The documented regression command now works when it is run as documented.**
+`scripts/run_regressions.sh` moved to `scripts/` before it looked at its first
+argument, so the invocation in `docs/development.md` and in the CI workflow -
+`bash scripts/run_regressions.sh build/zl_language all` - always failed with
+`error: 'build/zl_language' is not an executable file`: a relative path was
+being resolved against `scripts/`, where no `build/` exists. The compiler path
+is now resolved against the calling directory before the script changes its
+own. Worth noting *why* this survived review: every previous check passed an
+absolute path, so the command was never once executed in the form it is
+documented and run in CI.
+
+**The two parallel review branches are one line of history again.** One branch
+carried the native-tier and CI work, the other the module-root, UTF-8 `Text`,
+git-URL-allowlist, O2-lambda and generic-method fixes; they shared a merge base
+and conflicted in exactly one file, `.github/workflows/ci.yml`, which both had
+added independently. Resolved by keeping the full three-platform matrix and
+adopting the sibling's `-C Release` (required by the multi-config Visual Studio
+generator on Windows, where `ctest` would otherwise look in the wrong
+configuration directory), its explicit `-DBUILD_TESTING=ON`, and a per-test
+`--timeout`.
+
+**The cross-platform promise was unverified, and the first CI run found it
+broken in six places.** macOS and Windows had never been built by CI, and both
+failed. `fork` and `_exit` were called without including `<unistd.h>`, which
+glibc's `<sys/wait.h>` supplies transitively and libc++ does not. `NOMINMAX`
+was undefined, so the `min` and `max` macros in `windows.h` turned
+`std::numeric_limits<T>::max()` and `std::min`/`std::max` into syntax errors at
+the call site rather than at the macro. `std::filesystem::path::preferred_separator`
+was appended to a `std::string`, but it is `wchar_t` on Windows. `popen` and
+`pclose` were called unguarded where MSVC declares only `_popen`/`_pclose`. And
+a closure held in a local `auto` inside another lambda - whose return type is
+itself being deduced - is not typed in time by MSVC, so the first call to it is
+parsed as a function-style cast; that table is now filled by a named function.
+Every one of these is invisible to g++, which is precisely why they survived:
+the suite that could have caught them did not exist until now.
+
+Diagnosing them required a change to the workflow as well. The build is teed to
+a log and its errors are re-emitted as `::error::` annotations, because the log
+archive is not reachable from every environment and annotations are. Two of the
+six fixes were wrong on the first attempt and CI said so, which is the argument
+for having the run in the first place.
+
+**Known remaining, and not caused by this work.** macOS and Windows now build
+for the first time and each runs 37 of the 40 CTest cases green. Three macOS
+cases and two Windows cases still fail, and they are recorded here rather than
+skipped or hidden. `zl-native-backend-tests` faults on macOS; the backend emits
+x86-64 while those runners are arm64, and macOS requires `MAP_JIT` for
+executable memory, so execution is now guarded out - yet it still faults at
+startup, which means something outside the execution path is also involved and
+is not yet identified. `zl-runtime-hardening-vm-tests` segfaults on both
+platforms and `zl-runtime-scheduler-tests` fails on macOS only. None of the
+three is touched by this branch: they were failing before there was a CI run to
+see them, and the honest description of the cross-platform promise is that it
+was never tested rather than that it held.
+
+**The CI gate was executed end to end for the first time.** The workflow had
+never run - it was assembled from documented commands because no `cmake` was
+available here. With one installed, the Linux job's every step is now verified
+against this tree: configure, `zl-tests` (36 targets), CTest 40/40, the
+regression corpus 49/49 with the package-manager cases included, all five
+differential harnesses (51/51 backend and MIR paths, 77 optimiser cases), and
+the native gate. Every step passes.
+
+## 2026-09-15 - The native tier honours the arithmetic contract, and the SysV shadow space is real
+
+**The emitted code is fail-closed like the VM.** An external harsh review of
+the toolchain found that the native backend's *emitted* machine code was silent
+where the language is fail-closed: `INT64_MAX + 1` wrapped to `INT64_MIN`,
+`INT64_MIN / -1` reached `idiv` and raised `#DE`, shift counts were masked mod
+64 (`1 << 64` computed `1 << 0`), and float overflow produced a quiet infinity.
+None of it is reachable in executed programs yet (the VM is the only execution
+driver), and the differential harnesses cannot see it because all three of
+their arms run on the VM - so it existed only in the bytes, and the one suite
+that executes bytes had no test for any of it. The emitter now handles each
+case the way the tier's existing zero-divisor guard does: branch to a trap
+(`ud2` → SIGILL) instead of executing the faulting instruction, with the one
+exception the language defines - `INT64_MIN % -1` computes `0`. A non-finite
+double can no longer exist in native code: `fdiv` traps on a zero divisor, and
+every float operation traps when its exponent field comes out all ones.
+`zl-native-backend-tests` gained `testArithmeticTraps`, which executes all
+fifteen fault cases in forked children (a trap is an assertion, not a
+test-suite death) and the healthy boundary values in the parent.
+
+**The System V model no longer denies the shadow space.** `x64SysVTarget`
+recorded `shadowSpace = 0` and a test asserted "System V has no shadow space";
+PSABI 3.2.2 mandates 32 bytes, so both conventions now agree, the field's
+comment says what it means, and every function that calls reserves it in its
+frame. Not observable today - emitted callees never write the shadow, and the
+tier emits no runtime calls or stack arguments yet - but it is what a future
+`CallRuntime` callee from the C world needs, and a calling frame short of the
+shadow would hand that callee the caller's saved `rbp`.
+
+**The checks now run on every push.** Until now every claim in this
+repository - 44 regressions, the three-way backend parity, the optimiser and
+promotion differentials, the boundary rules, the safety pipeline - was true
+when a maintainer ran the tools locally, and that was it. `.github/workflows/
+ci.yml` runs the same commands on every push and pull request: the Linux job
+takes the full gate (CTest plus the regression corpus, all five differential
+harnesses, and the native compiler gate), and macOS and Windows build and run
+CTest so the portability claim is verified rather than assumed. Nothing in the
+workflow is CI-only, and every gate already exited non-zero on a mismatch - a
+green line is the claim, not a hope.
+
 ## 2026-09-12 - The boundary is enforced, and the compiler knows what runs
 
 The MIR boundary had rules and a component; this phase makes the rules fail the

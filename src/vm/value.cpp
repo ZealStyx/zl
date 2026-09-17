@@ -109,6 +109,18 @@ std::string formatValueInner(const Value& v, bool quoteStrings,
             if (!held) return "nil";
             if (!active.insert(held.get()).second) return held->className + " { <cyclic> }";
             if (depth + 1 > kMaxValueNestingDepth) { active.erase(held.get()); return held->className + " { <...> }"; }
+            // Generic collections are thin wrappers whose only field is the native storage.
+            // Printing the wrapper would emit `List{__native: [...]}` – the plumbing rather
+            // than the data – so print the payload directly, mirroring Serialize.encode's
+            // look-through (P2-1 fix).
+            if (held->className == "List" || held->className == "Map" || held->className == "Set") {
+                auto it = held->fields.find("__native");
+                if (it != held->fields.end()) {
+                    std::string inner = formatValueInner(it->second, true, active, depth + 1);
+                    active.erase(held.get());
+                    return inner;
+                }
+            }
             std::string s = held->className + " { ";
             bool first = true;
             if (held->runtimeType && held->runtimeType->isDataType) {

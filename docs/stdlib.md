@@ -249,8 +249,9 @@ strftime:
 Time.format(Time.now(), "YYYY-MM-DD HH:mm:ss")   // 2026-09-06 16:32:44
 ```
 
-An unrecognised token is left in place rather than reported, so a strftime pattern
-such as `"%Y-%m-%d"` is returned unchanged.
+An unrecognised `%-`token (e.g. strftime `"%Y-%m-%d"`) now raises an error
+instead of being returned unchanged, so a wrong date cannot be printed
+confidently. Valid tokens are `YYYY`, `MM`, `DD`, `HH`, `mm`, `ss`.
 
 ## `zl.crypto`
 

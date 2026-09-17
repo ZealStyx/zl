@@ -171,7 +171,7 @@ zl_add_required_test(zl-runtime-sync-tests tests/runtime_sync_tests.cpp
     src/vm/runtime_task.cpp)
 target_link_libraries(zl-runtime-sync-tests PRIVATE Threads::Threads)
 
-zl_add_required_test(zl-ir-tests tests/ir_tests.cpp src/compiler/ir.cpp src/compiler/ir_optimizer.cpp)
+zl_add_required_test(zl-ir-tests tests/ir_tests.cpp src/compiler/ir.cpp src/compiler/ir_optimizer.cpp src/vm/value.cpp src/vm/gc.cpp src/vm/gc_safepoint.cpp src/vm/runtime_exception.cpp src/vm/runtime_task.cpp src/common/type_name.cpp src/vm/type_contracts.cpp src/vm/runtime_type_checks.cpp)
 zl_add_required_test(zl-machine-code-tests tests/machine_code_tests.cpp src/compiler/machine_code.cpp src/compiler/ir.cpp)
 
 zl_add_required_test(zl-regex-engine-tests tests/regex_engine_tests.cpp src/regex/regex.cpp)
@@ -405,6 +405,14 @@ zl_add_required_test(zl-native-compiler-tests tests/native_compiler_tests.cpp
     src/compiler/ir_lowering.cpp
     src/compiler/ir.cpp
     src/compiler/ir_optimizer.cpp
+    src/vm/value.cpp
+    src/vm/gc.cpp
+    src/vm/gc_safepoint.cpp
+    src/vm/runtime_exception.cpp
+    src/vm/runtime_task.cpp
+    src/common/type_name.cpp
+    src/vm/type_contracts.cpp
+    src/vm/runtime_type_checks.cpp
     src/parser/parser.cpp
     src/parser/expression_parser.cpp
     src/parser/type_lookahead.cpp

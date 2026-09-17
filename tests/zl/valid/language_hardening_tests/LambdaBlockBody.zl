@@ -1,0 +1,47 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - LambdaBlockBody
+//
+// P0-1: block-body lambda with untyped parameter was broken on both pipelines.
+// MIR: verification error [mir.return] void function returns value.
+// AST: runtime argument count mismatch.
+// Arrow form func(x) => x*2 worked, block form func(x) { return x*2 } failed.
+// Fixed by tracking whether a return was seen even when its type is UNKNOWN
+// (type_checker.cpp lastFunctionHadReturn_) so block body keeps UNKNOWN
+// return type like arrow form, instead of dropping to NIL/void.
+//
+// This fixture pins block and arrow forms side by side, with bare func callee
+// (func f) and typed func callee (func(int):int), ensuring both print 6.
+// ============================================================================
+
+class LambdaBlockBody {
+    static func twice(func f): int { return f(3) }
+    static func twiceTyped(func(int): int f): int { return f(3) }
+
+    func check(bool cond, string what): void {
+        if (!cond) { throw new Exception("LambdaBlockBody failed: " + what) }
+    }
+
+    func main(): void {
+        var self = new LambdaBlockBody()
+
+        // Arrow forms - always worked
+        self.check(LambdaBlockBody.twice(func(x) => x * 2) == 6, "arrow bare")
+        self.check(LambdaBlockBody.twiceTyped(func(x) => x * 2) == 6, "arrow typed callee, untyped param")
+        self.check(LambdaBlockBody.twiceTyped(func(int x) => x * 2) == 6, "arrow typed param")
+        self.check(LambdaBlockBody.twiceTyped(func(int x): int => x * 2) == 6, "arrow typed param and return")
+
+        // Block forms - P0-1 previously failed
+        self.check(LambdaBlockBody.twice(func(x) { return x * 2 }) == 6, "block bare")
+        self.check(LambdaBlockBody.twiceTyped(func(x) { return x * 2 }) == 6, "block typed callee, untyped param")
+        self.check(LambdaBlockBody.twiceTyped(func(int x) { return x * 2 }) == 6, "block typed param")
+        self.check(LambdaBlockBody.twiceTyped(func(int x): int { return x * 2 }) == 6, "block typed param and return")
+
+        // Ensure both pipelines infer same
+        var arrow = func(x) => x * 2
+        var block = func(x) { return x * 2 }
+        self.check(arrow(3) == 6, "arrow direct call")
+        self.check(block(3) == 6, "block direct call")
+
+        log("ok")
+    }
+}
