@@ -43,8 +43,10 @@ struct PipelineResult {
     // Runtime helpers the native code calls.
     std::vector<std::string> runtimeImports;
 
-    // Hard failure (verification, or an encoder error). Empty on success; a
-    // module with zero native functions but no error is a normal outcome.
+    // Hard failure (verification, or an encoder that was asked to run and
+    // could not). Empty on success. A described target with no encoder is
+    // success with empty `code`, not an error; a module with zero native
+    // functions and no error is also a normal outcome.
     std::string error;
 
     [[nodiscard]] bool ok() const noexcept { return error.empty(); }
@@ -55,7 +57,10 @@ struct PipelineResult {
 struct PipelineOptions {
     SelectionOptions selection;
     // Stop after selection. Useful on a host with no encoder, and for tests
-    // that assert on the native IR rather than on bytes.
+    // that assert on the native IR rather than on bytes. `compileMirToNative`
+    // also skips emit when `target.encoderAvailable()` is false, even if this
+    // flag is off: producing SysV bytes for a Windows target would be a
+    // silent miscompile, and a hard error would fail every such host.
     bool selectOnly{false};
 };
 

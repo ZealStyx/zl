@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -69,11 +70,19 @@ RunResult runZl(const std::string& name, const std::string& source, Options opti
     out.result = compile(file, std::vector<fs::path>{}, std::move(options));
     out.compiled = out.result.ok();
     if (!out.compiled) return out;
+    if (!out.result.chunk.has_value()) {
+        out.error = "pipeline succeeded without a bytecode chunk";
+        return out;
+    }
     std::ostringstream captured;
     std::streambuf* previous = std::cout.rdbuf(captured.rdbuf());
     try {
-        zl::VM vm;
-        out.exitCode = vm.run(*out.result.chunk, std::vector<std::string>{});
+        // VM is enable_shared_from_this: heap-allocate so Await / async
+        // resumption can take a shared owner, and so a large ExecutionState
+        // does not sit on the 1 MiB Windows thread stack.
+        auto vm = std::make_shared<zl::VM>();
+        auto chunk = std::make_shared<zl::Chunk>(*out.result.chunk);
+        out.exitCode = vm->run(chunk, std::vector<std::string>{});
         out.ran = true;
     } catch (const std::exception& error) {
         out.error = error.what();
@@ -97,17 +106,22 @@ void requireCompleteSemantics(const zl::mir::ReachabilityReport& report, const s
 
 void testBoundaryLint() {
 #if defined(ZL_BOUNDARY_LINT_ROOT) && defined(ZL_BOUNDARY_LINT_BASH)
-    const std::string command = std::string(ZL_BOUNDARY_LINT_BASH) + " " +
-                                std::string(ZL_BOUNDARY_LINT_ROOT) + "/tools/boundary_lint.sh " +
-                                std::string(ZL_BOUNDARY_LINT_ROOT) + " 2>&1 >/dev/null";
+    // Quote every path: Git's bash on Windows lives under "Program Files",
+    // and `std::system` goes through cmd.exe, which splits on the space.
+    auto quote = [](const std::string& s) {
+        if (s.find_first_of(" \t") == std::string::npos) return s;
+        return std::string("\"") + s + '"';
+    };
+    const std::string bash = quote(ZL_BOUNDARY_LINT_BASH);
+    const std::string root = std::string(ZL_BOUNDARY_LINT_ROOT);
+    const std::string script = quote(root + "/tools/boundary_lint.sh");
+    const std::string quotedRoot = quote(root);
+    const std::string command = bash + " " + script + " " + quotedRoot;
     const int status = std::system(command.c_str());
     if (status != 0) {
         // Show the lint's own report on failure - the violation list is the
         // diagnostic the developer needs.
-        const std::string show = std::string(ZL_BOUNDARY_LINT_BASH) + " " +
-                                 std::string(ZL_BOUNDARY_LINT_ROOT) + "/tools/boundary_lint.sh " +
-                                 std::string(ZL_BOUNDARY_LINT_ROOT);
-        std::system(show.c_str());
+        std::system(command.c_str());
     }
     require(status == 0, "tools/boundary_lint.sh reports boundary violations");
 #else
