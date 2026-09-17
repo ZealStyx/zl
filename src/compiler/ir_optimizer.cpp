@@ -1,5 +1,6 @@
 #include "zl/compiler/ir_optimizer.hpp"
 #include "zl/lexer/token.hpp"
+#include "zl/vm/value.hpp"
 
 #include <cstdint>
 #include <algorithm>
@@ -298,7 +299,7 @@ void rewriteInstructionConstants(Instruction& ins, const std::unordered_map<Valu
     ins.operand0 = ins.operand1 = 0;
     ins.operands.clear();
     if (v.kind == ConstValue::Kind::Int) ins.symbol = std::to_string(v.i);
-    else if (v.kind == ConstValue::Kind::Double) ins.symbol = std::to_string(v.d);
+    else if (v.kind == ConstValue::Kind::Double) ins.symbol = zl::doubleToShortestString(v.d);
     else if (v.kind == ConstValue::Kind::Bool) ins.symbol = v.b ? "true" : "false";
 }
 
@@ -372,7 +373,7 @@ BasicBlock optimizeBlock(const BasicBlock& input) {
                 ins.operand0 = ins.operand1 = 0;
                 ins.operands.clear();
                 if (lit->second.kind == ConstValue::Kind::Int) ins.symbol = std::to_string(lit->second.i);
-                else if (lit->second.kind == ConstValue::Kind::Double) ins.symbol = std::to_string(lit->second.d);
+                else if (lit->second.kind == ConstValue::Kind::Double) ins.symbol = zl::doubleToShortestString(lit->second.d);
                 else if (lit->second.kind == ConstValue::Kind::Bool) ins.symbol = lit->second.b ? "true" : "false";
             } else if (ins.result && localConstEligible[ins.operand0]) {
                 auto copy = localCopies.find(ins.operand0);
@@ -712,7 +713,7 @@ Module optimize(const Module& module) {
                             ins.operand0 = ins.operand1 = 0;
                             ins.operands.clear();
                             if (value.kind == ConstValue::Kind::Int) ins.symbol = std::to_string(value.i);
-                            else if (value.kind == ConstValue::Kind::Double) ins.symbol = std::to_string(value.d);
+                            else if (value.kind == ConstValue::Kind::Double) ins.symbol = zl::doubleToShortestString(value.d);
                             else if (value.kind == ConstValue::Kind::Bool) ins.symbol = value.b ? "true" : "false";
                             changed = true;
                         }

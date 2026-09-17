@@ -1992,6 +1992,14 @@ std::string formatCivilTime(const std::tm& parts, std::string pattern) {
     replaceAll("HH", parts.tm_hour, 2);
     replaceAll("mm", parts.tm_min, 2);
     replaceAll("ss", parts.tm_sec, 2);
+    // P2-2: previously an unrecognised token was left in place, so a strftime
+    // pattern such as "%Y-%m-%d" was returned unchanged and printed a wrong date
+    // confidently. Now an unknown %-token raises instead of failing silently.
+    if (pattern.find('%') != std::string::npos) {
+        throw std::runtime_error(
+            "Time.format: unknown token '%...' in pattern \"" + pattern +
+            "\" - expected YYYY, MM, DD, HH, mm, ss (e.g. \"YYYY-MM-DD\")");
+    }
     return pattern;
 }
 

@@ -2895,14 +2895,17 @@ void TypeChecker::checkReturnStmt(const ReturnStmt* node) {
             zlTypeName(currentReturnType_),
             node->line);
     }
-    if (currentFunctionName_ == "<lambda>" && returnedType != ZlType::UNKNOWN) {
-        if (lastFunctionReturnType_ == ZlType::UNKNOWN) {
-            lastFunctionReturnType_ = returnedType;
-            lastFunctionReturnClassName_ = returnedClassName;
-        } else if (lastFunctionReturnType_ != returnedType || lastFunctionReturnClassName_ != returnedClassName) {
-            if (!isAssignable(lastFunctionReturnType_, returnedType, lastFunctionReturnClassName_, returnedClassName) ||
-                !isAssignable(returnedType, lastFunctionReturnType_, returnedClassName, lastFunctionReturnClassName_)) {
-                typeError("lambda block returns incompatible types", node->line);
+    if (currentFunctionName_ == "<lambda>") {
+        lastFunctionHadReturn_ = true;
+        if (returnedType != ZlType::UNKNOWN) {
+            if (lastFunctionReturnType_ == ZlType::UNKNOWN) {
+                lastFunctionReturnType_ = returnedType;
+                lastFunctionReturnClassName_ = returnedClassName;
+            } else if (lastFunctionReturnType_ != returnedType || lastFunctionReturnClassName_ != returnedClassName) {
+                if (!isAssignable(lastFunctionReturnType_, returnedType, lastFunctionReturnClassName_, returnedClassName) ||
+                    !isAssignable(returnedType, lastFunctionReturnType_, returnedClassName, lastFunctionReturnClassName_)) {
+                    typeError("lambda block returns incompatible types", node->line);
+                }
             }
         }
     }
@@ -5561,6 +5564,7 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
     currentFunctionName_ = "<lambda>";
     lastFunctionReturnType_ = ZlType::UNKNOWN;
     lastFunctionReturnClassName_.clear();
+    lastFunctionHadReturn_ = false;
 
     InferredType inferredReturnResult(ZlType::NIL);
     if (node->hasExprBody) {
@@ -5570,6 +5574,13 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
         if (lastFunctionReturnType_ != ZlType::UNKNOWN) {
             inferredReturnResult.type = lastFunctionReturnType_;
             inferredReturnResult.className = lastFunctionReturnClassName_;
+        } else if (lastFunctionHadReturn_) {
+            // Block body had a `return` but its type was UNKNOWN (e.g. untyped
+            // param `x` in `func(x) { return x*2 }`). Arrow form keeps UNKNOWN
+            // and allows the return value; block form previously dropped it to
+            // NIL/void and triggered `[mir.return]` verification error (P0-1).
+            inferredReturnResult.type = ZlType::UNKNOWN;
+            inferredReturnResult.className.clear();
         } else if (currentLambdaExpectation_.active &&
                    currentLambdaExpectation_.returnType != ZlType::UNKNOWN) {
             inferredReturnResult.type = currentReturnType_;

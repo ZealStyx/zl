@@ -739,33 +739,18 @@ Two smaller notes found in the same pass, still open:
 - `List.pop()` reports `Collection.pop: cannot pop from an empty list` while
   `List.first()` reports `List.first called on empty list`. Cosmetic.
 
-### O19 - `INT64_MIN` cannot be written as a literal
+### O19 - `INT64_MIN` cannot be written as a literal — FIXED
+
+Previously `var min = -9223372036854775808` errored `integer literal is out of range`.
+Fixed: the parser folds the exact spelling `-9223372036854775808` into one negative
+literal (`src/parser/expression_parser.cpp:102`), and one past it in either direction
+is still rejected. Pinned by `tests/zl/valid/language_hardening_tests/Int64Min.zl`
+and `tests/zl/invalid/type_errors/IntLiteralOutOfRange.zl`.
 
 ```zl
-var min = -9223372036854775808
--> compile error: integer literal is out of range '9223372036854775808'
+var min = -9223372036854775808  // now compiles and prints -9223372036854775808
+var max = 9223372036854775807   // fine
 ```
-
-The lexer hands the type checker the unsigned magnitude, and both
-`TypeChecker::inferLiteral` (`type_checker.cpp:3402`) and `Compiler::compileLiteral`
-(`compiler.cpp:694`) validate it with `std::stoll`, whose ceiling is `INT64_MAX`.
-The unary minus is a separate node applied afterwards, so the one value that needs
-the extra slot is rejected before the negation is ever considered.
-
-Everything else at the boundary is correct, and the value is reachable by
-arithmetic:
-
-```zl
-var max = 9223372036854775807        // fine
-(0 - max) - 1                        // -9223372036854775808, prints correctly
-((0 - max) - 1) - 1                  // runtime error: integer overflow in subtraction
-```
-
-Deliberately **not** fixed. A correct fix has to allow the magnitude only in a
-negation context, and the codegen side has no such context at the literal site -
-so accepting it outright would also accept `9223372036854775808` as a positive
-literal, which is wrong. Left as a documented limitation with the arithmetic
-workaround.
 
 ### O20 - `Shared<T>` really does lose updates; measured
 
