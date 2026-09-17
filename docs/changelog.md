@@ -2,6 +2,40 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-17 - Windows and macOS CTest: the leftover failures are real bugs
+
+The first CI run recorded three leftover CTest failures rather than skipping
+them. They were host-target mistakes, not "the suite does not run there".
+
+**A host with no encoder is select-only, not a pipeline error.**
+`compileMirToNative` always called `emitModule` after a successful selection.
+Win64 is described and has no encoder, so every Windows host failed with
+`no machine-code encoder for target 'x86_64-pc-windows-msvc'` even though
+`PipelineOptions.selectOnly` already documented that outcome. Emit is now
+skipped when `encoderAvailable()` is false; the native IR is the result, and
+SysV bytes are not produced under a Windows name. `zl-native-backend-tests`
+compiles fixtures against `x64SysVTarget()` (the one encoder) instead of
+`hostTarget()`, and pins the Win64 select-only path with
+`testNoEncoderIsSelectOnly`. An unknown host (macOS arm64) no longer walks
+off `lir.functions.front()` after `require()` continues: that was the 0.02s
+SegFault. The compiler pipeline cross-compiles Unknown hosts to SysV so
+`--backend native` stays a real backend rather than a hard error on every
+non-x86 machine.
+
+**An async frame cannot resume twice, even when `std::function` move is a copy.**
+libc++'s small-object `std::function` may leave the source callable after a
+move, so `AsyncFrame::resume` taking `std::move(resume_)` made the second
+resume run the continuation again instead of throwing. It now `swap`s the
+continuation out, which empties the member on every library. That was the
+macOS-only `zl-runtime-scheduler-tests` failure at 0.03s.
+
+**The hardening VM is a shared owner, not a stack object.** `VM` is
+`enable_shared_from_this`; the suite stack-allocated one and then
+dereferenced `optional<Chunk>` after a successful compile. It now
+`make_shared`s both the VM and the chunk (the entry point Await actually
+needs) and quotes the boundary-lint bash path so Git's `Program Files` bash
+on Windows is not split by `cmd.exe`.
+
 ## 2026-09-16 - Generic methods land, and the CI gate is run for the first time
 
 **Method-level type parameters close O16.** `static func firstOf<T>(List<T>

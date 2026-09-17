@@ -5,15 +5,21 @@
 
 namespace zl {
 
-AsyncFrame::AsyncFrame(ResumeFn resume)
-    : resume_(std::move(resume)) {
-    if (!resume_) {
+AsyncFrame::AsyncFrame(ResumeFn resume) {
+    // Check the parameter, not the member, so a moved-from source that some
+    // standard libraries leave callable cannot sneak an empty frame through.
+    if (!resume) {
         throw std::invalid_argument("async frame requires a resume continuation");
     }
+    resume_ = std::move(resume);
 }
 
 void AsyncFrame::resume() {
-    ResumeFn resume = std::move(resume_);
+    ResumeFn resume;
+    // swap, not move: libc++'s small-object std::function may leave the
+    // source callable after a move, which would make a second resume run
+    // the continuation again instead of throwing.
+    resume.swap(resume_);
     if (!resume) {
         throw std::logic_error("async frame has already been resumed");
     }

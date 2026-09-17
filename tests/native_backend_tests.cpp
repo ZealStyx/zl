@@ -138,10 +138,17 @@ struct Built {
 };
 
 // Compiles a module and returns the pipeline result, asserting it verified.
+//
+// Selection and encoding are properties of a *target*, not of the host this
+// process happens to run on. The only encoder is x86-64 SysV; using
+// `hostTarget()` here would make every Windows host (described, no encoder)
+// and every arm64 host (no description) fail tests that are about the subset
+// rather than about jumping to the bytes. Execution cases still consult
+// `hostTarget().encoderAvailable()` before mapping the result executable.
 PipelineResult compile(const Module& module) {
     const auto report = verifyModule(module);
     require(report.ok(), "fixture MIR must verify:\n" + report.describe());
-    return compileMirToNative(module, hostTarget());
+    return compileMirToNative(module, x64SysVTarget());
 }
 
 bool rejected(const PipelineResult& result, const std::string& function) {
@@ -357,6 +364,7 @@ void testSelectionSubset() {
         require(result.ok(), "integer arithmetic compiles: " + result.error);
         require(lowered(result, "add"), "add is in the native subset");
         require(result.lir.functions.size() == 1, "one native function");
+        if (result.lir.functions.empty()) return;
         const auto& fn = result.lir.functions.front();
         require(fn.returnClass == ValueClass::Integer, "add returns an integer-class value");
         require(fn.parameterClasses.size() == 2, "add takes two parameters");
@@ -368,7 +376,8 @@ void testSelectionSubset() {
         require(result.ok(), "a module with an unsupported function is not an error");
         require(rejected(result, "greet"), "a string-returning function is refused, not guessed at");
         require(result.lir.functions.empty(), "nothing was lowered for it");
-        require(!result.vmFunctions.front().reason.empty(), "the refusal states a reason");
+        require(!result.vmFunctions.empty() && !result.vmFunctions.front().reason.empty(),
+                "the refusal states a reason");
     }
     {
         // A caller of a refused function must itself be refused: there is no
@@ -412,10 +421,22 @@ void testUnverifiedMirIsRefused() {
     // licence to assume the invariants is only sound if something checks.
     Module broken = buildIntArith();
     broken.functions[0].blocks[0].terminator.kind = TerminatorKind::None;
-    auto result = compileMirToNative(broken, hostTarget());
+    auto result = compileMirToNative(broken, x64SysVTarget());
     require(!result.ok(), "the native backend refuses MIR that does not verify");
     require(result.error.find("did not verify") != std::string::npos,
             "the refusal says the MIR did not verify");
+}
+
+// A described target without an encoder (Win64) is select-only: the subset
+// still runs, and no bytes are produced. Turning that into a hard error made
+// every Windows host fail this suite even though refusal-to-emit is the
+// documented, correct outcome.
+void testNoEncoderIsSelectOnly() {
+    auto result = compileMirToNative(buildIntArith(), x64WindowsTarget());
+    require(result.ok(),
+            "a described target without an encoder is not a pipeline error: " + result.error);
+    require(lowered(result, "add"), "Win64 can still select the integer subset");
+    require(result.code.empty(), "Win64 produces no bytes until it has an encoder");
 }
 
 #if ZL_NATIVE_CAN_EXECUTE
@@ -750,7 +771,7 @@ class Calc {
     require(ok, "the ZL fixture lowers to verified MIR");
     if (!ok) return;
 
-    auto result = compileMirToNative(module, hostTarget());
+    auto result = compileMirToNative(module, x64SysVTarget());
     require(result.ok(), "the native backend ran over real lowered MIR: " + result.error);
     require(!result.nativeFunctions.empty(),
             "at least one real ZL function reached the native tier; got:\n" + result.describe());
@@ -772,7 +793,7 @@ class Greeter {
     require(ok, "the object fixture lowers to verified MIR");
     if (!ok) return;
 
-    auto result = compileMirToNative(module, hostTarget());
+    auto result = compileMirToNative(module, x64SysVTarget());
     require(result.ok(), "an unsupported program is a partial result, not an error");
     require(result.nativeFunctions.empty() || !result.vmFunctions.empty(),
             "string/object work is left to the VM");
@@ -788,6 +809,7 @@ int main() {
     testValueClasses();
     testSelectionSubset();
     testUnverifiedMirIsRefused();
+    testNoEncoderIsSelectOnly();
 #if ZL_NATIVE_CAN_EXECUTE
     testExecution();
     testArithmeticEdges();

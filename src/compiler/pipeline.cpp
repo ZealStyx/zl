@@ -751,14 +751,21 @@ bool Pipeline::generate() {
             break;
         }
         case Backend::Native: {
-            const auto& target = zl::native::hostTarget();
+            // Prefer the host when the backend describes it. An unknown host
+            // (macOS arm64 today) is not a reason to refuse the native backend:
+            // the one encoded target is still a valid cross-compile, and the
+            // VM remains the execution driver either way.
+            const zl::native::TargetMachine* target = &zl::native::hostTarget();
+            if (target->arch == zl::native::Arch::Unknown) {
+                target = &zl::native::x64SysVTarget();
+            }
             zl::native::PipelineResult native =
-                zl::native::compileMirToNative(result_.module, target, options_.native);
+                zl::native::compileMirToNative(result_.module, *target, options_.native);
             if (!native.ok()) {
                 return fail(Stage::CodeGeneration, ErrorKind::Backend,
                             "the native backend refused the module", native.describe());
             }
-            result_.nativeTargetTriple = target.triple;
+            result_.nativeTargetTriple = target->triple;
             const std::size_t nativeCount = native.nativeFunctions.size();
             const std::size_t vmCount = native.vmFunctions.size();
             if (options_.strictNative && vmCount != 0) {
