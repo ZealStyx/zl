@@ -100,7 +100,8 @@ Every positive program lowered, verified, ran, and produced byte-identical
 output under the reference compiler, the MIR pipeline optimised, and the MIR
 pipeline unoptimised. The optimiser's differential guarantee (a pass that
 breaks equivalence is rolled back) holds on this corpus. `FixedArrayNative.zl`
-previously failed verification and now passes (P1-5 fix).
+previously failed verification and now passes (fixed; see
+docs/changelog.md, 2026-09-17).
 
 ### 2.2 Compile time
 
@@ -210,14 +211,14 @@ native code are checked at runtime, not proven statically.
 Historical note: §3.7 previously recorded `FixedArrayNative.zl` as a verifier
 rejection (silent type-erasure turned into loud refusal). That gap is now fixed
 by `src/mir/type.cpp` `isCollectionType` including `Array`; the fixture now
-verifies clean (P1-5).
+verifies clean.
 
 ### 2.7 Failures and limitations (measured, not inferred)
 
 1. **`FixedArrayNative.zl` — previously MIR verification failure, now fixed.** Passing
    `array[5]<int>` through `Collection.length`/`Collection.get` previously lowered
    the element type to `list<unknown>` and verifier rejected it. Fixed by
-   `src/mir/type.cpp` `isCollectionType` including `Array` (P1-5). Fixture now
+   `src/mir/type.cpp` `isCollectionType` including `Array`. Fixture now
    verifies clean and runs; kept as regression.
 2. **`InterfaceStaticParam.zl` — unsupported lowering.** Passing an
    interface-typed value as an argument to a *static* function is not lowered
@@ -239,8 +240,8 @@ verifies clean (P1-5).
 5. **Parser-level findings surfaced while building the corpus** (not MIR
    defects, recorded for completeness): previously a block-bodied lambda could
    not declare typed parameters, but `func(int x) { return x*2 }` now compiles;
-   the remaining gap is *untyped* block-body `func(x) { return x*2 }` which
-   is P0-1. `list`/`map`/`set` are reserved words usable as type names but
+   the untyped block-body form `func(x) { return x*2 }` was the last such
+   gap and is fixed too (docs/changelog.md, 2026-09-17). `list`/`map`/`set` are reserved words usable as type names but
    not variable names (P1-4).
 
 ---
@@ -317,7 +318,7 @@ cost is concentrated and actionable:
    touching the passes' guarantees.
 3. **Close the remaining lowering gap** pinned in §3.7 (interface-typed static
    parameters — fixed-array element types through native collection primitives
-   is now fixed, P1-5) — the remaining one is a standalone corpus reproduction.
+   is now fixed) — the remaining one is a standalone corpus reproduction.
 4. **Grow the native subset** beyond ~1.7% of functions if native compilation is
    to become a measured performance contribution rather than a demonstration.
 
