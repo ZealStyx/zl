@@ -1,0 +1,87 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - DoubleFormatting
+//
+// A double prints as the SHORTEST decimal that reads back as the same binary
+// value. The formatter used to print 17 significant digits (max_digits10),
+// which is round-trip safe but is the longest such spelling: log(3.14) came
+// back as 3.1400000000000001 and Math.PI as 3.1415926535897931 - the first
+// double a beginner prints (REVIEW.md, F9).
+//
+// Pinned here:
+//   * the exact spelling of a literal, a computed value, and a value whose
+//     shortest form is genuinely 17 digits (0.1 + 0.2),
+//   * round-tripping: String.toFloat of the printed form gives back the same
+//     double, so nothing was lost by printing fewer digits,
+//   * the one formatter is shared by concatenation, Text.format, collection
+//     printing, and Serialize.encode - a value never has two spellings,
+//   * extreme magnitudes use scientific notation with no padding zeros.
+//
+// Self-checking under every backend: tests/double_format_parity.py runs it
+// under MIR, AST, unoptimized MIR and --backend native and requires identical
+// "ok" output from all four.
+// ============================================================================
+
+import zl.text.Text
+import zl.serialize.Serialize
+
+class DoubleFormatting {
+    func check(bool cond, string what): void {
+        if (!cond) {
+            throw new Exception("DoubleFormatting failed: " + what)
+        }
+    }
+
+    // Prints a double exactly as log() would, so a spelling can be compared.
+    func shown(double value): string {
+        return "" + value
+    }
+
+    func main(): void {
+        var self = new DoubleFormatting()
+
+        // The report's own example: the shortest decimal, not 17 digits.
+        self.check(self.shown(3.14) == "3.14", "3.14 prints shortest")
+        self.check(self.shown(Math.PI) == "3.141592653589793", "Math.PI prints shortest")
+        self.check(self.shown(1.5) == "1.5", "1.5 unchanged")
+        self.check(self.shown(0.5) == "0.5", "0.5 unchanged")
+
+        // Digits that are really there are still printed: 0.1 + 0.2 is not 0.3
+        // and must not be rounded into looking like it.
+        self.check(self.shown(0.1 + 0.2) == "0.30000000000000004", "0.1 + 0.2 keeps its digits")
+        self.check(self.shown(1.0 / 3.0) == "0.3333333333333333", "one third")
+
+        // Round-trip: parsing the printed form gives back the identical double.
+        self.check(String.toFloat(self.shown(3.14)) == 3.14, "3.14 round-trips")
+        self.check(String.toFloat(self.shown(0.1 + 0.2)) == 0.1 + 0.2, "0.1 + 0.2 round-trips")
+        self.check(String.toFloat(self.shown(Math.PI)) == Math.PI, "PI round-trips")
+        self.check(String.toFloat(self.shown(1.0 / 3.0)) == 1.0 / 3.0, "one third round-trips")
+
+        // A whole-valued double prints without a fractional part (and keeps its
+        // sign: -0.0 is "-0", see LiteralFoldParity.zl).
+        self.check(self.shown(1.0) == "1", "1.0 prints as 1")
+        self.check(self.shown(0.0) == "0", "0.0 prints as 0")
+        self.check(self.shown(-0.0) == "-0", "-0.0 prints as -0")
+        self.check(self.shown(7.0 / 2.0 - 1.5) == "2", "2.0 prints as 2")
+
+        // Large and small magnitudes: shortest scientific form, no zero padding.
+        self.check(self.shown(Math.pow(10.0, 21.0)) == "1e+21", "1e21")
+        self.check(self.shown(Math.pow(10.0, -7.0)) == "1e-07", "1e-07")
+        self.check(String.toFloat(self.shown(Math.pow(10.0, 21.0))) == Math.pow(10.0, 21.0), "1e21 round-trips")
+        self.check(String.toFloat(self.shown(Math.pow(10.0, -7.0))) == Math.pow(10.0, -7.0), "1e-07 round-trips")
+
+        // One formatter everywhere: concatenation, Text.format, collection
+        // printing and JSON all agree with log().
+        self.check("x" + 3.14 == "x3.14", "concatenation uses the same spelling")
+        var args = Collection.newList()
+        Collection.push(args, 3.14)
+        Collection.push(args, 1.0)
+        self.check(Text.format("{0} {1}", args) == "3.14 1", "Text.format uses the same spelling")
+        var named = Collection.newMap()
+        Collection.mapSet(named, "pi", 3.14)
+        self.check(Serialize.encode(named) == "{\"pi\":3.14}", "Serialize.encode uses the same spelling")
+        self.check(Serialize.encode(args) == "[3.14,1]", "Serialize.encode list")
+        self.check(Serialize.number(Serialize.decode(Serialize.encode(Math.PI))) == Math.PI, "JSON round-trips")
+
+        log("ok")
+    }
+}

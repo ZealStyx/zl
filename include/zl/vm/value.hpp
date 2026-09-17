@@ -341,6 +341,15 @@ inline constexpr int kMaxValueNestingDepth = 500;
 [[nodiscard]] std::string valueToString(const Value &v);
 [[nodiscard]] std::int64_t valueHashCode(const Value &v);
 
+// The language's ONE decimal spelling for a finite double: the shortest string
+// that reads back as the same binary value (`3.14`, not `3.1400000000000001`;
+// `0.30000000000000004`, because that digit is really there). Shared by
+// valueToString and by the JSON encoder so a double never has two spellings -
+// one for humans and one for data. Non-finite input is the caller's business
+// (ZL arithmetic raises instead of producing inf/NaN; Serialize.encode rejects
+// them, valueToString prints `inf` / `-inf` / `nan`).
+[[nodiscard]] std::string doubleToShortestString(double value);
+
 // Truthiness rule for `if`, `&&`, `||`: bool uses itself, numbers are false only
 // at zero, strings/lists/maps are false only when empty, nil is always false.
 // Objects are always truthy (non-nil reference).

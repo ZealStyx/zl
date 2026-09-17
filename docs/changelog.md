@@ -2,6 +2,63 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-17 - Doubles print as the shortest decimal that reads back (F9)
+
+`log(3.14)` printed `3.1400000000000001`. The arithmetic was never wrong - the
+printer was. `valueToString` formatted every double with 17 significant digits
+(`std::numeric_limits<double>::max_digits10`), which round-trips but is the
+*longest* decimal that does; the examples then documented that spelling as
+"the shortest decimal that reads back as the same binary double", which is
+exactly backwards. It is the first double a beginner prints (`examples/REVIEW.md`,
+F9).
+
+**One formatter, and it is the shortest one.** `doubleToShortestString`
+(`src/vm/value.cpp`) spells a finite double as the shortest digit string that
+parses back to the same bits: `log(3.14)` is `3.14`, `Math.PI` is
+`3.141592653589793`, and `0.1 + 0.2` is still `0.30000000000000004`, because
+that digit really is there. Nothing was traded away - `String.toFloat` of any
+printed form returns the identical double, and `Serialize.decode` of any
+encoded one returns it too.
+
+The digits come from `std::to_chars` in scientific form where the toolchain's
+`<charconv>` supports floating point, and from a precision-ascending `strtod`
+round-trip loop where it does not (GCC 10, older libc++). The *style* - fixed
+versus scientific - is decided in this file rather than left to `to_chars`,
+whose choice is not pinned by the standard and differs between libraries:
+libstdc++ writes `123456789012345680` for a value another library writes as
+`1.2345678901234568e+17`. Since `examples/run_all.sh` compares bytes on three
+platforms, the spelling of a program's output cannot be allowed to depend on
+the host it was built on. The rule is printf `%g`'s / Python's `repr`: fixed
+while the decimal point sits in `-3..17`, scientific outside it. Both digit
+sources were compared over 1.5M values - random bit patterns, denormals,
+`DBL_MAX`, powers of ten - for exact round-trip, identical digit strings, and
+that style rule; the committed checks are the unit test in
+`tests/runtime_type_tests.cpp` and the ZL fixture below.
+
+Behaviour that did *not* change is worth stating, because it looks like it
+should have. A whole-valued double already printed without a fraction (17
+significant digits of `1.0` is `1`), so `log(1.0)` is still `1` and `-0.0` is
+still `-0` - the assertions `LiteralFoldParity.zl` makes about zero are
+untouched. The fixed/scientific cutoffs also match what `%g` at 17 digits did,
+so `1e+21`, `10000000000000000` and `0.0001` are byte-identical to before.
+What changes is only ever digits that were not needed: `3.1400000000000001`
+becomes `3.14`, `9.9999999999999995e-08` becomes `1e-07`,
+`1.0000000000000001e-05` becomes `1e-05`, and `123456789012345678.0` keeps its
+`1.2345678901234568e+17`.
+
+**The JSON encoder carried its own `setprecision(17)`.** `Serialize.encode`
+serialized a double with more digits than `log` showed for the same value, so a
+value had two spellings depending on which door it left through. It now calls
+the same formatter; `{"pi":3.1400000000000001}` is `{"pi":3.14}`, and decoding
+still round-trips.
+
+Pinned by `tests/zl/valid/language_hardening_tests/DoubleFormatting.zl`, which
+is self-checking and runs under all four configurations (MIR, reference AST,
+unoptimized MIR, `--backend native`) through `tests/double_format_parity.py` -
+ctest `double-format-parity`, mirroring `backend-fold-parity`. Expected output
+in `DataTypes.zl` and `MathLib.zl` is updated, as are `examples/README.md`,
+`docs/language-guide.md`, and the F9 verdict in `examples/REVIEW.md`.
+
 ## 2026-09-17 - Windows and macOS CTest: the leftover failures are real bugs
 
 The first CI run recorded three leftover CTest failures rather than skipping
