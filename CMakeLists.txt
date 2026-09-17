@@ -582,6 +582,7 @@ add_library(zl-test-native-library SHARED tests/fixtures/native_library_fixture.
 set_target_properties(zl-test-native-library PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    WINDOWS_EXPORT_ALL_SYMBOLS TRUE
     EXCLUDE_FROM_ALL TRUE)
 list(APPEND ZL_TEST_TARGETS zl-test-native-library)
 
