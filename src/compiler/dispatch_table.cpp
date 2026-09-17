@@ -47,11 +47,13 @@ DispatchType dispatchTypeFor(const Param& param, const std::vector<std::string>&
 
 DispatchSignature signatureFor(const FunctionDecl* fn,
                                 const std::vector<std::string>& genericTypeParams) {
+    std::vector<std::string> merged = genericTypeParams;
+    merged.insert(merged.end(), fn->typeParams.begin(), fn->typeParams.end());
     DispatchSignature signature;
     signature.name = fn->name;
     signature.parameters.reserve(fn->params.size());
     for (const auto& param : fn->params) {
-        signature.parameters.push_back(dispatchTypeFor(param, genericTypeParams));
+        signature.parameters.push_back(dispatchTypeFor(param, merged));
     }
     return signature;
 }

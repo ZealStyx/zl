@@ -20,15 +20,41 @@
 #include "zl/native/pipeline.hpp"
 
 #include <cmath>
+#include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
-#if defined(__unix__) || defined(__APPLE__)
+// Executing the emitted code needs a host the backend can target *and* a
+// platform that permits it. Neither half is satisfied on macOS.
+//
+// The backend emits x86-64 only (SysV and Win64), while the CI macOS runners
+// are arm64, so there is nothing runnable to jump to. And macOS forbids this
+// pattern even on matching hardware: executable memory must be mapped with
+// MAP_JIT and toggled with pthread_jit_write_protect_np on arm64, and the
+// hardened runtime rejects mprotect() to PROT_EXEC on anonymous memory
+// elsewhere. This test maps with plain mmap() and then mprotect()s to
+// PROT_EXEC, so on macOS the jump faults and CTest reports
+// "***Exception: SegFault" - which reads as a crash in the test rather than
+// as an unsupported platform.
+//
+// tests/machine_code_tests.cpp already required __x86_64__ before checking
+// for a POSIX host; the execution guards now agree.
+#if defined(__unix__) && !defined(__APPLE__) && defined(__x86_64__)
 #include <sys/mman.h>
+#include <sys/wait.h>
+// fork() and _exit() live in <unistd.h>. On glibc, <sys/wait.h> pulls it in
+// transitively, so the omission is invisible on Linux; on macOS it is not,
+// and the build fails with "no member named 'fork' in the global namespace".
+// Included explicitly rather than relying on that transitive path.
+#include <unistd.h>
+#include <cerrno>
 #define ZL_NATIVE_CAN_EXECUTE 1
 #else
 #define ZL_NATIVE_CAN_EXECUTE 0
@@ -112,10 +138,17 @@ struct Built {
 };
 
 // Compiles a module and returns the pipeline result, asserting it verified.
+//
+// Selection and encoding are properties of a *target*, not of the host this
+// process happens to run on. The only encoder is x86-64 SysV; using
+// `hostTarget()` here would make every Windows host (described, no encoder)
+// and every arm64 host (no description) fail tests that are about the subset
+// rather than about jumping to the bytes. Execution cases still consult
+// `hostTarget().encoderAvailable()` before mapping the result executable.
 PipelineResult compile(const Module& module) {
     const auto report = verifyModule(module);
     require(report.ok(), "fixture MIR must verify:\n" + report.describe());
-    return compileMirToNative(module, hostTarget());
+    return compileMirToNative(module, x64SysVTarget());
 }
 
 bool rejected(const PipelineResult& result, const std::string& function) {
@@ -138,7 +171,7 @@ void testTargetDescription() {
     const auto& sysv = x64SysVTarget();
     require(sysv.cc.intArgRegs.size() == 6, "System V passes six integer arguments in registers");
     require(sysv.cc.floatArgRegs.size() == 8, "System V passes eight float arguments in registers");
-    require(sysv.cc.shadowSpace == 0, "System V has no shadow space");
+    require(sysv.cc.shadowSpace == 32, "System V x86-64 mandates 32 bytes of shadow space (PSABI 3.2.2)");
     require(sysv.cc.stackAlignment == 16, "System V requires 16-byte stack alignment at a call");
     require(sysv.encoderAvailable(), "the System V encoder exists");
 
@@ -331,6 +364,7 @@ void testSelectionSubset() {
         require(result.ok(), "integer arithmetic compiles: " + result.error);
         require(lowered(result, "add"), "add is in the native subset");
         require(result.lir.functions.size() == 1, "one native function");
+        if (result.lir.functions.empty()) return;
         const auto& fn = result.lir.functions.front();
         require(fn.returnClass == ValueClass::Integer, "add returns an integer-class value");
         require(fn.parameterClasses.size() == 2, "add takes two parameters");
@@ -342,7 +376,8 @@ void testSelectionSubset() {
         require(result.ok(), "a module with an unsupported function is not an error");
         require(rejected(result, "greet"), "a string-returning function is refused, not guessed at");
         require(result.lir.functions.empty(), "nothing was lowered for it");
-        require(!result.vmFunctions.front().reason.empty(), "the refusal states a reason");
+        require(!result.vmFunctions.empty() && !result.vmFunctions.front().reason.empty(),
+                "the refusal states a reason");
     }
     {
         // A caller of a refused function must itself be refused: there is no
@@ -386,10 +421,22 @@ void testUnverifiedMirIsRefused() {
     // licence to assume the invariants is only sound if something checks.
     Module broken = buildIntArith();
     broken.functions[0].blocks[0].terminator.kind = TerminatorKind::None;
-    auto result = compileMirToNative(broken, hostTarget());
+    auto result = compileMirToNative(broken, x64SysVTarget());
     require(!result.ok(), "the native backend refuses MIR that does not verify");
     require(result.error.find("did not verify") != std::string::npos,
             "the refusal says the MIR did not verify");
+}
+
+// A described target without an encoder (Win64) is select-only: the subset
+// still runs, and no bytes are produced. Turning that into a hard error made
+// every Windows host fail this suite even though refusal-to-emit is the
+// documented, correct outcome.
+void testNoEncoderIsSelectOnly() {
+    auto result = compileMirToNative(buildIntArith(), x64WindowsTarget());
+    require(result.ok(),
+            "a described target without an encoder is not a pipeline error: " + result.error);
+    require(lowered(result, "add"), "Win64 can still select the integer subset");
+    require(result.code.empty(), "Win64 produces no bytes until it has an encoder");
 }
 
 #if ZL_NATIVE_CAN_EXECUTE
@@ -516,6 +563,165 @@ void testArithmeticEdges() {
     require(fne(nan, nan) == 1, "NaN is unequal to itself");
     require(feq(0.0, -0.0) == 1, "positive and negative zero compare equal");
 }
+
+// --- arithmetic faults: the emitted code must trap, never wrap --------------
+//
+// The language is fail-closed: the VM throws a catchable ArithmeticError when
+// a result is unrepresentable (int overflow, INT64_MIN / -1, a shift count
+// outside 0..63, a zero float divisor, an infinity or NaN). The native tier
+// has no unwind tables, so its contract for the same fault is a trap - the
+// emitted code branches to `ud2`, which terminates the process with SIGILL.
+// Each fault is executed in a forked child, so the trap (the expected
+// outcome) is an assertion instead of a test-suite death. The healthy
+// neighbours are run in the parent: they must not fire.
+
+// Runs `child` in a forked process. Returns the terminating signal when the
+// child is killed (SIGILL from `ud2`), the exit code when it exits normally,
+// or -1 when the wait itself failed.
+int trapOrExitCode(std::function<void()> child) {
+    const pid_t pid = ::fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        child();
+        ::_exit(0);
+    }
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return -1;
+    }
+    if (WIFSIGNALED(status)) return WTERMSIG(status);
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return -1;
+}
+
+// Fails with the observed outcome when `observed` is not SIGILL.
+void requireTrap(int observed, const std::string& what) {
+    const std::string detail = observed == SIGILL ? ""
+        : observed < 0 ? " [wait failed]"
+        : observed <= 128 ? " [exited cleanly with code " + std::to_string(observed) + "]"
+                          : " [killed by signal " + std::to_string(observed) + "]";
+    require(observed == SIGILL, what + detail);
+}
+
+void testArithmeticTraps() {
+    if (!hostTarget().encoderAvailable()) return;
+
+    const std::int64_t kMin = std::numeric_limits<std::int64_t>::min();
+    const std::int64_t kMax = std::numeric_limits<std::int64_t>::max();
+
+    ModuleBuilder builder("traps");
+    const auto intType = builder.types().intType();
+    const auto d = builder.types().doubleType();
+
+    auto addBinary = [&](const std::string& name, Opcode op, std::uint32_t operandType,
+                         std::uint32_t resultType) {
+        auto fn = builder.addFunction(name);
+        const auto a = fn.addParameter("a", operandType);
+        const auto b = fn.addParameter("b", operandType);
+        fn.setReturnType(resultType);
+        const auto entry = fn.addBlock();
+        fn.setCurrentBlock(entry);
+        const auto r = fn.emitBinary(op, fn.parameterOperand(a), fn.parameterOperand(b), resultType);
+        fn.emitReturn(Operand::temp(r, resultType));
+    };
+    auto addUnary = [&](const std::string& name, Opcode op, std::uint32_t operandType,
+                        std::uint32_t resultType) {
+        auto fn = builder.addFunction(name);
+        const auto a = fn.addParameter("a", operandType);
+        fn.setReturnType(resultType);
+        const auto entry = fn.addBlock();
+        fn.setCurrentBlock(entry);
+        const auto r = fn.emitUnary(op, fn.parameterOperand(a), resultType);
+        fn.emitReturn(Operand::temp(r, resultType));
+    };
+
+    addBinary("tadd", Opcode::Add, intType, intType);
+    addBinary("tsub", Opcode::Sub, intType, intType);
+    addBinary("tmul", Opcode::Mul, intType, intType);
+    addBinary("tdiv", Opcode::Div, intType, intType);
+    addBinary("tmod", Opcode::Mod, intType, intType);
+    addBinary("tshl", Opcode::Shl, intType, intType);
+    addBinary("tshr", Opcode::Shr, intType, intType);
+    addBinary("tushr", Opcode::Ushr, intType, intType);
+    addUnary("tneg", Opcode::Neg, intType, intType);
+    addBinary("tfadd", Opcode::Add, d, d);
+    addBinary("tfmul", Opcode::Mul, d, d);
+    addBinary("tfdiv", Opcode::Div, d, d);
+    addUnary("tfneg", Opcode::Neg, d, d);
+
+    auto result = compile(builder.take());
+    require(result.ok() && result.code.size() == 13, "the trap module compiled: " + result.error);
+    ExecutableBuffer buffer(result.code);
+    if (!buffer.ok()) return;
+
+    auto* tadd = entryPoint<std::int64_t(std::int64_t, std::int64_t)>(buffer, "tadd");
+    auto* tsub = entryPoint<std::int64_t(std::int64_t, std::int64_t)>(buffer, "tsub");
+    auto* tmul = entryPoint<std::int64_t(std::int64_t, std::int64_t)>(buffer, "tmul");
+    auto* tdiv = entryPoint<std::int64_t(std::int64_t, std::int64_t)>(buffer, "tdiv");
+    auto* tmod = entryPoint<std::int64_t(std::int64_t, std::int64_t)>(buffer, "tmod");
+    auto* tshl = entryPoint<std::int64_t(std::int64_t, std::int64_t)>(buffer, "tshl");
+    auto* tshr = entryPoint<std::int64_t(std::int64_t, std::int64_t)>(buffer, "tshr");
+    auto* tushr = entryPoint<std::int64_t(std::int64_t, std::int64_t)>(buffer, "tushr");
+    auto* tneg = entryPoint<std::int64_t(std::int64_t)>(buffer, "tneg");
+    auto* tfadd = entryPoint<double(double, double)>(buffer, "tfadd");
+    auto* tfmul = entryPoint<double(double, double)>(buffer, "tfmul");
+    auto* tfdiv = entryPoint<double(double, double)>(buffer, "tfdiv");
+    auto* tfneg = entryPoint<double(double)>(buffer, "tfneg");
+
+    // The healthy neighbours: the checks must not fire on representable
+    // results, and the boundary values the checks exist for still compute.
+    require(tadd(1, 2) == 3, "1 + 2 == 3");
+    require(tsub(1, 2) == -1, "1 - 2 == -1");
+    require(tmul(-2, 3) == -6, "-2 * 3 == -6");
+    require(tdiv(17, 5) == 3, "17 / 5 == 3");
+    require(tdiv(kMin, 1) == kMin, "INT64_MIN / 1 == INT64_MIN (no overflow)");
+    require(tmod(-17, 5) == -2, "-17 % 5 == -2");
+    require(tmod(kMin, 2) == 0, "INT64_MIN % 2 == 0");
+    require(tshl(1, 63) == kMin, "1 << 63 == INT64_MIN (count 63 is in range)");
+    require(tshr(kMin, 63) == -1, "INT64_MIN >> 63 == -1 (arithmetic)");
+    require(tushr(-1, 63) == 1, "-1 >>> 63 == 1 (logical: only bit 0 survives)");
+    require(tneg(kMax) == -9223372036854775807, "negation of INT64_MAX is representable");
+    require(tfadd(1.5, 2.25) == 3.75, "1.5 + 2.25 == 3.75");
+    require(tfmul(2.0, 0.5) == 1.0, "2.0 * 0.5 == 1.0");
+    require(tfdiv(1.0, 4.0) == 0.25, "1.0 / 4.0 == 0.25");
+    require(tfneg(-3.5) == 3.5, "negation of a finite double is fine");
+    // The VM defines INT64_MIN % -1 as 0, so the emitted code computes it
+    // instead of trapping - this is the one fault case with a value.
+    require(tmod(kMin, -1) == 0, "INT64_MIN % -1 == 0 (the VM's definition), computed, not trapped");
+
+    // And the faults trap - the same way the VM reports them as catchable
+    // ArithmeticErrors, except this tier has no unwind tables.
+    requireTrap(trapOrExitCode([=] { (void)tadd(kMax, 1); }),
+                "INT64_MAX + 1 traps (VM: integer overflow in addition; x86 would wrap to INT64_MIN)");
+    requireTrap(trapOrExitCode([=] { (void)tsub(kMin, 1); }),
+                "INT64_MIN - 1 traps (VM: integer overflow in subtraction)");
+    requireTrap(trapOrExitCode([=] { (void)tmul(kMax, 2); }),
+                "INT64_MAX * 2 traps (VM: integer overflow in multiplication)");
+    requireTrap(trapOrExitCode([=] { (void)tneg(kMin); }),
+                "negation of INT64_MIN traps (VM: integer overflow in negation)");
+    requireTrap(trapOrExitCode([=] { (void)tdiv(kMin, -1); }),
+                "INT64_MIN / -1 traps (VM: integer overflow in division; idiv would raise #DE)");
+    requireTrap(trapOrExitCode([=] { (void)tdiv(7, 0); }),
+                "zero divisor traps (the tier's pre-existing contract)");
+    requireTrap(trapOrExitCode([=] { (void)tshl(1, 64); }),
+                "shift count 64 traps (x86 would mask it to 0 and compute x << 0)");
+    requireTrap(trapOrExitCode([=] { (void)tshl(1, -1); }),
+                "negative shift count traps (VM: shift count must be in 0..63)");
+    requireTrap(trapOrExitCode([=] { (void)tshr(1, 64); }),
+                "arithmetic shift count 64 traps");
+    requireTrap(trapOrExitCode([=] { (void)tushr(1, -1); }),
+                "logical shift count -1 traps");
+    requireTrap(trapOrExitCode([=] { (void)tfdiv(1.0, 0.0); }),
+                "1.0 / 0.0 traps (VM: division by zero; IEEE would emit +infinity)");
+    requireTrap(trapOrExitCode([=] { (void)tfdiv(0.0, 0.0); }),
+                "0.0 / 0.0 traps (NaN is not a value the language has)");
+    requireTrap(trapOrExitCode([=] { (void)tfadd(1e308, 1e308); }),
+                "float addition overflow to infinity traps (VM: floating-point overflow)");
+    requireTrap(trapOrExitCode([=] { (void)tfmul(1e200, 1e200); }),
+                "float multiplication overflow to infinity traps");
+    requireTrap(trapOrExitCode([=] { (void)tfneg(std::numeric_limits<double>::infinity()); }),
+                "negating a non-finite input traps - no non-finite value may exist in the tier");
+}
 #endif
 
 // --- the real front end ----------------------------------------------------
@@ -565,7 +771,7 @@ class Calc {
     require(ok, "the ZL fixture lowers to verified MIR");
     if (!ok) return;
 
-    auto result = compileMirToNative(module, hostTarget());
+    auto result = compileMirToNative(module, x64SysVTarget());
     require(result.ok(), "the native backend ran over real lowered MIR: " + result.error);
     require(!result.nativeFunctions.empty(),
             "at least one real ZL function reached the native tier; got:\n" + result.describe());
@@ -587,7 +793,7 @@ class Greeter {
     require(ok, "the object fixture lowers to verified MIR");
     if (!ok) return;
 
-    auto result = compileMirToNative(module, hostTarget());
+    auto result = compileMirToNative(module, x64SysVTarget());
     require(result.ok(), "an unsupported program is a partial result, not an error");
     require(result.nativeFunctions.empty() || !result.vmFunctions.empty(),
             "string/object work is left to the VM");
@@ -603,9 +809,11 @@ int main() {
     testValueClasses();
     testSelectionSubset();
     testUnverifiedMirIsRefused();
+    testNoEncoderIsSelectOnly();
 #if ZL_NATIVE_CAN_EXECUTE
     testExecution();
     testArithmeticEdges();
+    testArithmeticTraps();
 #else
     std::cerr << "note: executable memory unavailable on this platform; execution cases skipped\n";
 #endif

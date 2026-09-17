@@ -413,6 +413,30 @@ private:
     // real substituted types) is still what error messages use, since it's
     // more informative for a person reading them.
     [[nodiscard]] static DispatchSignature dispatchSignature(const std::string& methodName, const ClassMethodInfo& method);
+    // Instantiates a method-level generic (`firstOf<T>`) by substituting the
+    // given type arguments into parameter and return types. The result is used
+    // only for overload matching and result typing; dispatch still uses the
+    // unsubstituted method so the template slot is GENERIC_OBJECT.
+    [[nodiscard]] ClassMethodInfo instantiateGenericMethod(const ClassMethodInfo& method,
+                                                            const std::vector<ResolvedTypeArg>& typeArgs,
+                                                            std::size_t line);
+    // Instantiates generic overloads (when type arguments are written) or
+    // filters them out (when they are omitted: no inference). `originals` is
+    // parallel to `candidates` and points at the unsubstituted methods so
+    // dispatch still uses GENERIC_OBJECT.
+    struct PreparedGenericOverloads {
+        std::vector<std::pair<std::string, ClassMethodInfo>> candidates;
+        std::vector<const ClassMethodInfo*> originals;
+        std::vector<std::string> resolvedTypeArgNames;
+    };
+    [[nodiscard]] PreparedGenericOverloads prepareGenericOverloads(
+        const std::vector<std::pair<std::string, ClassMethodInfo>>& candidates,
+        const std::vector<TypeAnnotation>& typeArgs,
+        const std::string& methodName,
+        std::size_t line);
+    // Rejects a method type parameter that collides with a class type
+    // parameter, then appends the method's parameters to the current scope.
+    void mergeMethodTypeParams(const std::vector<std::string>& methodParams, std::size_t line);
     [[nodiscard]] bool isCurrentGenericTypeParam(const std::string& name) const;
     void requireNumericGenericTypeParam(const std::string& name, std::size_t line);
 

@@ -2,7 +2,12 @@
 #include "zl/vm/gc.hpp"
 
 #include <stdexcept>
+#include <algorithm>
+#include <charconv>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -76,9 +81,7 @@ std::string formatValueInner(const Value& v, bool quoteStrings,
                 if (std::isnan(held)) return "nan";
                 return held < 0 ? "-inf" : "inf";
             }
-            std::ostringstream oss;
-            oss << std::setprecision(std::numeric_limits<double>::max_digits10) << held;
-            return oss.str();
+            return doubleToShortestString(held);
         } else if constexpr (std::is_same_v<T, std::string>) {
             return quoteStrings ? ("\"" + held + "\"") : held;
         } else if constexpr (std::is_same_v<T, ListRef>) {
@@ -162,7 +165,137 @@ std::string formatValueInner(const Value& v, bool quoteStrings,
     }, v);
 }
 
+// The shortest decimal digits that read back as `value`, plus its decimal
+// exponent: value == 0.<digits> x 10^(exponent + 1), with no trailing zero in
+// `digits` (so 100 is digits "1", exponent 2). Returns false if no exact
+// spelling was produced, which the caller treats as "keep the long form".
+//
+// Two sources, in order of trust:
+//
+//   * `std::to_chars` in scientific form, where the toolchain's <charconv>
+//     supports floating point (GCC 11+, libc++ 14+, MSVC 19.14+). Every
+//     conforming implementation must produce the shortest representation that
+//     parses back to the same value, with ties to even, so the digits are the
+//     standard's and not the host's. Only the scientific form is asked for:
+//     to_chars also picks between fixed and scientific, and *that* choice is
+//     not pinned by the standard - libstdc++ renders 1.2345678901234568e17 as
+//     `123456789012345680` where other libraries write `1.2345678901234568e+17`.
+//     Letting it decide would make a program's printed output depend on the
+//     host it was built on, and examples/run_all.sh compares bytes on three
+//     platforms. The style is this file's decision (see below).
+//
+//   * otherwise, ask printf for p significant digits and check with strtod
+//     whether that spelling parses back to the same bits, ascending from p = 1.
+//     17 always succeeds (max_digits10), so the loop terminates with an exact
+//     shortest-length spelling. Both sources were compared over 1.5M values
+//     (random bit patterns, denormals, DBL_MAX, powers of ten) and agreed on
+//     every one; on a host whose printf or strtod is not correctly rounded the
+//     fallback could differ in the last digit of a 17-digit value, but never
+//     in information - every spelling it returns has been read back with
+//     strtod and compared bit for bit before it is accepted.
+bool shortestDigits(double value, std::string& digits, int& exponent) {
+    const double magnitude = std::fabs(value); // the sign is the caller's business
+    char buf[64]; // "-d.ddddddddddddddddde-308" fits in 26
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
+    const auto result = std::to_chars(buf, buf + sizeof(buf), magnitude, std::chars_format::scientific);
+    if (result.ec == std::errc{}) {
+        const std::string text(buf, result.ptr);
+        const std::size_t e = text.find('e');
+        if (e != std::string::npos) {
+            std::string mantissa = text.substr(0, e);
+            mantissa.erase(std::remove(mantissa.begin(), mantissa.end(), '.'), mantissa.end());
+            const int parsedExponent = static_cast<int>(std::strtol(text.c_str() + e + 1, nullptr, 10));
+            // Trust but verify: the digits must read back as the same double.
+            if (std::strtod(text.c_str(), nullptr) == magnitude) {
+                digits = mantissa;
+                exponent = parsedExponent;
+                return true;
+            }
+        }
+    }
+#endif
+    for (int precision = 1; precision <= std::numeric_limits<double>::max_digits10; ++precision) {
+        const int written = std::snprintf(buf, sizeof(buf), "%.*e", precision - 1, magnitude);
+        if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(buf)) return false;
+        if (std::strtod(buf, nullptr) != magnitude) continue;
+        const char* mantissaEnd = std::strchr(buf, 'e');
+        if (!mantissaEnd) return false;
+        digits.assign(buf, static_cast<std::size_t>(mantissaEnd - buf));
+        digits.erase(std::remove(digits.begin(), digits.end(), '.'), digits.end());
+        exponent = static_cast<int>(std::strtol(mantissaEnd + 1, nullptr, 10));
+        return true;
+    }
+    return false;
+}
+
 } // namespace
+
+// The language's ONE decimal spelling for a finite double: the shortest digit
+// string that reads back as the same binary value, so 3.14 prints as `3.14`
+// and 0.1 + 0.2 prints as `0.30000000000000004` - the digits that are really
+// there, and not one more. Everything that renders a double goes through here:
+// log(), string concatenation, Text.format, list/map/record members,
+// Serialize.encode, and error messages that quote a value.
+//
+// Printing 17 significant digits instead (std::numeric_limits<double>::
+// max_digits10) round-trips too, but it is the *longest* such spelling rather
+// than the shortest, which is why the first double a beginner prints used to
+// come back as `3.1400000000000001` (examples/REVIEW.md, F9).
+//
+// Fixed vs scientific is decided here, on the decimal point position, the way
+// Python's repr and printf's %g do it: fixed while the point sits in -3..17
+// (`0.0001`, `3.14`, `10000000000000000`), scientific outside it (`1e-05`,
+// `1e+17`). A whole-valued double therefore prints without a fraction - which
+// is what the 17-digit form already did for `1.0`, so `log(1.0)` is `1` and
+// `log(-0.0)` is `-0`, unchanged. There is no precision specifier; round with
+// Math.round and pad with Text.padLeft when a column has to line up.
+std::string doubleToShortestString(double value) {
+    if (value == 0.0) {
+        // Keep the sign of a negative zero: -0.0 is a distinct value, and
+        // LiteralFoldParity.zl pins that it prints "-0".
+        return std::signbit(value) ? "-0" : "0";
+    }
+
+    std::string digits;
+    int exponent = 0; // value == 0.<digits> x 10^(exponent + 1), i.e. floor(log10(|value|))
+    if (!shortestDigits(value, digits, exponent)) {
+        // Not reachable: precision 17 round-trips every double by definition of
+        // max_digits10. Keep the long spelling rather than lose information.
+        std::ostringstream oss;
+        oss << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+        return oss.str();
+    }
+
+    // Shortest means shortest: a trailing zero only existed to pad the exponent.
+    const std::size_t lastSignificant = digits.find_last_not_of('0');
+    digits.erase(lastSignificant == std::string::npos ? 1 : lastSignificant + 1);
+
+    // Position of the decimal point relative to the digits: 123.4 has point 3,
+    // 0.001234 has point -2.
+    const int point = exponent + 1;
+    std::string out;
+
+    if (point > -4 && point <= 17) {
+        if (point <= 0) {
+            out = "0." + std::string(static_cast<std::size_t>(-point), '0') + digits;
+        } else if (static_cast<std::size_t>(point) >= digits.size()) {
+            out = digits + std::string(static_cast<std::size_t>(point) - digits.size(), '0');
+        } else {
+            out = digits.substr(0, static_cast<std::size_t>(point)) + "." +
+                  digits.substr(static_cast<std::size_t>(point));
+        }
+    } else {
+        out = digits.size() > 1 ? digits.substr(0, 1) + "." + digits.substr(1) : digits;
+        const int scientificExponent = point - 1;
+        out += "e";
+        out += scientificExponent < 0 ? "-" : "+";
+        const unsigned magnitude = static_cast<unsigned>(std::abs(scientificExponent));
+        if (magnitude < 10) out += "0"; // two exponent digits, as printf and to_chars do
+        out += std::to_string(magnitude);
+    }
+
+    return value < 0.0 ? "-" + out : out;
+}
 
 std::string valueToString(const Value& v) {
     std::unordered_set<const void*> active;

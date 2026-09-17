@@ -1,7 +1,8 @@
 // Runtime type system regressions: the canonical type-name grammar, runtime
 // metadata identity and subtype/interface relationships, invalid casts,
-// nullable edge cases, and the typed-boundary contract checks (list/map/array)
-// the VM applies at stores and type assertions.
+// nullable edge cases, the typed-boundary contract checks (list/map/array)
+// the VM applies at stores and type assertions, and the value-printing
+// contract every rendered double goes through.
 #include "zl/common/type_name.hpp"
 #include "zl/compiler/bytecode.hpp"
 #include "zl/vm/gc.hpp"
@@ -11,7 +12,9 @@
 #include "zl/vm/runtime_type_checks.hpp"
 #include "zl/vm/value.hpp"
 
+#include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -341,6 +344,61 @@ void testMapContract() {
     }
 }
 
+// The double-printing contract (examples/REVIEW.md, F9): shortest decimal that
+// reads back as the same double, one spelling shared by the printer and the
+// JSON encoder, and the fixed/scientific choice made here rather than by
+// to_chars - so a program's output cannot depend on the host it was built on.
+// tests/double_format_parity.py pins the same contract from ZL source under all
+// four backends; this reaches the cases a ZL literal cannot spell (denormals,
+// DBL_MAX, exact 2^53) and the property that has to hold for all of them.
+void testDoubleFormatting() {
+    const auto shown = [](double value) { return zl::doubleToShortestString(value); };
+
+    // The report's own example, and a value whose 17th digit is really there.
+    require(shown(3.14) == "3.14", "3.14 prints as 3.14, not 3.1400000000000001");
+    require(shown(0.1 + 0.2) == "0.30000000000000004", "0.1 + 0.2 keeps the digits it has");
+    require(shown(1.0 / 3.0) == "0.3333333333333333", "one third is 16 digits");
+
+    // A whole-valued double has no fractional part, and -0.0 keeps its sign.
+    require(shown(1.0) == "1", "1.0 prints as 1");
+    require(shown(0.0) == "0", "0.0 prints as 0");
+    require(shown(-0.0) == "-0", "-0.0 keeps its sign");
+    require(shown(-2270.0) == "-2270", "a whole negative double");
+
+    // Fixed while the decimal point sits in -3..17, scientific outside it.
+    require(shown(0.0001) == "0.0001", "point -3 stays fixed");
+    require(shown(0.00001) == "1e-05", "point -4 goes scientific");
+    require(shown(1e16) == "10000000000000000", "point 17 stays fixed");
+    require(shown(1e17) == "1e+17", "point 18 goes scientific");
+    require(shown(1e-7) == "1e-07", "the shortest spelling, not 9.9999999999999995e-08");
+
+    // The extremes: every printed form must read back as the same bits.
+    require(shown(std::numeric_limits<double>::max()) == "1.7976931348623157e+308", "DBL_MAX");
+    require(shown(std::numeric_limits<double>::denorm_min()) == "5e-324", "the smallest denormal");
+    require(shown(9007199254740992.0) == "9007199254740992", "2^53 is exact in fixed form");
+    require(shown(-9007199254740992.0) == "-9007199254740992", "negative 2^53");
+
+    // The property that matters: nothing is lost by printing fewer digits.
+    const double probe[] = {3.14, 0.1 + 0.2, 1.0 / 3.0, 1e-7, 1e21, 0.0001,
+                            std::numeric_limits<double>::max(),
+                            std::numeric_limits<double>::min(),
+                            std::numeric_limits<double>::denorm_min(),
+                            std::numeric_limits<double>::epsilon(),
+                            123456789012345678.0, -2270.0, 2.5, 1e-320};
+    for (double value : probe) {
+        require(std::strtod(shown(value).c_str(), nullptr) == value,
+                "printed form parses back to the same double: " + shown(value));
+    }
+
+    // valueToString is the printer's door into the same formatter, for a bare
+    // double and for one nested inside a collection.
+    require(zl::valueToString(zl::Value(3.14)) == "3.14", "valueToString agrees");
+    auto list = zl::makeGCList();
+    list->items.emplace_back(3.14);
+    list->items.emplace_back(1.0);
+    require(zl::valueToString(zl::Value(list)) == "[3.14, 1]", "nested doubles agree");
+}
+
 } // namespace
 
 int main() {
@@ -352,6 +410,7 @@ int main() {
     testTypeCheckBoundary();
     testListContract();
     testMapContract();
+    testDoubleFormatting();
 
     if (failures != 0) {
         std::cerr << failures << " runtime type regression(s) failed\n";

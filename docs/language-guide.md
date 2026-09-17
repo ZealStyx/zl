@@ -66,6 +66,18 @@ and treat large non-string-keyed maps as small collections.
 floating point, with all the usual binary fraction rounding — `0.1 + 0.2 != 0.3`.
 There is no decimal-fixed type yet.
 
+**A `double` prints as the shortest decimal that reads back as the same value.**
+`log(3.14)` prints `3.14`, and `log(0.1 + 0.2)` prints `0.30000000000000004` — that
+last digit is really there, so nothing is rounded away for appearance.
+`String.toFloat` of any printed form returns the identical double, and
+`Serialize.encode` uses the same spelling, so a value never has two
+representations. Two consequences to expect in output: a whole-valued double
+prints without a fraction (`log(1.0)` is `1`, `log(-0.0)` is `-0`), and a
+magnitude outside the plain-decimal range prints in scientific form (`1e+21`,
+`1e-07`). There is no printf-style precision specifier yet: round with
+`Math.round` and align with `Text.padLeft` when a column of numbers has to line
+up.
+
 **`string` has no ordering operator.** `<`, `<=`, `>`, `>=` do not work on strings;
 only `==` and `!=` do. (Comparison fails at runtime inside `sort` comparators, not at
 compile time — compare with an explicit key or `String.compare` instead.)
@@ -273,6 +285,27 @@ use — only the compile-time type surface is new, layered on the same generic-c
 machinery that user-defined generics (`class Box<T>`) already use. A mismatched type is
 caught by ordinary overload resolution, with the same error-message quality as any other
 method call.
+
+### Generic methods
+
+A method may declare its own type parameters, independently of any class-level ones:
+
+```zl
+class Helpers {
+    public static func firstOf<T>(List<T> items, T fallback): T {
+        if (items.length() == 0) { return fallback }
+        return items.get(0)
+    }
+}
+
+var nums = new List<int>()
+nums.push(41)
+int first = Helpers.firstOf<int>(nums, 0)   // 41
+```
+
+Type arguments at the call site are required — there is no inference from the
+arguments. A method type parameter may not reuse a name already bound as a class
+type parameter (`class Box<T> { func identity<T>(...) }` is a compile error).
 
 **Naming note.** The index/key-assignment method is `put`, not `set`, because `set` is a
 reserved keyword (the lowercase `set<T>` annotation). This is a keyword-collision

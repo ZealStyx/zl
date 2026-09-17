@@ -32,6 +32,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -100,8 +101,8 @@ RunResult runChunk(const zl::Chunk& chunk) {
     std::ostringstream captured;
     std::streambuf* previous = std::cout.rdbuf(captured.rdbuf());
     try {
-        zl::VM vm;
-        result.exitCode = vm.run(chunk, std::vector<std::string>{});
+        auto vm = std::make_shared<zl::VM>();
+        result.exitCode = vm->run(chunk, std::vector<std::string>{});
         result.ran = true;
     } catch (const zl::SystemExitException& exit) {
         result.exitCode = exit.code;

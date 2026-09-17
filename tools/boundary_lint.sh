@@ -51,6 +51,10 @@ scan() {
     done < <("$@" 2>/dev/null)
 
     local file match content
+    # bash 3.2 (macOS /bin/bash) errors on "${arr[@]}" under `set -u` when empty.
+    if [ "${#files[@]}" -eq 0 ]; then
+        return 0
+    fi
     for file in "${files[@]}"; do
         [ -f "$file" ] || continue
         checked=$((checked + 1))
@@ -72,8 +76,10 @@ scan() {
 # may not see the AST, the parser, the type checker, the module loader, the
 # pipeline that drives them, or the legacy IR.
 backend_files() {
-    ls src/native/*.cpp include/zl/native/*.hpp \
-       src/mir/vm_backend.cpp include/zl/mir/vm_backend.hpp 2>/dev/null
+    # find, not ls-with-globs: unmatched globs stay literal on bash 3.2.
+    find src/native include/zl/native src/mir include/zl/mir \
+        \( -name "*.cpp" -o -name "*.hpp" \) 2>/dev/null \
+        | grep -E "(^|/)(src/native/|include/zl/native/|src/mir/vm_backend\.cpp$|include/zl/mir/vm_backend\.hpp$)"
 }
 
 # --- rule 1: a backend reads MIR and nothing else ---------------------------
@@ -268,6 +274,7 @@ front_end_scan_files() {
 # declarations (T*, T&, const T&) are references, not constructions, and are
 # not flagged.
 FRONT_END_AWK='
+BEGIN { sq = sprintf("%c", 39) }  # portable single quote: BSD awk has no \x27
 FNR == 1 { in_comment = 0; in_str = 0; pending = 0 }
 {
     line = $0
@@ -284,12 +291,12 @@ FNR == 1 { in_comment = 0; in_str = 0; pending = 0 }
         }
         if (in_str) {
             if (c == "\\") i += 2
-            else { if ((in_str == 1 && c == "\x27") || (in_str == 2 && c == "\"")) in_str = 0; i++ }
+            else { if ((in_str == 1 && c == sq) || (in_str == 2 && c == "\"")) in_str = 0; i++ }
             continue
         }
         if (c == "/" && d == "/") break
         if (c == "/" && d == "*") { in_comment = 1; code = code "  "; i += 2; continue }
-        if (c == "\x27") { in_str = 1; i++; continue }
+        if (c == sq) { in_str = 1; i++; continue }
         if (c == "\"") { in_str = 2; i++; continue }
         code = code c
         i++

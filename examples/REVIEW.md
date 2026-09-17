@@ -8,6 +8,24 @@ smaller ones that are recorded but left alone.
 Everything below was reproduced against a build of this tree. Each entry says
 what it is, how to see it, and whether it is fixed here or still open.
 
+## Native-tier arithmetic contract — 2026-09-15
+
+A harsh external review of the toolchain (the kind this file exists to
+encourage) found one MAJOR: the native backend's *emitted* code violated the
+language's fail-closed arithmetic contract in four places — int overflow
+wrapped, `INT64_MIN / -1` raised `#DE`, shift counts were masked mod 64, and
+float overflow emitted a quiet infinity. It was latent (the VM is the only
+execution driver, and the `ZLM1` artifact has no consumer) and invisible to
+the differential harnesses (all three arms execute on the VM), which is why it
+survived: only `zl-native-backend-tests` executes emitted bytes, and it had no
+overflow/shift/float-fault case. Fixed at the emitter — the tier's existing
+zero-divisor trap convention, extended (`INT64_MIN % -1` still computes `0`,
+because the VM defines it) — and covered by fifteen executed-byte trap cases
+plus their healthy boundary neighbours, run in forked children. The SysV
+shadow-space model (`shadowSpace = 0`, asserted by a test against PSABI 3.2.2's
+32) was corrected in the same pass, with the reservation wired into the frame
+layout for calling functions.
+
 ## Stabilization update — 2026-09-08
 
 The findings below include the original reproductions. Subsequent hardening has
@@ -414,7 +432,7 @@ Ranked by how quickly a new user hits them. Entries marked **(fixed)** no longer
 reproduce; they are kept here because the workaround is still baked into an
 example or a doc, and the context explains why.
 
-### O2 - A `func`-typed lambda parameter cannot be called
+### O2 - A `func`-typed lambda parameter cannot be called **(fixed)**
 
 ```zl
 var apply = func(f) => f(21)
@@ -429,9 +447,17 @@ static func namedCall(func f): int { return f(21) }
 namedCall(func(x) => x * 2)      // 42
 ```
 
-Verified to be independent of the capture fixes above - it reproduces with and
-without them. This is the "`func`-typed slots don't carry full signature types"
-limitation already listed in the README, showing up in a second place.
+Verified to be independent of the capture fixes above - it used to reproduce
+with and without them. This was the "`func`-typed slots don't carry full
+signature types" limitation showing up as an untyped lambda parameter being
+looked up as a named function.
+
+**Fix.** `inferCall` treats an UNKNOWN callee as a value call, so
+`func(f) => f(21)` invokes the parameter rather than looking `f` up as a
+named function. The MIR verifier matches that: `call_indirect` through
+Unknown/TypeParam is deferred to the runtime instead of being rejected as
+"not callable". Covered by
+`tests/zl/valid/language_hardening_tests/LambdaFuncParam.zl`.
 
 ### O3 - `Atomic`, `Mutex` and `Channel` could not be captured by a thread **(fixed)**
 
@@ -639,9 +665,9 @@ The README snippet now uses `new List<string>()` with `push`, which runs, and th
 stale `examples/Hello.zl` path in the same file now points at
 `examples/basics/HelloWorld.zl`.
 
-### O14 - `docs/language-guide.md` shows a semicolon that is not valid syntax
+### O14 - `docs/language-guide.md` shows a semicolon that is not valid syntax **(fixed)**
 
-The closures section contains `func() { count = count + 1; return count }`.
+The closures section used to contain `func() { count = count + 1; return count }`.
 `;` is not accepted anywhere - not as a separator, not even as a trailing
 terminator:
 
@@ -650,22 +676,26 @@ var a = 1;
 -> syntax error: Expected expression -- got ";" at line 3
 ```
 
+**Fix.** The language-guide snippet no longer uses a semicolon.
+
 ### O15 - `docs/language-guide.md` implies `count` is a predicate
 
 `count` is listed among the lambda-taking algorithms. It is
 `count(T item)` and returns the number of occurrences of a value; the predicate
 versions are `any`, `all`, and `filter`.
 
-### O16 - Generic methods are not supported
+### O16 - Generic methods are not supported **(fixed)**
 
-`static func firstOf<T>(List<T> items, T fallback): T` is a syntax error
-(`Expected '(' after func name -- got "<"`). Only generic *classes* exist, so
-`Generics.zl` writes the helper per element type.
+`static func firstOf<T>(List<T> items, T fallback): T` used to be a syntax error
+(`Expected '(' after func name -- got "<"`). Method-level type parameters now
+parse, type-check, and run; call sites write the type arguments explicitly
+(`Helpers.firstOf<int>(nums, 0)`). Covered by
+`tests/zl/valid/language_hardening_tests/GenericMethods.zl`.
 
-### O17 - The legacy regression corpus is missing
+### O17 - The legacy regression corpus is missing **(fixed)**
 
-`CMakeLists.txt` declares 15+ test executables whose sources are not in the
-tree, so `cmake -S . -B build` fails at the generate step:
+`CMakeLists.txt` used to declare 15+ test executables whose sources were not in
+the tree, so `cmake -S . -B build` failed at the generate step:
 
 ```text
 CMake Error at CMakeLists.txt:259 (add_executable):
@@ -674,44 +704,33 @@ CMake Error at CMakeLists.txt:259 (add_executable):
 
 The examples were therefore built by compiling `src/**/*.cpp` directly with the
 same flags the `zl_language` target uses, and the project's own regression suite
-could not be run. `examples/run_all.sh` is the only executable check available
-here.
+could not be run.
 
-### O18 - String operations count and index bytes, not characters
+**Fix.** Required C++ tests are registered with `zl_add_required_test`, which
+fails configuration if a source is missing rather than silently skipping.
+`.github/workflows/ci.yml` configures the tree, builds `zl-tests`, and runs
+`ctest` on every push and pull request.
 
-Every `String.*` / `Text.*` operation works on UTF-8 bytes rather than code
-points. `String.length` is a plain `.size()` (`src/vm/native.cpp:466`). Nothing
-under `docs/` mentions Unicode, UTF-8, or code points at all, so the behaviour is
-undocumented either way.
+### O18 - String operations count and index bytes, not characters **(fixed)**
+
+Every `String.*` operation still works on UTF-8 bytes: `String.length` is a
+plain `.size()`. `Text.*` used to do the same, so `Text.length("héllo")` was
+`6`, `Text.charAt` could return half of `"é"`, and `Text.reverse` emitted
+invalid UTF-8 (`é` as `\303\251` came out as `\251\303`).
 
 ```zl
-Text.length("héllo")            // 6, not 5      ("é" is two bytes)
-Text.length("日本語")            // 9, not 3
-Text.charAt("héllo", 1)         // the single byte 0xC3, half of "é"
-Text.substring("héllo wörld", 0, 3)   // "hé"  - three bytes, two characters
-Text.indexOf("héllo wörld", "w")      // 7, not 6
-Text.upper("héllo")             // "HéLLO" - only ASCII is cased
+Text.length("héllo")            // was 6, now 5
+Text.charAt("héllo", 1)         // was the byte 0xC3, now "é"
+Text.reverse("héllo")           // was invalid UTF-8, now "olléh"
 ```
 
-The one that is clearly wrong rather than merely surprising is `Text.reverse`,
-which walks the string by byte index and concatenates - so it emits the bytes of
-a multi-byte character in the wrong order. Confirmed with `od -c` rather than
-terminal rendering:
+**Fix.** `Text.length` / `charAt` / `substring` / `reverse` / `codePointAt` /
+`fromCodePoint` and the offset-returning search helpers index Unicode scalar
+values via `String.utf8*` natives. `String.*` remains the byte-string
+primitive. `upper` / `lower` still only case ASCII. Covered by
+`tests/zl/valid/language_hardening_tests/Utf8Text.zl`; see `docs/stdlib.md`.
 
-```text
-Text.reverse("héllo")  ->  o l l \251 \303 h
-```
-
-`é` went in as `\303\251` and came out as `\251\303`, which is not valid UTF-8.
-ASCII-only input is unaffected (`Text.reverse("ab")` is `ba`), so this only bites
-once someone stores a non-ASCII name, and then it corrupts the value silently.
-
-The same byte/character confusion would affect `Text.repeatText`, `padLeft` /
-`padRight` widths, and `startsWith` / `endsWith` when the prefix ends mid-character,
-though only `length`, `charAt`, `substring`, `indexOf` and `reverse` were
-directly verified.
-
-Two smaller notes found in the same pass:
+Two smaller notes found in the same pass, still open:
 
 - `string` has no methods at all. `s.length()` fails with `cannot call method
   'length' on value of type string`; the `Text.length(s)` free-function form is
@@ -788,12 +807,26 @@ own.
 | F6 | `await Time.sleepAsync(...)` is a heap-use-after-free, crashes every run | **Confirmed** as a UAF - ASan trace above, 3/3 - and now **fixed**. The wording needs one correction: a normal build did not reliably segfault; it hung or exited silently, and the crash only showed under ASan. |
 | F7 | `Thread.start` unusable inline; an unused `var n = 5` in scope breaks it | **Confirmed**, with a refinement: it only bit closures that reference *no* variable, because those captured the whole scope. A closure that referenced a `Shared` was fine even with unused locals present. Now **fixed** (fix 5). |
 | F8 | `withLock` deadlocks; 2x50 fine, 2x100 hangs | **Confirmed** - `total=100` at 2x50 (5/5), 2x100 hangs (exit 124). One correction to the original report: the API is the instance method `counter.withLock(func() { ... })` (`builtin_library.cpp:663`), not a qualified `Shared.withLock(counter, f)` call - the latter does not compile. `Mutex.withLock` hangs at the same threshold, so this is the locked-closure path, not `Shared` (see O4). |
-| F9 | `log(3.14)` prints `3.1400000000000001` | **Confirmed.** Cosmetic, but it is the first double a beginner prints. |
+| F9 | `log(3.14)` prints `3.1400000000000001` | **Confirmed**, and now **fixed**. Cosmetic, but it is the first double a beginner prints - and the diagnosis in the examples was wrong: 17 digits is the *longest* decimal that round-trips, not the shortest. |
 
 F6 and F8 were not reachable at all before fix 1: `Shared<int>` could not be
 constructed, so no thread or lock example could even start. Both were re-verified
 after the fix. F6 and F7 have since been fixed (fixes 3 and 5), and F8 was closed
-by the later safepoint work described above. F9 remains open.
+by the later safepoint work described above.
+
+F9 was the printer, not the arithmetic. `valueToString` formatted every double
+with `std::setprecision(std::numeric_limits<double>::max_digits10)` - 17
+significant digits, which is round-trip safe but is the *longest* spelling that
+reads back as the same binary double. It is now the shortest one
+(`doubleToShortestString`, `src/vm/value.cpp`), so `log(3.14)` prints `3.14`,
+`Math.PI` prints `3.141592653589793`, and `0.1 + 0.2` still prints
+`0.30000000000000004` because that digit really is there. Nothing was lost:
+`String.toFloat` of the printed form returns the identical double. The JSON
+encoder now shares the one formatter instead of carrying its own
+`setprecision(17)`, so a value cannot be serialized with more digits than `log`
+shows for it. Pinned by `tests/zl/valid/language_hardening_tests/DoubleFormatting.zl`
+under all four backends (`tests/double_format_parity.py`, ctest
+`double-format-parity`); `DataTypes.zl` and `MathLib.zl` expected output updated.
 
 ## Three features that existed but were documented nowhere
 

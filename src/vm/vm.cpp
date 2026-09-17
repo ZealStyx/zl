@@ -16,11 +16,46 @@
 
 #include "zl/vm/native.hpp"
 #include "zl/vm/runtime_task.hpp"
+#include "zl/common/type_name.hpp"
 #include <algorithm>
 #include <unordered_set>
 
 namespace zl {
 namespace {
+
+RuntimeTypeBindings methodTypeArgBindings(const Chunk& chunk, std::size_t operand,
+                                          const std::vector<std::string>& typeParameters) {
+    RuntimeTypeBindings extra;
+    if (operand == 0 || typeParameters.empty()) return extra;
+    if (operand > chunk.names.size()) return extra;
+    const std::string& joined = chunk.names[operand - 1];
+    std::vector<std::string> names;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i <= joined.size(); ++i) {
+        if (i == joined.size() || joined[i] == ';') {
+            names.push_back(joined.substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    const std::size_t n = std::min(names.size(), typeParameters.size());
+    for (std::size_t i = 0; i < n; ++i) extra[typeParameters[i]] = names[i];
+    return extra;
+}
+
+bool typeNameMentionsUnbound(const TypeName& name, const std::vector<std::string>& params,
+                             const RuntimeTypeBindings& bindings) {
+    if (std::find(params.begin(), params.end(), name.name) != params.end() &&
+        bindings.find(name.name) == bindings.end()) {
+        return true;
+    }
+    for (const auto& arg : name.args) {
+        if (typeNameMentionsUnbound(arg, params, bindings)) return true;
+    }
+    for (const auto& member : name.unionMembers) {
+        if (typeNameMentionsUnbound(member, params, bindings)) return true;
+    }
+    return false;
+}
 
 std::string formatStackTrace(const ExecutionState* state, const char* fallback) {
     std::string trace;
@@ -171,7 +206,8 @@ void VM::appendNativeRoots(std::vector<Value>& roots) const {
 ExecutionState::CallFrame VM::makeCallFrame(const Chunk& chunk, const FunctionInfo& fn,
                                               const std::vector<Value>& args,
                                               const std::optional<Value>& receiver,
-                                              const ClosureRef& closure) const {
+                                              const ClosureRef& closure,
+                                              RuntimeTypeBindings extraBindings) const {
     if (args.size() != fn.paramNames.size()) {
         throw std::runtime_error("VM: function '" + fn.name + "' argument count mismatch");
     }
@@ -191,6 +227,8 @@ ExecutionState::CallFrame VM::makeCallFrame(const Chunk& chunk, const FunctionIn
     } else if (state_.inFunction() && state_.currentFrame().ownerClassName == fn.ownerClassName) {
         frame.typeBindings = state_.typeBindings();
     }
+    for (const auto& [k, v] : extraBindings) frame.typeBindings[k] = v;
+    frame.typeParameters = fn.typeParameters;
     frame.returnTypeName = substituteTypeParams(fn.returnTypeName, frame.typeBindings);
     RuntimeTypeCheck types(&chunk);
     for (std::size_t i = 0; i < args.size(); ++i) {
@@ -851,7 +889,18 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 if (instr.operand >= chunk.names.size()) {
                     throw std::runtime_error("VM: AssertType name index out of bounds");
                 }
-                const std::string expected = substituteTypeParams(chunk.names[instr.operand], state_.typeBindings());
+                const std::string& rawExpected = chunk.names[instr.operand];
+                if (state_.inFunction()) {
+                    const auto& frame = state_.currentFrame();
+                    if (!frame.typeParameters.empty() &&
+                        typeNameMentionsUnbound(parseTypeName(rawExpected), frame.typeParameters,
+                                                frame.typeBindings)) {
+                        state_.push(value);
+                        ++ip;
+                        break;
+                    }
+                }
+                const std::string expected = substituteTypeParams(rawExpected, state_.typeBindings());
                 RuntimeTypeCheck types(&chunk);
                 if (!types.check(value, expected)) {
                     throwTypeError("type assertion failed: expected " + expected + ", got " + runtimeValueTypeName(value));
@@ -938,7 +987,8 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 if (!fn.isStatic) {
                     if (const Value* self = state_.findLocal("this")) receiver = *self;
                 }
-                auto frame = makeCallFrame(chunk, fn, args, receiver);
+                auto extra = methodTypeArgBindings(chunk, instr.operand2, fn.typeParameters);
+                auto frame = makeCallFrame(chunk, fn, args, receiver, {}, std::move(extra));
                 if (fn.isAsync) {
                     auto task = scheduleAsyncInvocation(shareActiveChunk(), instr.operand, std::move(frame));
                     if (!state_.inFunction() && !entryTask_) entryTask_ = task;
@@ -1252,7 +1302,8 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                         "VM: method '" + fn.name + "' expects " + std::to_string(fn.paramNames.size()) +
                         " argument(s), got " + std::to_string(argCount));
                 }
-                auto frame = makeCallFrame(chunk, fn, args, object);
+                auto extra = methodTypeArgBindings(chunk, instr.operand3, fn.typeParameters);
+                auto frame = makeCallFrame(chunk, fn, args, object, {}, std::move(extra));
                 if (fn.isAsync) {
                     auto task = scheduleAsyncInvocation(shareActiveChunk(), functionIndex, std::move(frame));
                     state_.push(task);
@@ -1287,7 +1338,8 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                         " argument(s), got " + std::to_string(argCount));
                 }
 
-                auto frame = makeCallFrame(chunk, fn, args, object);
+                auto extra = methodTypeArgBindings(chunk, instr.operand3, fn.typeParameters);
+                auto frame = makeCallFrame(chunk, fn, args, object, {}, std::move(extra));
                 if (fn.isAsync) {
                     auto task = scheduleAsyncInvocation(shareActiveChunk(), instr.operand, std::move(frame));
                     state_.push(task);

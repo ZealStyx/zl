@@ -192,6 +192,17 @@ The test suite asserts the invariants the split exists to guarantee: no register
 is both caller- and callee-saved, and no allocatable register overlaps the
 encoder's scratch set.
 
+**The shadow space is real on System V, too.** Both x86-64 conventions mandate
+32 bytes of it (System V: PSABI 3.2.2 — at the moment a `call` executes, the
+top 32 bytes of the caller's frame are scratch a C-compiled callee may spill
+into; Win64: the ABI's shadow space). This was recorded as 0 for System V and
+asserted as such by a test; that was wrong, and it is fixed in both places.
+Every function that calls therefore reserves at least `shadowSpace` in its
+frame. The reservation is not observable today — emitted callees never write
+the shadow (they touch only their own frame), and the tier emits no runtime
+calls or stack arguments yet — but it is what makes a future `CallRuntime`
+callee from the C world safe instead of a saved-rbp clobber.
+
 Arguments beyond the register set are refused rather than mis-placed; stack
 argument passing is a stated gap, not an unstated one.
 
@@ -232,17 +243,39 @@ Deliberately small, and complete for what it claims:
 
 Correctness details that are tested rather than assumed:
 
+* **Integer `+ - *` and negation are fail-closed.** The VM throws a catchable
+  `ArithmeticError` when the result is unrepresentable; this tier has no unwind
+  tables, so the emitted code branches to a trap (`ud2` → SIGILL) on the
+  overflow flag instead of wrapping. `INT64_MAX + 1`, `INT64_MIN - 1`,
+  `INT64_MAX * 2` and `negate(INT64_MIN)` are all test cases, and their healthy
+  neighbours (`1 << 63`, `INT64_MIN / 1`, `negate(INT64_MAX)`) run in the parent
+  process, because the checks must not fire on representable results.
 * **Integer division truncates toward zero** and the remainder takes the sign of
   the dividend, matching ZL. A zero divisor branches to a trap instead of
-  executing `idiv`, whose `#DE` this tier has no handler for.
-* **`>>` is arithmetic and `>>>` is logical**, as in the language.
+  executing `idiv`, whose `#DE` this tier has no handler for. `INT64_MIN / -1`
+  — the quotient that does not fit — traps the same way; `INT64_MIN % -1` is
+  the exception: the VM defines it as `0`, so the emitted code computes it
+  rather than trapping.
+* **`>>` is arithmetic and `>>>` is logical**, as in the language, and
+  **shift counts are checked**: the VM rejects counts outside `0..63`, while
+  x86 would silently mask the count to its low six bits — `1 << 64` would
+  compute `1 << 0`. The emitted code traps on both ends; one unsigned compare
+  covers them, because a negative count is a huge unsigned number.
 * **Float comparison is IEEE-754 ordered.** `ucomisd` sets CF, ZF and PF all to
   1 for an unordered operand, so the "less" forms additionally require PF=0,
   equality excludes unordered, and inequality includes it. `NaN != NaN` is true,
   `NaN < 1.0` is false, and `0.0 == -0.0` is true — all three are test cases,
   because a single naive `setcc` gets each of them wrong.
+* **Float results are checked.** `fdiv` traps on a zero divisor (IEEE would
+  emit an infinity, which the language has no room for), and every float
+  operation traps when its result is not finite. A double is non-finite exactly
+  when its exponent field (bits 62..52) is all ones; that is the check, and it
+  runs through GPRs without disturbing the register the result lives in.
 * **`FNeg` flips the sign bit through a GPR**, which is exact for zeros,
-  infinities and NaNs alike.
+  infinities and NaNs alike — and checks its result, so a non-finite input
+  traps instead of entering the tier. Combined with the producer checks above,
+  a non-finite double never exists in native code: every path that could create
+  one is a trap.
 
 Register assignment is the simplest correct policy: every vreg gets a frame
 slot, and each instruction loads its operands into the convention's scratch
@@ -305,8 +338,10 @@ end-to-end cases that lower real ZL source through the real front end.
 ## What is deliberately missing
 
 Named so that no one has to discover them by reading the code: register
-allocation, stack argument passing, a GC map and safepoints, unwind tables,
-object layout and field access, string and collection operations, closures,
-generic instantiation, jump tables for `switch`, an object-file or JIT writer
-(the emitter produces bytes plus relocations and stops there), and any target
-other than x86-64 System V.
+allocation, stack argument passing, a GC map and safepoints, unwind tables
+(hence an arithmetic fault in natively executed code is a SIGILL trap, not a
+catchable `ArithmeticError` — the VM remains the tier where those are
+catchable), object layout and field access, string and collection operations,
+closures, generic instantiation, jump tables for `switch`, an object-file or
+JIT writer (the emitter produces bytes plus relocations and stops there), and
+any target other than x86-64 System V.

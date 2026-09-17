@@ -102,9 +102,11 @@ void testConstantInterning() {
     require(module.internConstant(doubleConstant(1.0)) != one, "int 1 and double 1.0 shared a slot");
     require(module.internConstant(boolConstant(true)) != one, "int 1 and bool true shared a slot");
     require(module.internConstant(nilConstant()) != one, "int 1 and nil shared a slot");
-    // -0.0 == 0.0, so they must intern together (the hash normalizes the sign).
-    require(module.internConstant(doubleConstant(-0.0)) == module.internConstant(doubleConstant(0.0)),
-            "-0.0 and 0.0 did not share a constant slot");
+    // IEEE == treats -0.0 and +0.0 as equal, but they are observably different
+    // (sign of 1.0/x, printed form). Pool identity is bitwise, matching
+    // Constant::operator==, so they must not share a slot.
+    require(module.internConstant(doubleConstant(-0.0)) != module.internConstant(doubleConstant(0.0)),
+            "-0.0 and +0.0 shared a constant slot");
     // Ids are dense 1-based positions into Module::constants.
     require(module.constants.size() == module.constantIndex.size(), "constant index drifted from the pool");
     for (const auto& entry : module.constantIndex) {
