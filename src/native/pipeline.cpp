@@ -51,6 +51,13 @@ PipelineResult compileMirToNative(const zl::mir::Module& module, const TargetMac
 
     if (result.lir.functions.empty()) return result; // nothing to encode; not an error
 
+    // Selection succeeded. A host whose target is described but has no encoder
+    // (Win64 today) must not become a pipeline error: emitting SysV bytes
+    // under a Windows name would silently miscompile every call, which is why
+    // `encoderAvailable()` exists. The documented outcome is the native IR
+    // without bytes - the same result `selectOnly` asks for.
+    if (!target.encoderAvailable()) return result;
+
     auto emitted = emitModule(result.lir, target);
     if (!emitted.success) {
         result.error = emitted.error;

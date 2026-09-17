@@ -2,6 +2,7 @@
 """Non-executing safety CLI, source provenance, and evaluation aggregation tests."""
 import importlib.util
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -36,9 +37,11 @@ def main():
         code, report = observe(file)
         assert code == 1 and report["layers"]["parsing"] == "rejected", report
         # Filename contains JSON metacharacters and the diagnostic originates
-        # in an imported module, not the entry file or a builtin.
-        support = folder / 'support"quoted'
-        support.mkdir()
+        # in an imported module, not the entry file or a builtin. Windows
+        # cannot put a quote in a path, so use a backslash there (also a JSON
+        # metacharacter) instead.
+        support = folder / ('support"quoted' if os.name != "nt" else r"support\quoted")
+        support.mkdir(parents=True)
         helper = folder / "Helper.zl"
         helper.write_text("class Helper {\n public static func checked(unknown value): int { return value }\n}\n")
         file.write_text("import Helper\nclass Entry { func main(): void { log(Helper.checked(1)) } }\n")
