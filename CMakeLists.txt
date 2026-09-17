@@ -654,6 +654,15 @@ if(BUILD_TESTING)
             ${CMAKE_SOURCE_DIR}/tests/backend_fold_parity.py $<TARGET_FILE:zl_language>)
         set_tests_properties(backend-fold-parity PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endif()
+    # Double-format parity: the same fixture under the same four configs, for
+    # the other half of the printing contract - a double renders as its shortest
+    # round-trip decimal, and every surface that renders one agrees.
+    find_program(ZL_FORMAT_PYTHON NAMES python3)
+    if(ZL_FORMAT_PYTHON)
+        add_test(NAME double-format-parity COMMAND ${ZL_FORMAT_PYTHON}
+            ${CMAKE_SOURCE_DIR}/tests/double_format_parity.py $<TARGET_FILE:zl_language>)
+        set_tests_properties(double-format-parity PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endif()
 endif()
 
 # --- Platform link-requirement guard ----------------------------------------

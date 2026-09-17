@@ -171,6 +171,7 @@ Full syntax and semantics: **[docs/language-guide.md](docs/language-guide.md)**.
 | [docs/development.md](docs/development.md) | Build details, stdlib lookup, testing, packaging |
 | [examples/](examples/README.md) | 46 runnable examples, basics through async, each with verified output |
 | [examples/REVIEW.md](examples/REVIEW.md) | Bugs found while writing them, fixed and open |
+| [TASKS.md](TASKS.md) | The open work list: what is left, what it would take, and what is already stale |
 | [docs/changelog.md](docs/changelog.md) | Dated development checkpoints by phase |
 
 The memory-model direction — ownership combined with tracing GC, GC-managed and
