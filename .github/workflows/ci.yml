@@ -100,7 +100,7 @@ jobs:
             # Do not grep every `Test #N` progress line. CTest pads `Test  #1`
             # vs `Test #10`, GitHub keeps ten annotations per step, and leftover
             # failures then hide behind a window of passing tests.
-            grep -hE '\*\*\*(Failed|Exception|Timeout)|The following tests FAILED|[0-9]+ tests failed out of|Errors while running CTest' ctest.log 2>/dev/null | head -40 || true
+            grep -hE '\*\*\*(Failed|Exception|Timeout)|^FAIL:|The following tests FAILED|[0-9]+ tests failed out of|Errors while running CTest' ctest.log 2>/dev/null | head -40 || true
             awk '/The following tests FAILED/,/^[[:space:]]*$/' ctest.log 2>/dev/null | head -40 || true
             grep -hE 'error:|error C[0-9]+|fatal error' build.log 2>/dev/null | head -25 || true
           } > failures.txt
@@ -174,7 +174,7 @@ jobs:
             # Do not grep every `Test #N` progress line. CTest pads `Test  #1`
             # vs `Test #10`, GitHub keeps ten annotations per step, and leftover
             # failures then hide behind a window of passing tests.
-            grep -hE '\*\*\*(Failed|Exception|Timeout)|The following tests FAILED|[0-9]+ tests failed out of|Errors while running CTest' ctest.log 2>/dev/null | head -40 || true
+            grep -hE '\*\*\*(Failed|Exception|Timeout)|^FAIL:|The following tests FAILED|[0-9]+ tests failed out of|Errors while running CTest' ctest.log 2>/dev/null | head -40 || true
             awk '/The following tests FAILED/,/^[[:space:]]*$/' ctest.log 2>/dev/null | head -40 || true
             grep -hE 'error:|error C[0-9]+|fatal error' build.log 2>/dev/null | head -25 || true
           } > failures.txt
@@ -252,7 +252,7 @@ jobs:
             # Do not grep every `Test #N` progress line. CTest pads `Test  #1`
             # vs `Test #10`, GitHub keeps ten annotations per step, and leftover
             # failures then hide behind a window of passing tests.
-            grep -hE '\*\*\*(Failed|Exception|Timeout)|The following tests FAILED|[0-9]+ tests failed out of|Errors while running CTest' ctest.log 2>/dev/null | head -40 || true
+            grep -hE '\*\*\*(Failed|Exception|Timeout)|^FAIL:|The following tests FAILED|[0-9]+ tests failed out of|Errors while running CTest' ctest.log 2>/dev/null | head -40 || true
             awk '/The following tests FAILED/,/^[[:space:]]*$/' ctest.log 2>/dev/null | head -40 || true
             grep -hE 'error:|error C[0-9]+|fatal error' build.log 2>/dev/null | head -25 || true
           } > failures.txt

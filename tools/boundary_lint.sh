@@ -51,6 +51,10 @@ scan() {
     done < <("$@" 2>/dev/null)
 
     local file match content
+    # bash 3.2 (macOS /bin/bash) errors on "${arr[@]}" under `set -u` when empty.
+    if [ "${#files[@]}" -eq 0 ]; then
+        return 0
+    fi
     for file in "${files[@]}"; do
         [ -f "$file" ] || continue
         checked=$((checked + 1))
@@ -72,8 +76,10 @@ scan() {
 # may not see the AST, the parser, the type checker, the module loader, the
 # pipeline that drives them, or the legacy IR.
 backend_files() {
-    ls src/native/*.cpp include/zl/native/*.hpp \
-       src/mir/vm_backend.cpp include/zl/mir/vm_backend.hpp 2>/dev/null
+    # find, not ls-with-globs: unmatched globs stay literal on bash 3.2.
+    find src/native include/zl/native src/mir include/zl/mir \
+        \( -name "*.cpp" -o -name "*.hpp" \) 2>/dev/null \
+        | grep -E "(^|/)(src/native/|include/zl/native/|src/mir/vm_backend\.cpp$|include/zl/mir/vm_backend\.hpp$)"
 }
 
 # --- rule 1: a backend reads MIR and nothing else ---------------------------
