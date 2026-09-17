@@ -822,12 +822,26 @@ own.
 | F6 | `await Time.sleepAsync(...)` is a heap-use-after-free, crashes every run | **Confirmed** as a UAF - ASan trace above, 3/3 - and now **fixed**. The wording needs one correction: a normal build did not reliably segfault; it hung or exited silently, and the crash only showed under ASan. |
 | F7 | `Thread.start` unusable inline; an unused `var n = 5` in scope breaks it | **Confirmed**, with a refinement: it only bit closures that reference *no* variable, because those captured the whole scope. A closure that referenced a `Shared` was fine even with unused locals present. Now **fixed** (fix 5). |
 | F8 | `withLock` deadlocks; 2x50 fine, 2x100 hangs | **Confirmed** - `total=100` at 2x50 (5/5), 2x100 hangs (exit 124). One correction to the original report: the API is the instance method `counter.withLock(func() { ... })` (`builtin_library.cpp:663`), not a qualified `Shared.withLock(counter, f)` call - the latter does not compile. `Mutex.withLock` hangs at the same threshold, so this is the locked-closure path, not `Shared` (see O4). |
-| F9 | `log(3.14)` prints `3.1400000000000001` | **Confirmed.** Cosmetic, but it is the first double a beginner prints. |
+| F9 | `log(3.14)` prints `3.1400000000000001` | **Confirmed**, and now **fixed**. Cosmetic, but it is the first double a beginner prints - and the diagnosis in the examples was wrong: 17 digits is the *longest* decimal that round-trips, not the shortest. |
 
 F6 and F8 were not reachable at all before fix 1: `Shared<int>` could not be
 constructed, so no thread or lock example could even start. Both were re-verified
 after the fix. F6 and F7 have since been fixed (fixes 3 and 5), and F8 was closed
-by the later safepoint work described above. F9 remains open.
+by the later safepoint work described above.
+
+F9 was the printer, not the arithmetic. `valueToString` formatted every double
+with `std::setprecision(std::numeric_limits<double>::max_digits10)` - 17
+significant digits, which is round-trip safe but is the *longest* spelling that
+reads back as the same binary double. It is now the shortest one
+(`doubleToShortestString`, `src/vm/value.cpp`), so `log(3.14)` prints `3.14`,
+`Math.PI` prints `3.141592653589793`, and `0.1 + 0.2` still prints
+`0.30000000000000004` because that digit really is there. Nothing was lost:
+`String.toFloat` of the printed form returns the identical double. The JSON
+encoder now shares the one formatter instead of carrying its own
+`setprecision(17)`, so a value cannot be serialized with more digits than `log`
+shows for it. Pinned by `tests/zl/valid/language_hardening_tests/DoubleFormatting.zl`
+under all four backends (`tests/double_format_parity.py`, ctest
+`double-format-parity`); `DataTypes.zl` and `MathLib.zl` expected output updated.
 
 ## Three features that existed but were documented nowhere
 

@@ -106,8 +106,10 @@ up here immediately.
 
 Two formatting details to know before you read a diff:
 
-- **Doubles print at full round-trip precision.** `log(3.14)` prints
-  `3.1400000000000001`, and `Math.PI` prints `3.1415926535897931`. This is the
-  shortest decimal that reads back as the same binary double, not a rounding
-  bug - but it is surprising the first time you see it.
+- **Doubles print as the shortest decimal that reads back as the same binary
+  double.** `log(3.14)` prints `3.14` and `Math.PI` prints `3.141592653589793`,
+  while `log(0.1 + 0.2)` prints `0.30000000000000004` - that last digit is
+  really there, not a rounding bug. A whole-valued double prints without a
+  fraction (`log(7.0)` is `7`), and a magnitude outside the plain-decimal range
+  prints in scientific form (`1e+21`, `1e-07`).
 - **`bool` prints lowercase**, as `true` / `false`.
