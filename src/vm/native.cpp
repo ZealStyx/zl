@@ -2793,9 +2793,10 @@ std::string toJsonInner(const Value& v, std::unordered_set<const void*>& active,
     if (auto p = std::get_if<std::int64_t>(&v)) return std::to_string(*p);
     if (auto p = std::get_if<double>(&v)) {
         if (!std::isfinite(*p)) throw std::runtime_error("Serialize.encode: non-finite number");
-        std::ostringstream o;
-        o << std::setprecision(17) << *p;
-        return o.str();
+        // Same spelling the printer uses: shortest decimal that reads back as
+        // the same double. A value must not be serialized with more digits than
+        // `log` shows for it.
+        return doubleToShortestString(*p);
     }
     if (auto p = std::get_if<std::string>(&v)) return jsonEscape(*p);
     if (auto p = std::get_if<ListRef>(&v)) {

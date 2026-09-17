@@ -66,6 +66,18 @@ and treat large non-string-keyed maps as small collections.
 floating point, with all the usual binary fraction rounding — `0.1 + 0.2 != 0.3`.
 There is no decimal-fixed type yet.
 
+**A `double` prints as the shortest decimal that reads back as the same value.**
+`log(3.14)` prints `3.14`, and `log(0.1 + 0.2)` prints `0.30000000000000004` — that
+last digit is really there, so nothing is rounded away for appearance.
+`String.toFloat` of any printed form returns the identical double, and
+`Serialize.encode` uses the same spelling, so a value never has two
+representations. Two consequences to expect in output: a whole-valued double
+prints without a fraction (`log(1.0)` is `1`, `log(-0.0)` is `-0`), and a
+magnitude outside the plain-decimal range prints in scientific form (`1e+21`,
+`1e-07`). There is no printf-style precision specifier yet: round with
+`Math.round` and align with `Text.padLeft` when a column of numbers has to line
+up.
+
 **`string` has no ordering operator.** `<`, `<=`, `>`, `>=` do not work on strings;
 only `==` and `!=` do. (Comparison fails at runtime inside `sort` comparators, not at
 compile time — compare with an explicit key or `String.compare` instead.)
