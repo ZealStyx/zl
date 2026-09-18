@@ -2,6 +2,108 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-18 - `match` destructures `Option`/`Result`, and a value-less `match` is a statement (P1-1, P0)
+
+```zl
+static func report(Result<int, string> r): string {
+    return match r { Ok v => "ok " + v.value  Err e => "err " + e.error }
+}
+
+match n { 1 => log("one")  _ => log("other") }   // no value: a statement
+```
+
+`match` could not pattern-match the two built-in sums at all, although the three
+exhaustiveness rules the language wanted for them existed as unreachable code.
+`Ok v` was rejected by the resolver (`generic type 'Ok' requires 2 type
+argument(s)`) and `Ok<int, string> v` passed the pattern test and then failed the
+exhaustiveness subtraction with `uncovered Result<int,string>` - no case pattern
+could ever cover a member that was the parent class. Both are fixed:
+
+- **A built-in sum subject is read as its case set.** `TypeChecker::builtinSumCases`
+  returns `Some<T>|None<T>` for `Option<T>` and `Ok<T,E>|Err<T,E>` for
+  `Result<T,E>` (verified against `SemanticModel::directSubclasses`, which is new),
+  and `inferMatchExpr` seeds `remaining` with the cases instead of the parent. A
+  case pattern erases its case, so covering both is exhaustive and a missing case
+  is reported by name (`non-exhaustive match: uncovered Err<int,string>`).
+- **Omitted pattern arguments are filled from the subject.**
+  `TypeChecker::fillTypePatternArgs` walks the case's parent chain and inverts
+  `Ok<T,E> extends Result<T,E>` into concrete arguments, writing them back into
+  the arm's annotation - the same write-back positional data patterns already get,
+  so the checker, the AST compiler and the MIR lowerer all see one spelled-out
+  type. `Ok v` and `Ok<int, string> v` compile to the same program.
+- **`None` and `Err` name their case in pattern position** instead of binding a
+  variable called `None` (a `Variable` pattern whose spelling is one of the
+  subject's cases becomes that case pattern). Expression position is unaffected.
+- **Nil is not a case.** The implicit nil member is not added for a sum, so no
+  `null` arm is required; a nil subject matches no arm and hits the lowering's
+  unmatched path, which raises the catchable `Exception("non-exhaustive
+  match")`. A `null` arm or a wildcard is allowed and reachable, never required -
+  the arm-loop's "subject is already covered" check exempts them.
+- **A pattern naming the sum itself covers its cases** when the arguments agree
+  (`TypeChecker::typePatternCovers`): `match r { Result<int,string> whole => … }`
+  is exhaustive, and a case arm after it is unreachable. This is the same shape
+  the runtime's `reflectiveObjectMatches` accepts, so the static and dynamic
+  readings cannot disagree.
+- **`isAssignable` is untouched.** The widening REVIEW.md O21 warned against is
+  not what this needed - the pattern test already passed; only coverage did not.
+- **A reopened hierarchy stays open.** `class Mine extends Result<int,string>`
+  makes `directSubclasses` more than the two cases, so the plain pair stops being
+  exhaustive for that program (pinned by an invalid fixture).
+- **Separately: a `match` whose arms produce no value was refused by MIR.** Every
+  arm being a `log`/assignment made the match void-typed, and the lowering still
+  declared a void result slot, stored the nil constant into it and loaded it back:
+  six `mir.type-flow` contract violations for a program the AST backend ran. The
+  slot, the stores and the load now exist only when the match has a result
+  (`kNoSlot`, new in `include/zl/mir/value.hpp`).
+
+Gates: `tests/zl/valid/language_hardening_tests/OptionResultMatch.zl` (both
+spellings, both sums, guards, a `null` arm, a catch-all, a nil subject raising
+catchably and a value-less `match`) under MIR, `ZL_COMPILER=ast`, `ZL_MIR_OPT=0`
+and `--backend native`, wired into `ctest` as `sum-match-parity` via
+`tests/sum_match_parity.py`; `tests/zl/invalid/type_errors/IncompleteSumMatch.zl`
+and `OpenSumMatch.zl` pin the two diagnostics; `examples/advanced/OptionType.zl`
+and `ResultType.zl` now demonstrate the case patterns in place of
+`if (r.isOk())`. See [docs/language-guide.md](language-guide.md#matching-a-sum).
+
+## 2026-09-18 - `list`, `set` and `map` are names where no type can appear (P1-4)
+
+```zl
+var list = [1, 2]              // was: syntax error: Expected variable name -- got "list"
+Collection.push(list, 3)
+list = [4, 5]
+for set in 0..3 { }
+
+list<int> order = [1, 2]       // the type readings are untouched
+map<string, int> counts = {}
+set<int> unique = {}
+```
+
+The lexer runs without context, so `list`/`set`/`map` arrived as type keywords and
+were reserved everywhere: `var list = new List<int>()` was refused with no
+escaping hatch. They are now contextual names, the way `shared` already was:
+
+- `Parser::checkName` / `expectName` accept the three spellings in every name
+  position - `var`/`let`, the name of a typed declaration, function/lambda
+  parameters, fields, loop variables and catch variables.
+- `Parser::looksLikeTypedDeclStart` decides statement position by lookahead: a
+  statement is a typed declaration only when a complete type annotation is
+  followed by a name, so `list<int> xs = []` declares while `list = []`,
+  `list.push(1)` and `list.length()` use the variable. The same rule now accepts
+  `int list = 3`, where the *name* is the keyword.
+- `ExpressionParser::parsePrimary` reads the three spellings as identifiers (no
+  type can appear in expression position), so a variable called `list` can be
+  passed, assigned, indexed and used as a method receiver.
+
+Function and method *names* remain identifiers, so the `Map.put` naming note
+stands. A token sequence that spells both readings (`list < n > x`) is read as
+the declaration, exactly as it already is for a user-defined generic type.
+
+Gates: `tests/zl/valid/language_hardening_tests/ContextualNames.zl` covers the
+type readings, variables, fields, typed declarations, parameters, loop variables,
+catch variables, lambda parameters and statement-position method calls, under
+MIR, `ZL_COMPILER=ast`, `ZL_MIR_OPT=0` and `--backend native`. See
+[docs/language-guide.md](language-guide.md#naming-and-the-collection-keywords).
+
 ## 2026-09-18 - `string` has methods, and they are the `String.*` natives (P1-3)
 
 ```zl

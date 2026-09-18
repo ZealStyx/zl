@@ -94,6 +94,11 @@ public:
 
     [[nodiscard]] const std::string& parentClassName(const std::string& name) const;
     [[nodiscard]] bool isSubclassOf(const std::string& className, const std::string& ancestorName) const;
+    // Every declared class whose direct parent is `className`, by name and in a
+    // stable order. The model owns the parent links, so callers that reason
+    // about a complete case set (built-in sum exhaustiveness) never re-derive
+    // the hierarchy by scanning shapes themselves.
+    [[nodiscard]] std::vector<std::string> directSubclasses(const std::string& className) const;
     [[nodiscard]] bool interfaceExtends(const std::string& interfaceName, const std::string& ancestorName) const;
     [[nodiscard]] bool implementsInterface(const std::string& className, const std::string& interfaceName) const;
     [[nodiscard]] const ClassFieldInfo* findFieldInHierarchy(

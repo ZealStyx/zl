@@ -1,0 +1,19 @@
+// Regression fixture - invalid/type_errors - IncompleteSumMatch
+//
+// Now that a built-in sum is read as its case set, exhaustiveness is enforced
+// over that set: `Result<T,E>` needs both `Ok` and `Err`, `Option<T>` needs
+// both `Some` and `None`. A single case always reports the missing case by
+// name ("uncovered Err<int,string>") rather than falling through to a runtime
+// "non-exhaustive match" the user meets at the keyboard.
+
+class IncompleteSumMatch {
+    static func describe(Result<int, string> r): string {
+        return match r {
+            Ok v => "ok"
+        }
+    }
+
+    func main(): void {
+        log(IncompleteSumMatch.describe(new Ok<int, string>(1)))
+    }
+}

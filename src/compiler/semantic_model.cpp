@@ -159,6 +159,16 @@ const ClassMethodInfo* SemanticModel::findExactMethodInHierarchy(const std::stri
     return nullptr;
 }
 
+std::vector<std::string> SemanticModel::directSubclasses(const std::string& className) const {
+    std::vector<std::string> children;
+    if (className.empty()) return children;
+    for (const auto& [name, shape] : classes_) {
+        if (shape.parentName == className) children.push_back(name);
+    }
+    std::sort(children.begin(), children.end());
+    return children;
+}
+
 bool SemanticModel::isSubclassOf(const std::string& className, const std::string& ancestorName) const {
     std::string cur = className;
     while (!cur.empty()) {

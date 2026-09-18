@@ -336,6 +336,33 @@ private:
     [[nodiscard]] bool isAssignable(ZlType from, ZlType to, const std::string& fromClassName = "",
                                      const std::string& toClassName = "") const;
 
+    // The standard library's two sum types are closed: `Option<T>` is exactly
+    // `Some<T> | None<T>` and `Result<T,E>` is exactly `Ok<T,E> | Err<T,E>`.
+    // A match that covers every case covers the subject, so `match` reasons
+    // about these subjects as their case set rather than as their parent class
+    // (which no single case pattern can cover). Every other hierarchy stays
+    // open: a subclass arm never makes its parent look exhaustive, because a
+    // third subclass could still appear. Returns the concrete case types for a
+    // parameterized subject (`Result<int,string>` -> `Ok<int,string>`,
+    // `Err<int,string>`), or empty when the class is not one of the two
+    // built-in sums or a registered subclass has made it open again.
+    [[nodiscard]] std::vector<ResolvedTypeArg> builtinSumCases(const std::string& subjectClassName) const;
+
+    // True when a type pattern naming the resolved class `patternClass` matches
+    // every value of `member`. Assignability is the general rule; on top of it,
+    // a pattern naming an ancestor class whose arguments agree covers the case:
+    // `Result<int,string>` covers `Ok<int,string>`, which is exactly what the
+    // runtime's base-class walk accepts (reflectiveObjectMatches).
+    [[nodiscard]] bool typePatternCovers(const ResolvedTypeArg& member, ZlType patternType,
+                                          const std::string& patternClass) const;
+
+    // `Ok v` on a `Result<int,string>` subject: a generic type pattern may omit
+    // the arguments the subject already fixes. Writes the concrete arguments
+    // into `pattern` when every one of the class's parameters can be read off
+    // the subject's instantiation, and leaves it untouched otherwise (the
+    // resolver then reports the missing arguments exactly as it does today).
+    void fillTypePatternArgs(TypeAnnotation& pattern, const std::string& subjectClassName) const;
+
     // Emits a TypeCheckError with a formatted message including the line number.
     [[noreturn]] static void typeError(const std::string& message, std::size_t line);
 

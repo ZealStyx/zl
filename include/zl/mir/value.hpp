@@ -52,6 +52,7 @@ using StaticId = std::uint32_t;
 using BlockParamId = std::uint32_t;
 
 constexpr TempId kNoTemp = 0;
+constexpr SlotId kNoSlot = 0;
 constexpr BlockId kNoBlock = 0;
 constexpr ConstId kNoConst = 0;
 constexpr FunctionId kNoFunction = 0;

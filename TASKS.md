@@ -39,9 +39,9 @@ The three with the best value-to-risk ratio right now:
 
 | # | Task | Why first |
 | --- | --- | --- |
-| [P1-1](#p1-1--match-cannot-pattern-match-option--result-reviewmd-o21) | `match` on `Option`/`Result` | The exhaustiveness rules already exist as dead code - scope `isAssignable` before starting |
-| [P1-4](#p1-4--list--map--set-cannot-be-variable-names) | `list`/`map`/`set` as names | Either the lexer learns context, or the restriction gets documented where it is hit |
-| [P2-9](#p2-9--an-empty-literal-in-argument-position-still-has-nothing-to-declare-it) | `countEntries({})` | The last empty-literal hole, and it is the same expected-type plumbing P1-1 needs |
+| [P1-2](#p1-2--func-carries-no-signature-readme-researchcorpuslimitationsbarefuncparamzl) | `func` carries no signature | An arity mismatch is a runtime error and MIR records the parameter as `unknown`; compile-time checking has the bare-`func` compatibility escape hatch |
+| [P1-8](#p1-8--sharedt-is-shareable-not-thread-safe) | `Shared<T>` thread safety | The unsynchronised-increment loss is measured (2490 vs 4000); either confinement is checked or `share()` exists and the docs stop implying safety |
+| [P2-9](#p2-9--an-empty-literal-in-argument-position-still-has-nothing-to-declare-it) | `countEntries({})` | The last empty-literal hole, and the smallest piece of expected-type propagation left - P1-1 landed without it |
 
 ---
 
@@ -57,20 +57,6 @@ closed 2026-09-18 while writing the `Condition` fixture below) - are in
 
 ## P1 - promised capability, or a daily gap
 
-### P1-1 · `match` cannot pattern-match `Option` / `Result` ([REVIEW.md O21](examples/REVIEW.md))
-
-The exhaustiveness rules for exactly these subjects exist and are unreachable
-dead code; `ResultType.zl` / `OptionType.zl` use `if (r.isOk())` because it is
-the only option. Both spellings are rejected - `Ok v` before it gets anywhere
-(`generic type 'Ok' requires 2 type argument(s)`), `Ok<int,string> v` by the
-type-pattern test at `src/compiler/type_checker.cpp:3044`, which routes through
-`isAssignable`.
-
-**Done when** `match r { Ok v => … Err e => … }` compiles for a
-`Result<int,string>`, exhaustiveness is enforced, and a fixture covers the
-`Option` pair too. REVIEW.md is explicit that widening `isAssignable` touches
-every assignment in the language - scope it before starting.
-
 ### P1-2 · `func` carries no signature ([README](README.md#current-limitations), `research/corpus/limitations/BareFuncParam.zl`)
 
 A `func`-typed slot holds no parameter or return types, so an arity mismatch is
@@ -80,16 +66,6 @@ records the parameter as `unknown`.
 **Done when** a declared `func(int, string): bool` is checked at the call site at
 compile time, bare `func` keeps working for compatibility, and the README
 limitation is deleted.
-
-### P1-4 · `list` / `map` / `set` cannot be variable names
-
-`var list = new List<int>()` → `syntax error: Expected variable name -- got "list"`.
-Reserved as type spellings, with no escaping hatch.
-
-**Done when** either they are usable as identifiers where no type can appear
-(context-sensitive lexering, with a fixture for each ambiguity), or the
-restriction is stated in [docs/language-guide.md](docs/language-guide.md) next to
-the reserved-word list instead of being discovered at the keyboard.
 
 ### P1-6 · Native backend: not an execution driver, and a small subset
 
@@ -186,11 +162,12 @@ followed by `countEntries(empty)` compiles, while `countEntries({})` against
 [docs/language-guide.md](docs/language-guide.md#empty-literals) tells users to bind
 first; that is a workaround, not an answer.
 
-The real fix is expected-type propagation into call arguments, which is exactly the
-plumbing already scoped as P1-1 and as A1 in
-[TASKS_VERIFICATION.md](TASKS_VERIFICATION.md) - it should not be attempted as a
-one-off, and it must not disturb the non-empty `{1, 2}` case (TextLib.zl:61 relies on
-it being a variadic list).
+The real fix is expected-type propagation into call arguments - the plumbing scoped
+during P1-1 and recorded as A1 in
+[TASKS_VERIFICATION.md](TASKS_VERIFICATION.md). P1-1 landed without needing it, so
+this is now the first real consumer: it should not be attempted as a one-off, and it
+must not disturb the non-empty `{1, 2}` case (TextLib.zl:61 relies on it being a
+variadic list).
 
 **Done when** `countEntries({})` compiles against a `map<K,V>` parameter on all four
 configs, `Text.format("{0}", {1})` still passes a list, and
@@ -246,6 +223,37 @@ confirmed already fixed on 2026-09-17; see [Done](#done) and
 Most recent first. Kept briefly so the gates that cover each fix are findable,
 then deleted - [docs/changelog.md](docs/changelog.md) is the permanent record.
 
+- [x] **P1-1 · `match` cannot pattern-match `Option` / `Result`** - both
+  spellings were rejected (`Ok v` by the resolver, `Ok<int,string> v` by the
+  exhaustiveness subtraction, which reported `uncovered Result<int,string>` even
+  with every case covered) although the case rules existed as unreachable dead
+  code. A built-in sum subject is now read as its case set
+  (`TypeChecker::builtinSumCases` over the new
+  `SemanticModel::directSubclasses`), a case pattern's omitted arguments are
+  filled from the subject's (`fillTypePatternArgs`), `None`/`Err` name their case
+  in pattern position, nil is not a case (no `null` arm is required; a
+  `null`/wildcard arm is still reachable), and a pattern naming the sum covers
+  its cases (`typePatternCovers`, the static reading of the runtime's
+  `reflectiveObjectMatches`). `isAssignable` is untouched, so nothing outside
+  `match` moved; a reopened hierarchy (`class Mine extends Result<int,string>`)
+  falls back to the old report. Separately, a value-less `match` no longer
+  declares a void result slot, which had produced six `mir.type-flow` violations
+  for a program the AST backend ran fine. Gates:
+  `tests/zl/valid/language_hardening_tests/OptionResultMatch.zl` under MIR,
+  `ZL_COMPILER=ast`, `ZL_MIR_OPT=0` and `--backend native`, wired into `ctest` as
+  `sum-match-parity`; `tests/zl/invalid/type_errors/IncompleteSumMatch.zl` and
+  `OpenSumMatch.zl`; `examples/advanced/OptionType.zl` / `ResultType.zl` now use
+  the patterns.
+- [x] **P1-4 · `list` / `map` / `set` cannot be variable names** - the three
+  type spellings are contextual names now, the way `shared` already was: they
+  parse in every name position (`var`/`let`, the name of a typed declaration,
+  parameters, fields, loop variables, catch variables, lambda parameters) and as
+  identifiers in expression position, while statement position keeps one-token
+  lookahead so `list<int> xs = []` is still a declaration and `list = []` /
+  `list.push(1)` are statements about the variable. Function and method *names*
+  stay identifiers, so the `Map.put` naming note stands. Gate:
+  `tests/zl/valid/language_hardening_tests/ContextualNames.zl` under MIR,
+  `ZL_COMPILER=ast`, `ZL_MIR_OPT=0` and `--backend native`.
 - [x] **P1-3 · `string` has no methods** - `s.length()` was
   `cannot call method 'length' on value of type string` while every collection
   type was method-based. A method on a `string` now resolves to the `String.*`
