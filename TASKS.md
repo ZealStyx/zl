@@ -25,7 +25,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release           # once
 cmake --build build --config Release --target zl-tests   # core + every regression target
 (cd build && ctest -C Release)                           # 41 tests, includes both parity scripts
 examples/run_all.sh build/zl_language                    # 51 examples, byte-compared to their expected output
-bash scripts/run_regressions.sh build/zl_language all    # 57 fixtures under tests/zl
+bash scripts/run_regressions.sh build/zl_language all    # 59 fixtures under tests/zl
 bash scripts/native_gate.sh build/zl_language            # native tier gate
 ```
 
@@ -39,9 +39,9 @@ The three with the best value-to-risk ratio right now:
 
 | # | Task | Why first |
 | --- | --- | --- |
-| [P1-3](#p1-3--string-has-no-methods) | `string` methods | The most-felt daily gap, and it maps onto existing `String.*` natives - no second implementation |
-| [P1-4](#p1-4--list--map--set-cannot-be-variable-names) | `list`/`map`/`set` as names | Either the lexer learns context, or the restriction gets documented where it is hit |
 | [P1-1](#p1-1--match-cannot-pattern-match-option--result-reviewmd-o21) | `match` on `Option`/`Result` | The exhaustiveness rules already exist as dead code - scope `isAssignable` before starting |
+| [P1-4](#p1-4--list--map--set-cannot-be-variable-names) | `list`/`map`/`set` as names | Either the lexer learns context, or the restriction gets documented where it is hit |
+| [P2-9](#p2-9--an-empty-literal-in-argument-position-still-has-nothing-to-declare-it) | `countEntries({})` | The last empty-literal hole, and it is the same expected-type plumbing P1-1 needs |
 
 ---
 
@@ -80,16 +80,6 @@ records the parameter as `unknown`.
 **Done when** a declared `func(int, string): bool` is checked at the call site at
 compile time, bare `func` keeps working for compatibility, and the README
 limitation is deleted.
-
-### P1-3 · `string` has no methods
-
-`s.length()` → `type error: cannot call method 'length' on value of type string`;
-everything goes through `Text.length(s)` / `String.*`.
-
-**Done when** a small intrinsic surface (`length`, `substring`, `contains`,
-`startsWith`, `indexOf`, …) maps onto the existing native `String.*` primitives -
-no second implementation - with a fixture and an updated
-[docs/language-guide.md](docs/language-guide.md).
 
 ### P1-4 · `list` / `map` / `set` cannot be variable names
 
@@ -256,6 +246,30 @@ confirmed already fixed on 2026-09-17; see [Done](#done) and
 Most recent first. Kept briefly so the gates that cover each fix are findable,
 then deleted - [docs/changelog.md](docs/changelog.md) is the permanent record.
 
+- [x] **P1-3 · `string` has no methods** - `s.length()` was
+  `cannot call method 'length' on value of type string` while every collection
+  type was method-based. A method on a `string` now resolves to the `String.*`
+  native catalog entry with the receiver bound as its first argument
+  (`TypeChecker::inferMethodCall` looks it up in the `kStringMethods` table), so
+  the method spelling and the qualified call are the same instruction on both
+  backends - no second implementation, no class behind the primitive. The
+  surface is the 29 `String.*` primitives that take a string first
+  (`length`, `substring`, `contains`, `indexOf`, `startsWith`, `endsWith`,
+  `trim`/`upper`/`lower`, `split`, `replace`, `toInt`/`toFloat`, the seven
+  `utf8*` methods, …); indexing stays the byte boundary and `split` returns the
+  native `list<string>` storage exactly as `String.split` does. `startsWith` and
+  `endsWith` had no native primitive, so they became ones (a byte prefix/suffix
+  compare) and `Text.startsWith`/`endsWith` now delegate to them instead of
+  keeping a second ZL copy. A name outside the surface is a compile error that
+  lists the surface; arity and argument types are checked against the catalog
+  entry at compile time. Gates:
+  `tests/zl/valid/language_hardening_tests/StringMethods.zl` (every method
+  checked against its qualified spelling) under MIR, `ZL_COMPILER=ast`,
+  `ZL_MIR_OPT=0` and `--backend native`;
+  `tests/zl/invalid/type_errors/StringMethodUnknown.zl`;
+  `testStringMethodsAreTheStringNatives` in `tests/pipeline_tests.cpp`, which
+  compiles both spellings of one program, requires identical output, and asserts
+  in bytecode that a method call is a `CallNative` of the mapped native.
 - [x] **P0-3 · A lambda created inside a lambda body handed the outer lambda its
   return type** (found 2026-09-18 while writing the P2-4 fixture) - the checker
   infers a block body's return from an accumulator every `return` writes into, and

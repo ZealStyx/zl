@@ -1133,6 +1133,185 @@ void testUnreachableReturnTailIsNotEmitted() {
             "the fixture prints the same values as before the tail was dropped: " + run.output);
 }
 
+// ---------------------------------------------------------------------------
+// String methods are the String.* natives, not a second implementation
+// ---------------------------------------------------------------------------
+
+// `s.length()` resolves to the catalog entry `String.length` with the receiver
+// bound as that native's first argument, so the method spelling is not a
+// different code path from the qualified one and must not become one. The two
+// programs below write the same values through the two spellings; they are
+// compiled and run independently and their output must be identical. The
+// bytecode is then checked directly - the method spelling emits exactly a
+// CallNative of the native it maps to - and a typo has to come back as a type
+// error naming the surface, which is where a user meets the surface first.
+const char* kStringMethodCalls =
+    "class StringMethodCalls {\n"
+    "    func main(): void {\n"
+    "        var s = \"Hello, World\"\n"
+    "        log(s.length())\n"
+    "        log(s.upper())\n"
+    "        log(s.contains(\"World\"))\n"
+    "        log(s.startsWith(\"Hello\"))\n"
+    "        log(s.endsWith(\"World\"))\n"
+    "        log(s.indexOf(\"World\"))\n"
+    "        log(s.substring(0, 5))\n"
+    "        log(s.replace(\"World\", \"ZL\"))\n"
+    "        log(Collection.get(s.split(\", \"), 1))\n"
+    "        log(\"42\".toInt() + 1)\n"
+    "        log(\"  pad  \".trimStart() + s.trimEnd())\n"
+    "    }\n"
+    "}\n";
+
+const char* kStringNativeCalls =
+    "class StringNativeCalls {\n"
+    "    func main(): void {\n"
+    "        var s = \"Hello, World\"\n"
+    "        log(String.length(s))\n"
+    "        log(String.upper(s))\n"
+    "        log(String.contains(s, \"World\"))\n"
+    "        log(String.startsWith(s, \"Hello\"))\n"
+    "        log(String.endsWith(s, \"World\"))\n"
+    "        log(String.indexOf(s, \"World\"))\n"
+    "        log(String.substring(s, 0, 5))\n"
+    "        log(String.replace(s, \"World\", \"ZL\"))\n"
+    "        log(Collection.get(String.split(s, \", \"), 1))\n"
+    "        log(String.toInt(\"42\") + 1)\n"
+    "        log(String.trimStart(\"  pad  \") + String.trimEnd(s))\n"
+    "    }\n"
+    "}\n";
+
+const char* kStringMethodTypo =
+    "class StringMethodTypo {\n"
+    "    func main(): void {\n"
+    "        var s = \"abc\"\n"
+    "        log(s.trimLeft())\n"
+    "    }\n"
+    "}\n";
+
+const char* kStringMethodArity =
+    "class StringMethodArity {\n"
+    "    func main(): void {\n"
+    "        var s = \"abc\"\n"
+    "        log(s.length(1))\n"
+    "    }\n"
+    "}\n";
+
+const char* kStringMethodArgument =
+    "class StringMethodArgument {\n"
+    "    func main(): void {\n"
+    "        var s = \"abc\"\n"
+    "        log(s.contains(3))\n"
+    "    }\n"
+    "}\n";
+
+// Counts CallNative instructions targeting a catalog entry inside a function
+// body, so "the method spelling is this native" is checked against the emitted
+// code rather than against the source's intent.
+std::size_t countNativeCalls(const zl::Chunk& chunk, std::size_t begin, std::size_t end,
+                             const std::string& qualifiedName) {
+    const auto target = zl::findNativeFunction(qualifiedName);
+    if (!target) return 0;
+    std::size_t calls = 0;
+    for (std::size_t i = begin; i < end && i < chunk.code.size(); ++i) {
+        if (chunk.code[i].op == zl::OpCode::CallNative && chunk.code[i].operand == *target) ++calls;
+    }
+    return calls;
+}
+
+// The MIR text of one function, from its header to the next one - enough to say
+// what a single body lowered to without reading the builtin library's own.
+std::string mirFunctionBody(const std::string& module, const std::string& header) {
+    const auto start = module.find(header);
+    if (start == std::string::npos) return {};
+    const auto end = module.find("\nfunc ", start + header.size());
+    return module.substr(start, end == std::string::npos ? std::string::npos : end - start);
+}
+
+void testStringMethodsAreTheStringNatives() {
+    const fs::path calls = writeProgram("StringMethodCalls", kStringMethodCalls);
+    const fs::path natives = writeProgram("StringNativeCalls", kStringNativeCalls);
+
+    Options both;
+    both.backend = Backend::Bytecode;
+    const Result viaMethods = compileWhole(calls, both);
+    const Result viaNatives = compileWhole(natives, both);
+    require(viaMethods.ok() && viaMethods.chunk.has_value(),
+            "a program using string methods should compile");
+    require(viaNatives.ok() && viaNatives.chunk.has_value(),
+            "the same values through String.* should compile");
+
+    const RunResult methodRun = runChunk(*viaMethods.chunk);
+    const RunResult nativeRun = runChunk(*viaNatives.chunk);
+    require(methodRun.ran && nativeRun.ran, "both spellings should execute");
+    require(!methodRun.output.empty(), "the comparison should not be vacuous");
+    require(methodRun.output == nativeRun.output,
+            "a string method must produce exactly what the native it maps to produces: "
+            "methods gave '" + methodRun.output + "', natives gave '" + nativeRun.output + "'");
+
+    // The method spelling is that native call in the emitted bytecode: one
+    // CallNative per method, and no method dispatch anywhere in the body.
+    const auto body = namedFunctionRange(*viaMethods.chunk, "StringMethodCalls.main");
+    require(body.first != body.second, "the fixture's main() should be in the chunk");
+    require(countNativeCalls(*viaMethods.chunk, body.first, body.second, "String.length") == 1,
+            "`s.length()` emits a call to the String.length native");
+    require(countNativeCalls(*viaMethods.chunk, body.first, body.second, "String.startsWith") == 1,
+            "`s.startsWith(p)` emits a call to the String.startsWith native");
+    require(countNativeCalls(*viaMethods.chunk, body.first, body.second, "String.trimEnd") == 1,
+            "`s.trimEnd()` emits a call to the String.trimEnd native");
+    require(countNativeCalls(*viaMethods.chunk, body.first, body.second, "String.split") == 1,
+            "`s.split(sep)` emits a call to the String.split native");
+
+    // And the MIR names the same entry, with no invoke_method in the body.
+    const std::string mirBody = mirFunctionBody(zl::mir::printModule(viaMethods.module),
+                                               "func StringMethodCalls.main()");
+    require(!mirBody.empty(), "the method body should be printable");
+    require(mirBody.find("native 'String.length'") != std::string::npos,
+            "the MIR should name String.length for the method spelling");
+    require(mirBody.find("invoke_method") == std::string::npos,
+            "a string method should not lower to a method dispatch");
+
+    // The reference compiler runs the surface identically, so it is not a
+    // MIR-only path.
+    std::unique_ptr<zl::Program> program;
+    {
+        zl::ModuleLoader loader(calls, std::vector<fs::path>{});
+        program = loader.load();
+        zl::TypeChecker checker;
+        checker.check(*program, /*requireMain=*/true);
+    }
+    zl::Compiler referenceCompiler;
+    const RunResult reference = runChunk(referenceCompiler.compile(*program));
+    require(reference.ran && reference.output == methodRun.output,
+            "the reference compiler must run the surface identically");
+
+    // A method outside the surface names the surface in the diagnostic, rather
+    // than reporting a method call on a type that has none.
+    const Result typo = compileWhole(writeProgram("StringMethodTypo", kStringMethodTypo), Options{});
+    require(!typo.ok(), "an unknown string method should not compile");
+    require(typo.failure.kind == ErrorKind::TypeCheck, "and should be classified as a type error");
+    require(typo.failure.message.find("has no method 'trimLeft'") != std::string::npos &&
+                typo.failure.message.find("startsWith") != std::string::npos &&
+                typo.failure.message.find("utf8Reverse") != std::string::npos,
+            "the diagnostic should name the unknown method and list the surface: " +
+                typo.failure.message);
+
+    // Arity and argument types are checked against the catalog entry at
+    // compile time, so a bad call never reaches the native's own contract.
+    const Result arity = compileWhole(writeProgram("StringMethodArity", kStringMethodArity), Options{});
+    require(!arity.ok() && arity.failure.kind == ErrorKind::TypeCheck,
+            "a string method arity mismatch should be a type error");
+    require(arity.failure.message.find("string method 'length' expects 0 argument(s)") != std::string::npos,
+            "the arity diagnostic should name the method and the count: " + arity.failure.message);
+    const Result argument = compileWhole(writeProgram("StringMethodArgument", kStringMethodArgument), Options{});
+    require(!argument.ok() && argument.failure.kind == ErrorKind::TypeCheck,
+            "a string method argument type mismatch should be a type error");
+    require(argument.failure.message.find("argument 1 to string method 'contains'") != std::string::npos &&
+                argument.failure.message.find("expected string") != std::string::npos,
+            "the argument diagnostic should name the method and the expected type: " +
+                argument.failure.message);
+}
+
 } // namespace
 
 int main() {
@@ -1163,6 +1342,7 @@ int main() {
     testDigestIsStableAndSensitive();
     testDiagnosticsAreData();
     testUnreachableReturnTailIsNotEmitted();
+    testStringMethodsAreTheStringNatives();
 
     if (failures == 0) {
         std::cout << "compiler pipeline: " << checks << " checks passed\n";
