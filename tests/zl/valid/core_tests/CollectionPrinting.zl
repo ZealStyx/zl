@@ -1,0 +1,86 @@
+// ============================================================================
+// Regression fixture - valid/core_tests - CollectionPrinting
+//
+// P2-1: a generic collection used to print its internal storage rather than
+// its data - `log(l)` on a List<double> printed `List{__native: [3.14, 1]}`,
+// the plumbing instead of the payload. Serialize.encode had already learned
+// to look through the List/Map/Set wrappers (REVIEW.md O11); the printer
+// (formatValueInner, src/vm/value.cpp) now reuses the same look-through, so a
+// value has one spelling through every door: log, concatenation, Text.format,
+// and the JSON encoder.
+//
+// Pinned here, by comparing the concatenated spelling (same formatter as log)
+// against the expected text:
+//   * List / Map / Set wrappers print their payload: [..], {..}, [..]
+//   * empty collections print [] / {} (not Class{__native: []})
+//   * nested wrappers, string quoting inside collections, and a Map whose
+//     value is itself a wrapper
+//   * a wrapper that (indirectly) contains itself still terminates and is
+//     marked <cyclic>, not a stack overflow
+// ============================================================================
+
+class CollectionPrinting {
+    func check(bool cond, string what): void {
+        if (!cond) {
+            throw new Exception("CollectionPrinting failed: " + what)
+        }
+    }
+
+    func main(): void {
+        var self = new CollectionPrinting()
+
+        // ---- List payload, doubles in shortest form ----
+        var l = new List<double>()
+        l.push(3.14)
+        l.push(1.0)
+        self.check(("" + l) == "[3.14, 1]", "list of doubles prints its payload")
+        self.check(("" + l) != "List{__native", "no internal storage field leaks")
+
+        // ---- string elements are quoted inside a collection ----
+        var names = new List<string>()
+        names.push("Ada")
+        names.push("Grace")
+        self.check(("" + names) == "[\"Ada\", \"Grace\"]", "strings quote inside a list")
+
+        // ---- Map payload ----
+        var m = new Map<string, double>()
+        m.put("pi", 3.14)
+        self.check(("" + m) == "{\"pi\": 3.14}", "map prints key: value pairs")
+
+        // ---- Set payload (insertion order, list-shaped storage) ----
+        var s = new Set<int>()
+        s.add(3)
+        s.add(1)
+        s.add(2)
+        self.check(("" + s) == "[3, 1, 2]", "set prints its elements")
+
+        // ---- empty collections ----
+        self.check(("" + new List<int>()) == "[]", "empty list prints []")
+        self.check(("" + new Map<string, int>()) == "{}", "empty map prints {}")
+        self.check(("" + new Set<int>()) == "[]", "empty set prints []")
+
+        // ---- nesting: wrapper inside wrapper, map over lists ----
+        var grid = new List<List<int>>()
+        var row = new List<int>()
+        row.push(7)
+        grid.push(row)
+        self.check(("" + grid) == "[[7]]", "nested lists nest their brackets")
+
+        var lookup = new Map<string, List<int>>()
+        var hits = new List<int>()
+        hits.push(5)
+        lookup.put("hits", hits)
+        self.check(("" + lookup) == "{\"hits\": [5]}", "map value that is a wrapper is not flattened")
+
+        // ---- cycles terminate with a marker ----
+        var cyc = new List<object>()
+        cyc.push(cyc)
+        self.check(("" + cyc) == "[List { <cyclic> }]", "self-holding list is marked cyclic")
+
+        var cycMap = new Map<string, object>()
+        cycMap.put("self", cycMap)
+        self.check(("" + cycMap) == "{\"self\": Map { <cyclic> }}", "self-holding map is marked cyclic")
+
+        log("ok")
+    }
+}

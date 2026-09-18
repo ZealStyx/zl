@@ -6,7 +6,9 @@
 #include "zl/compiler/ir.hpp"
 #include "zl/compiler/ir_optimizer.hpp"
 #include "zl/lexer/token.hpp"
+#include "zl/vm/value.hpp"
 
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -17,6 +19,7 @@ using namespace zl::ir;
 using zl::OwnershipKind;
 
 const std::string PLUS = std::to_string(static_cast<int>(zl::TokenType::PLUS));
+const std::string MINUS = std::to_string(static_cast<int>(zl::TokenType::MINUS));
 
 int failures = 0;
 
@@ -350,6 +353,62 @@ void testOptimizerFoldsConstants() {
     require(folded, "1 + 2 folds to a 3 constant");
 }
 
+// P0-2: a folded double used to be written back with std::to_string - six
+// fixed decimals - so any constant needing more precision was silently
+// rounded on its way through the optimizer. The rewrite must spell a double
+// exactly (doubleToShortestString), and the spelling must parse back to the
+// identical double. 0.1 + 0.2 is the canonical case: its shortest exact
+// spelling needs all 17 significant digits.
+void testOptimizerFoldsDoublesExactly() {
+    const double sum = 0.1 + 0.2;
+    require(zl::doubleToShortestString(sum) == "0.30000000000000004",
+            "0.1 + 0.2 needs a 17-digit spelling");
+
+    Module module;
+    Function fn = oneBlockFunction("folddouble");
+    fn.returnType = "double";
+    fn.blocks[0].instructions.push_back(constant(1, "0.1"));
+    fn.blocks[0].instructions.push_back(constant(2, "0.2"));
+    fn.blocks[0].instructions.push_back(Instruction{Opcode::Binary, 3, 1, 2, PLUS, 0, OwnershipKind::GC});
+    fn.blocks[0].instructions.push_back(ret(3));
+    module.functions.push_back(std::move(fn));
+
+    Module optimized = optimize(module);
+    expectAccepted(optimized, "the double-folded module still verifies");
+    bool roundTrips = false;
+    for (const auto& ins : optimized.functions[0].blocks[0].instructions) {
+        if (ins.result != 3 || ins.opcode != Opcode::Const) continue;
+        require(ins.symbol == "0.30000000000000004",
+                "the folded double keeps its exact 17-digit spelling (got: " + ins.symbol + ")");
+        const double back = std::stod(ins.symbol);
+        roundTrips = std::memcmp(&back, &sum, sizeof(double)) == 0;
+    }
+    require(roundTrips, "the folded spelling parses back to the identical double");
+
+    // The negated form round-trips too: unary minus on a double constant
+    // must keep every digit rather than re-rounding through six decimals.
+    Module negated;
+    Function neg = oneBlockFunction("negdouble");
+    neg.returnType = "double";
+    neg.blocks[0].instructions.push_back(constant(1, "0.30000000000000004"));
+    neg.blocks[0].instructions.push_back(Instruction{Opcode::Unary, 2, 1, 0, MINUS, 0, OwnershipKind::GC});
+    neg.blocks[0].instructions.push_back(ret(2));
+    negated.functions.push_back(std::move(neg));
+
+    Module negOpt = optimize(negated);
+    expectAccepted(negOpt, "the negated-double module still verifies");
+    bool negRoundTrips = false;
+    for (const auto& ins : negOpt.functions[0].blocks[0].instructions) {
+        if (ins.result != 2 || ins.opcode != Opcode::Const) continue;
+        require(ins.symbol == "-0.30000000000000004",
+                "unary minus keeps every digit (got: " + ins.symbol + ")");
+        const double expected = -sum;
+        const double back = std::stod(ins.symbol);
+        negRoundTrips = std::memcmp(&back, &expected, sizeof(double)) == 0;
+    }
+    require(negRoundTrips, "the negated spelling parses back to the identical double");
+}
+
 void testOptimizerEliminatesDeadBranchAndBlock() {
     Module module;
     Function fn = oneBlockFunction("branch");
@@ -407,6 +466,7 @@ int main() {
     testVerifierOwnershipRules();
     testVerifierJoinSemantics();
     testOptimizerFoldsConstants();
+    testOptimizerFoldsDoublesExactly();
     testOptimizerEliminatesDeadBranchAndBlock();
     testOptimizerLeavesOwnershipAlone();
 

@@ -286,6 +286,11 @@ machinery that user-defined generics (`class Box<T>`) already use. A mismatched 
 caught by ordinary overload resolution, with the same error-message quality as any other
 method call.
 
+Printing a collection prints its data, not its wrapper: `log(nums)` on the list above
+prints `[1, 2]`, a `Map` prints `{"ada": 36}`, and strings inside a collection are quoted
+(`["a", "b"]`). The same spelling comes out of concatenation (`"" + nums`) and
+`Serialize.encode`, so a value has one form through every door.
+
 ### Generic methods
 
 A method may declare its own type parameters, independently of any class-level ones:
