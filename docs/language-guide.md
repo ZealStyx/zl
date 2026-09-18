@@ -16,12 +16,20 @@ Reference for the language surface. For the standard library see
 
 ## File and class rule
 
-Each `.zl` file must contain a class whose name matches the file stem exactly:
+Each `.zl` file must declare one *primary type* whose name matches the file stem exactly:
 
 ```text
 TestProgram.zl   -> class TestProgram
 type_mismatch.zl -> class type_mismatch
+Point.zl         -> data Point
+Shape.zl         -> interface Shape
 ```
+
+A `class`, `data`, `interface`, or `enum` declaration satisfies the rule, and other
+declarations may share the file with the primary type - they simply are not importable
+by their own name, since an import resolves to a path. The reason for the rule, and
+what it costs, is written up in
+[docs/packages.md](packages.md#one-primary-type-per-file).
 
 This is enforced by the compiler pipeline. Errors are reported in three categories:
 `syntax error`, `compile error`, and `runtime error`.
@@ -286,6 +294,11 @@ machinery that user-defined generics (`class Box<T>`) already use. A mismatched 
 caught by ordinary overload resolution, with the same error-message quality as any other
 method call.
 
+Printing a collection prints its data, not its wrapper: `log(nums)` on the list above
+prints `[1, 2]`, a `Map` prints `{"ada": 36}`, and strings inside a collection are quoted
+(`["a", "b"]`). The same spelling comes out of concatenation (`"" + nums`) and
+`Serialize.encode`, so a value has one form through every door.
+
 ### Generic methods
 
 A method may declare its own type parameters, independently of any class-level ones:
@@ -356,6 +369,40 @@ Set<int> genericSet = [1, 2, 2]
 Every element, key, and value is checked against the expected generic type. Typed
 `List`/`Map`/`Set` literals construct normal generic ZL collection objects; lowercase
 `list`/`map`/`set` annotations keep their native representation.
+
+#### Empty literals
+
+An empty literal holds nothing that could contradict a declaration, so the declaration
+decides the container - including for maps, which have no entries to spell:
+
+```zl
+map<string, int> ages = {}          // an empty native map
+Map<string, int> genericAges = {}   // an empty generic Map
+set<int> tags = {}
+List<int> values = []
+```
+
+The literal still needs something to declare it. In *argument* position there is
+nothing yet — `countEntries({})` against `static func countEntries(map<string,int> m)`
+is a compile error ("no overload … matches"), because argument types are inferred
+before overload resolution picks the parameter. Bind it first and pass the variable:
+
+```zl
+map<string, int> empty = {}
+log(countEntries(empty))            // 0
+```
+
+With no declaration to go by, the spelling decides: `[]` infers an empty `list` and
+`{}` an empty `set`, so `var tags = {}` followed by `set<int> declared = tags` type
+checks (and `Collection.setAdd(tags, x)` twice holds one element).
+
+A **non-empty** `{...}` literal with no declared type is still a `list`, not a set:
+that spelling is also how a variadic argument list is written, where deduplication
+would be wrong.
+
+```zl
+log(Text.format("{0} + {1} = {2}", {"1", "1", "2"}))   // 1 + 1 = 2, duplicates kept
+```
 
 ## Static methods
 

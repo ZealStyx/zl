@@ -1,0 +1,102 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - NestedLambdaReturn
+//
+// A lambda created inside a lambda body used to hand its own return type to the
+// enclosing lambda. The checker infers a block body's return from an
+// accumulator that every `return` writes into, and a nested lambda left its
+// result in that accumulator on the way out, so:
+//
+//     var body = func() {
+//         var n = NestedLambdaReturn.callIt(func() { return 1 })
+//         if (n == 1) { log("yes") }
+//     }
+//
+// was typed `func(): int` - a non-void body with no `return` in it at all. MIR
+// then lowered the body's exit block to `unreachable`, and the VM ran the body
+// as an endless loop (this fixture never terminated; under the reference AST
+// compiler the same program died with "type assertion failed for return:
+// expected int, got void"). The enclosing lambda's inference is now its own:
+// saved before the body is checked and restored afterwards.
+//
+// Every case below is a shape that used to loop or mis-type. That the fixture
+// finishes at all is half the assertion; the checks are the other half.
+// ============================================================================
+
+import zl.lang.Atomic
+
+class NestedLambdaReturn {
+    static func callIt(func f): int { return f() }
+    static func callItString(func(): string f): string { return f() }
+
+    func check(bool cond, string what): void {
+        if (!cond) {
+            throw new Exception("NestedLambdaReturn failed: " + what)
+        }
+    }
+
+    func main(): void {
+        var self = new NestedLambdaReturn()
+
+        // ---- the reported shape: nested lambda, then a branch --------------
+        // An Atomic, not a plain local: a closure captures by value, so a
+        // counter it increments would stay its own copy.
+        var ran = new Atomic()
+        var branchy = func() {
+            var n = NestedLambdaReturn.callIt(func() { return 1 })
+            if (n == 1) { Atomic.add(ran, 1) }
+            Atomic.add(ran, 10)
+        }
+        branchy()
+        self.check(Atomic.load(ran) == 11, "the body ran exactly once: " + Atomic.load(ran))
+
+        // ---- the nested lambda keeps its own return type -------------------
+        self.check(NestedLambdaReturn.callIt(func() { return 41 }) == 41, "nested int lambda returns int")
+
+        // ---- the enclosing lambda's own return wins, whatever the nest says --
+        var returnsText = func(): string {
+            var n = NestedLambdaReturn.callIt(func() { return 1 })
+            return "n=" + n
+        }
+        self.check(NestedLambdaReturn.callItString(returnsText) == "n=1",
+                   "an enclosing lambda returns its own value, not the nested one's")
+
+        // ---- three levels deep, each with a different return type ----------
+        var deep = func(): string {
+            var mid = func(): int {
+                var inner = func(): bool { return true }
+                if (inner()) { return 7 }
+                return 0
+            }
+            if (mid() == 7) { return "seven" }
+            return "other"
+        }
+        self.check(NestedLambdaReturn.callItString(deep) == "seven", "three levels of nesting each keep their type")
+
+        // ---- a loop body around the nest (the shape that hung a worker) -----
+        var rounds = 0
+        for i in 0..5 {
+            var counted = func(): int {
+                var n = NestedLambdaReturn.callIt(func() { return 2 })
+                if (n == 2) { return n * 10 }
+                return -1
+            }
+            rounds = rounds + counted()
+        }
+        self.check(rounds == 100, "a lambda built in a loop still returns once per call: " + rounds)
+
+        // ---- and the same nest inside a worker thread ----------------------
+        // This is where the bug was found: the waiter closure of a Condition
+        // hand-off contains a predicate lambda, and the worker never finished,
+        // so Thread.join blocked forever.
+        var observed = new Atomic()
+        var worker = Thread.start(func() {
+            var n = NestedLambdaReturn.callIt(func() { return 3 })
+            if (n == 3) { Atomic.store(observed, n) }
+            Atomic.add(observed, 1)
+        })
+        Thread.join(worker)
+        self.check(Atomic.load(observed) == 4, "a worker closure with a nested lambda finishes: " + Atomic.load(observed))
+
+        log("ok")
+    }
+}

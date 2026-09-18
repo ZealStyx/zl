@@ -162,6 +162,14 @@ the byte-string primitive boundary, so `String.length("héllo")` is `6`.
 `upper` and `lower` only case ASCII. See `examples/REVIEW.md` (O18) and
 `tests/zl/valid/language_hardening_tests/Utf8Text.zl`.
 
+The one character-oriented `String.*` primitive is the empty-separator split:
+`String.split(s, "")` means "every character", and a character is a scalar, so
+`String.split("héllo", "")` returns five one-scalar pieces (`String.utf8CharAt`
+walks the same boundaries). `Text.split(value, "")` forwards to it and returns
+them as a `List<string>`. A non-empty separator is an ordinary byte-string
+search, and an ill-formed byte still comes back on its own rather than hanging
+the walk.
+
 `string` has no methods of its own: `s.length()` is a compile error, so use the
 `Text.length(s)` free-function form.
 
@@ -250,8 +258,9 @@ strftime:
 Time.format(Time.now(), "YYYY-MM-DD HH:mm:ss")   // 2026-09-06 16:32:44
 ```
 
-An unrecognised token is left in place rather than reported, so a strftime pattern
-such as `"%Y-%m-%d"` is returned unchanged.
+An unrecognised `%-`token (e.g. strftime `"%Y-%m-%d"`) now raises an error
+instead of being returned unchanged, so a wrong date cannot be printed
+confidently. Valid tokens are `YYYY`, `MM`, `DD`, `HH`, `mm`, `ss`.
 
 ## `zl.crypto`
 

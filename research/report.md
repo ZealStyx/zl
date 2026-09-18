@@ -93,13 +93,15 @@ verification gaps (see §3.7).
 | Fully lowered (`--artifact-stats` ok) | **16 / 16** |
 | Verified clean (0 verifier errors, 0 incomplete functions) | **16 / 16** |
 | MIR verification failures in the positive corpus | **0** |
-| MIR verification failures in the limitations corpus | **1** (`FixedArrayNative.zl`, see §3.7) |
+| MIR verification failures in the limitations corpus | **1** (`InterfaceStaticParam.zl`, see §3.7 — `FixedArrayNative.zl` now verifies after `isCollectionType` fix) |
 | Output equivalence ref vs MIR (optimised and unoptimised) | **16 / 16 identical** |
 
 Every positive program lowered, verified, ran, and produced byte-identical
 output under the reference compiler, the MIR pipeline optimised, and the MIR
 pipeline unoptimised. The optimiser's differential guarantee (a pass that
-breaks equivalence is rolled back) holds on this corpus.
+breaks equivalence is rolled back) holds on this corpus. `FixedArrayNative.zl`
+previously failed verification and now passes (fixed; see
+docs/changelog.md, 2026-09-17).
 
 ### 2.2 Compile time
 
@@ -206,20 +208,18 @@ diagnostics, all warnings, 0 errors**: 196 `dynamic-boundary` and 122
 obligation": dynamic values crossing into typed slots (`refine`) and calls into
 native code are checked at runtime, not proven statically.
 
-One concrete static win for MIR is recorded in §3.7: the verifier rejects a
-program (`FixedArrayNative.zl`) that the reference compiler accepts, because
-lowering loses the fixed-array element type. MIR turns a silent type-erasure
-into a loud compile-time refusal.
+Historical note: §3.7 previously recorded `FixedArrayNative.zl` as a verifier
+rejection (silent type-erasure turned into loud refusal). That gap is now fixed
+by `src/mir/type.cpp` `isCollectionType` including `Array`; the fixture now
+verifies clean.
 
 ### 2.7 Failures and limitations (measured, not inferred)
 
-1. **`FixedArrayNative.zl` — MIR verification failure (exit 4).** Passing
-   `array[5]<int>` through the native `Collection.length`/`Collection.get`
-   primitives lowers the element type to `list<unknown>`; the verifier rejects
-   `store of list<unknown> into slot of type array[5]<int>` (`mir.type-flow`).
-   The reference compiler accepts the same program. This is the same root cause
-   already recorded in `docs/status/mir-safety-evaluation.md`; the corpus now
-   pins it as a standalone reproduction.
+1. **`FixedArrayNative.zl` — previously MIR verification failure, now fixed.** Passing
+   `array[5]<int>` through `Collection.length`/`Collection.get` previously lowered
+   the element type to `list<unknown>` and verifier rejected it. Fixed by
+   `src/mir/type.cpp` `isCollectionType` including `Array`. Fixture now
+   verifies clean and runs; kept as regression.
 2. **`InterfaceStaticParam.zl` — unsupported lowering.** Passing an
    interface-typed value as an argument to a *static* function is not lowered
    ("unsupported call … not lowered"); the function is marked incomplete and
@@ -238,10 +238,11 @@ into a loud compile-time refusal.
    to the VM. The native tier is a code generator for a primitive subset, not
    yet a competing backend.
 5. **Parser-level findings surfaced while building the corpus** (not MIR
-   defects, recorded for completeness): a block-bodied lambda cannot declare
-   parameters (`func(int x) { … }` is a parse error; typed parameters require an
-   expression body `func(int x) => …`); and `list`/`map` are reserved words
-   usable as type names but not variable names.
+   defects, recorded for completeness): previously a block-bodied lambda could
+   not declare typed parameters, but `func(int x) { return x*2 }` now compiles;
+   the untyped block-body form `func(x) { return x*2 }` was the last such
+   gap and is fixed too (docs/changelog.md, 2026-09-17). `list`/`map`/`set` are reserved words usable as type names but
+   not variable names (P1-4).
 
 ---
 
@@ -315,9 +316,9 @@ cost is concentrated and actionable:
    programs; a size- or time-bounded default (or early exit when a pass set is
    exhausted) would recover most of the 8.2× compile-time multiplier without
    touching the passes' guarantees.
-3. **Close the two lowering gaps** pinned in §3.7 (fixed-array element types
-   through native collection primitives; interface-typed static parameters) —
-   both are now standalone corpus reproductions.
+3. **Close the remaining lowering gap** pinned in §3.7 (interface-typed static
+   parameters — fixed-array element types through native collection primitives
+   is now fixed) — the remaining one is a standalone corpus reproduction.
 4. **Grow the native subset** beyond ~1.7% of functions if native compilation is
    to become a measured performance contribution rather than a demonstration.
 

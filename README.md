@@ -100,8 +100,11 @@ zl <file.zl> [program args...]
 The runtime also supports `zl --version`, `zl --help`, and repeatable `--root <path>`
 flags for extra import roots.
 
-> **File rule:** each `.zl` file must contain a class whose name matches the file stem
-> exactly — `Hello.zl` must declare `class Hello`. This is enforced by the compiler.
+> **File rule:** each `.zl` file must declare one *primary type* whose name matches the
+> file stem exactly — `Hello.zl` must declare `class Hello`. A `data`, `interface` or
+> `enum` satisfies the rule just as well, and helper declarations may share the file;
+> only the primary type is importable by name. Enforced by the compiler, and explained
+> (with the reason) in [docs/packages.md](docs/packages.md#one-primary-type-per-file).
 
 ## Install
 
@@ -189,7 +192,9 @@ summarized in [docs/language-guide.md](docs/language-guide.md#memory-model-direc
   unobserved-failure reporting, and async lambdas are pending.
 - `zlpkg` has no registry — dependencies resolve by `git` URL or local `path` only,
   with no version ranges, workspaces, or dev-dependencies.
-- One class per file, matching the file stem.
+- One primary type per file, matching the file stem (helper declarations may share the
+  file, but only the primary type is importable by name) —
+  [the rule and its rationale](docs/packages.md#one-primary-type-per-file).
 - `Shared<T>` marks a capture as shareable; it does not itself provide thread safety.
   The top-level `share()` helper and compile-time confinement checks are pending.
 

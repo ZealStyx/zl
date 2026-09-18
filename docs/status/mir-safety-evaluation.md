@@ -43,12 +43,21 @@ oracles pass. They reveal type/lowering limitations or verifier disagreement:
 
 * `assignment-union-workflow`:
   * wildcard remainder passed as `bool|int` to a `bool` parameter;
-  * `list<unknown>` stored in an `array[2]<int>` slot;
+  * `list<unknown>` stored in an `array[2]<int>` slot — **fixed** by
+    `src/mir/type.cpp` `isCollectionType` now including `Array`
+    (`research/corpus/limitations/FixedArrayNative.zl` is kept as the
+    regression; see docs/changelog.md, 2026-09-17);
   * `int|string` argument rejected against `bool|int|string`;
   * field access still represented with an `int|Packet` receiver;
   * incomplete `snapshot`/`main` translations on assignment to refined match
     subject bindings (`value` / `subject`).
-* `heap-contract-workflow`: `list<unknown>` stored in an `array[2]<int>` slot.
+* `heap-contract-workflow`: `list<unknown>` stored in an `array[2]<int>` slot —
+  **fixed** by same `isCollectionType` change; this workflow now verifies
+  (remaining verifier disagreements, if any, are tracked separately).
+
+Historical note: this file is a baseline from 2026-09-11; the fixed-array
+element-type loss was real then and is now corrected (docs/changelog.md,
+2026-09-17).
 
 These remain visible follow-up work. Relaxing verification, removing source
 cases, or reporting partial MIR as verified would conceal precisely the

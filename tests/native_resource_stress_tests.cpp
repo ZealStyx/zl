@@ -61,6 +61,21 @@ void testConcurrentConsumeIsExactlyOnce() {
                 }
             }
             // Now hammer the already-consumed pool: every use must reject.
+            //
+            // "Already consumed" is the part that has to be waited for. Leaving
+            // the claim loop only means every token has been *claimed*: another
+            // worker can still be between its claim and its consume, and a
+            // hammer that runs ahead takes that token itself - uncounted, since
+            // this loop only tallies rejections - so the exactly-once accounting
+            // lost one and the rejection count gained one. Spinning until the
+            // drain is real keeps the hammer honest; it cannot deadlock, because
+            // every token is claimed exactly once and only its claimer consumes
+            // it now. The deadline is not part of the invariant: it turns a
+            // lost token into the failed assertion below instead of a hang.
+            const auto drained = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+            while (taken.load() < resources && std::chrono::steady_clock::now() < drained) {
+                std::this_thread::yield();
+            }
             for (int i = 0; i < 200; ++i) {
                 try {
                     static_cast<void>(nativeResourceRegistry().consume(tokens[static_cast<std::size_t>(i)]));
@@ -84,10 +99,18 @@ void testConcurrentConsumeIsExactlyOnce() {
 // a clean invalid-handle error - never a dangling handle. The accounting must
 // be exact (no lost outcomes), and once everything is consumed every borrow
 // must reject.
+//
+// A borrow has three clean outcomes here, not two, and the third is the one the
+// lifetime tracking exists for: borrow() can hand back a view that is already
+// invalid, because the owner was consumed (and destroyed) in the window between
+// the registry lookup and the check. That is the borrow reporting the truth
+// about a resource nobody controls any more - counting it as a dangling handle
+// made this suite fail on ~1 run in 5 for a race that is the designed behaviour.
 void testBorrowVsConsumeRace() {
     const int rounds = 20000;
     std::atomic<bool> sawDangling{false};
     std::atomic<int> validBorrows{0};
+    std::atomic<int> invalidatedBorrows{0};
     std::atomic<int> cleanRejections{0};
 
     std::vector<NativeHandleRef> tokens(rounds);
@@ -101,13 +124,20 @@ void testBorrowVsConsumeRace() {
         for (int i = 0; i < rounds; ++i) {
             try {
                 auto borrow = nativeResourceRegistry().borrow(tokens[static_cast<std::size_t>(i)]);
-                if (borrow.valid() &&
-                    borrow.get() == static_cast<std::uintptr_t>(0xD000 + i)) {
+                if (!borrow.valid()) {
+                    // Consumed between the lookup and this check: the view says
+                    // so, and get() would refuse. A clean outcome, not a lie.
+                    ++invalidatedBorrows;
+                } else if (borrow.get() == static_cast<std::uintptr_t>(0xD000 + i)) {
                     ++validBorrows;
                 } else {
                     sawDangling = true; // a valid borrow with the wrong handle is a lie
                 }
             } catch (const std::runtime_error&) {
+                // Either borrow() found the token already gone, or the owner was
+                // consumed between valid() and get() and get() refused. Both are
+                // the registry declining to hand out a resource it no longer
+                // controls.
                 ++cleanRejections;
             }
         }
@@ -126,8 +156,8 @@ void testBorrowVsConsumeRace() {
     borrower.join();
 
     require(!sawDangling.load(), "a borrow never reports a handle the owner no longer controls");
-    require(validBorrows.load() + cleanRejections.load() == rounds,
-            "every borrow resolved to exactly one outcome (valid or clean rejection)");
+    require(validBorrows.load() + invalidatedBorrows.load() + cleanRejections.load() == rounds,
+            "every borrow resolved to exactly one outcome (valid, invalidated, or clean rejection)");
 
     // After the drain, the rejection must be universal and clean.
     int rejectedAfter = 0;
@@ -172,9 +202,22 @@ void testCallbackCloseUnderLoad() {
         });
     }
     // Close while the invokers are mid-flight, then tell them to stop.
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    //
+    // "Mid-flight" is observed, not slept for. The two 5ms sleeps this used to
+    // do assumed the invokers would be scheduled inside them; on a loaded
+    // two-core box they were not, `ran` was still 0 when close() landed, and
+    // the suite failed "invocations ran before close()" - a report about the
+    // runtime that was really a report about the scheduler. Each phase now
+    // waits for the fact its assertion needs, with a deadline so a genuine
+    // pathology still surfaces as a failed check instead of a hang.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (ran.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
     nativeCallbackRegistry().close(callback);
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    while (refused.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
     stop = true;
     for (auto& worker : workers) worker.join();
 

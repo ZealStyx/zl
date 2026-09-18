@@ -608,7 +608,7 @@ runtime error: stack overflow: maximum call depth (100000) exceeded
 The wrapper was redundant - the native is already reachable as `Time.nowMillis` -
 so it has been deleted and the call now resolves to the native.
 
-### O10 - `Time.format` uses its own tokens, and nothing documents them
+### O10 - `Time.format` uses its own tokens, and nothing documents them (fixed)
 
 I originally recorded this as "format does not expand its specifiers". That was
 wrong, and worth keeping as a caution: `Time.format(now, "%Y-%m-%d")` returns the
@@ -619,10 +619,14 @@ format string unchanged because it recognises `YYYY`, `MM`, `DD`, `HH`, `mm`,
 Time.format(now, "YYYY-MM-DD HH:mm:ss")   // 2026-09-06 16:32:44
 ```
 
-The real problem is that no document mentions the token set, so `%Y` is the
-obvious thing to reach for and fails silently - an unrecognised token is left in
-place rather than reported. `Time.format` is now documented in
-`docs/stdlib.md`, and `TimeLib.zl` uses the correct tokens.
+The real problem was that no document mentioned the token set, so `%Y` was the
+obvious thing to reach for - and it failed silently, an unrecognised token left
+in place rather than reported. Both halves are closed now: `Time.format` is
+documented in `docs/stdlib.md` (token table included), and an unrecognised
+`%`-token raises instead of passing through, so a wrong date can no longer be
+printed confidently. `TimeLib.zl` uses the correct tokens and demonstrates the
+rejection; `tests/zl/valid/language_hardening_tests/TimeFormatTokens.zl` pins
+both the token set and the raise.
 
 ### O11 - `Serialize.stringify` on a generic `Map` encoded internal storage (fixed)
 
@@ -636,6 +640,12 @@ The generic collection classes are thin wrappers whose only field is the native
 storage they delegate to, and the encoder walked object fields blindly. It now
 looks through `List`/`Map`/`Set` wrappers and encodes the payload, so both
 collection spellings produce the same JSON. See `JsonLib.zl`.
+
+The printer had the same blindness until later: `log(m)` printed
+`Map{__native: {...}}` - the plumbing rather than the data. `formatValueInner`
+(`src/vm/value.cpp`) now reuses the same look-through, so `log(l)` prints
+`[3.14, 1]` and `log(m)` prints `{"pi": 3.14}`, one spelling through every
+door. Pinned by `tests/zl/valid/core_tests/CollectionPrinting.zl`.
 
 ### O12 - `Math.sqrt(-1.0)` returns `nan` instead of throwing (fixed here)
 
@@ -736,36 +746,24 @@ Two smaller notes found in the same pass, still open:
   'length' on value of type string`; the `Text.length(s)` free-function form is
   the only option. Every other collection type is method-based, so this reads as
   an inconsistency rather than a decision.
-- `List.pop()` reports `Collection.pop: cannot pop from an empty list` while
-  `List.first()` reports `List.first called on empty list`. Cosmetic.
+- `List.pop()` reported `Collection.pop: cannot pop from an empty list` while
+  `List.first()` reported `List.first called on empty list` - two voices for one
+  condition (fixed: `List.pop` now guards emptiness in ZL and names itself; the
+  raw `Collection.pop` primitive keeps its own name when called directly, and
+  `tests/zl/valid/core_tests/EmptyListErrors.zl` pins both messages).
 
-### O19 - `INT64_MIN` cannot be written as a literal
+### O19 - `INT64_MIN` cannot be written as a literal — FIXED
 
-```zl
-var min = -9223372036854775808
--> compile error: integer literal is out of range '9223372036854775808'
-```
-
-The lexer hands the type checker the unsigned magnitude, and both
-`TypeChecker::inferLiteral` (`type_checker.cpp:3402`) and `Compiler::compileLiteral`
-(`compiler.cpp:694`) validate it with `std::stoll`, whose ceiling is `INT64_MAX`.
-The unary minus is a separate node applied afterwards, so the one value that needs
-the extra slot is rejected before the negation is ever considered.
-
-Everything else at the boundary is correct, and the value is reachable by
-arithmetic:
+Previously `var min = -9223372036854775808` errored `integer literal is out of range`.
+Fixed: the parser folds the exact spelling `-9223372036854775808` into one negative
+literal (`src/parser/expression_parser.cpp:102`), and one past it in either direction
+is still rejected. Pinned by `tests/zl/valid/language_hardening_tests/Int64Min.zl`
+and `tests/zl/invalid/type_errors/IntLiteralOutOfRange.zl`.
 
 ```zl
-var max = 9223372036854775807        // fine
-(0 - max) - 1                        // -9223372036854775808, prints correctly
-((0 - max) - 1) - 1                  // runtime error: integer overflow in subtraction
+var min = -9223372036854775808  // now compiles and prints -9223372036854775808
+var max = 9223372036854775807   // fine
 ```
-
-Deliberately **not** fixed. A correct fix has to allow the magnitude only in a
-negation context, and the codegen side has no such context at the literal site -
-so accepting it outright would also accept `9223372036854775808` as a positive
-literal, which is wrong. Left as a documented limitation with the arithmetic
-workaround.
 
 ### O20 - `Shared<T>` really does lose updates; measured
 

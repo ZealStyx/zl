@@ -66,10 +66,24 @@ void testReadWriteLockState() {
     std::atomic<long> version{0};
     std::atomic<bool> inconsistent{false};
     std::atomic<bool> writersDone{false};
+    std::atomic<long> reads{0};
+    constexpr int kReaders = 4;
 
     std::vector<std::thread> threads;
     for (int w = 0; w < 2; ++w) {
         threads.emplace_back([&] {
+            // Wait until every reader has taken the lock at least once before
+            // writing anything. Two writers on a two-core box otherwise own both
+            // cores from start to finish, so the readers are not scheduled until
+            // writersDone is already set, exit on their first check, and
+            // "readers actually ran" fails for a reason that is about the
+            // scheduler rather than the lock. Measured on an idle two-core box:
+            // 199 failures in 200 solo runs, and 0 in 30 with both cores busy -
+            // a suite that only fails when the machine is quiet is one no CI
+            // runner ever reproduces.
+            while (reads.load(std::memory_order_acquire) < kReaders) {
+                std::this_thread::yield();
+            }
             for (int i = 0; i < 1000; ++i) {
                 std::unique_lock<std::shared_mutex> lock(*box->rwLockState);
                 // Two half-updates: a reader must never observe the pair mid-write.
@@ -78,13 +92,19 @@ void testReadWriteLockState() {
             }
         });
     }
-    std::atomic<long> reads{0};
-    for (int r = 0; r < 4; ++r) {
+    for (int r = 0; r < kReaders; ++r) {
         threads.emplace_back([&] {
             while (!writersDone.load(std::memory_order_acquire)) {
-                std::shared_lock<std::shared_mutex> lock(*box->rwLockState);
-                if (version.load() % 2 != 0) inconsistent.store(true);
-                ++reads;
+                {
+                    std::shared_lock<std::shared_mutex> lock(*box->rwLockState);
+                    if (version.load() % 2 != 0) inconsistent.store(true);
+                    ++reads;
+                }
+                // Yield between reads. Four readers in a tight loop starve the
+                // writers' exclusive lock on a two-core box - the interleaving
+                // this test is about still happens, it just took four seconds to
+                // get through 2000 writes instead of a fraction of one.
+                std::this_thread::yield();
             }
         });
     }

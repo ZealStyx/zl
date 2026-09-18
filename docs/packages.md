@@ -1,6 +1,7 @@
 # Packages, Imports, and Dependencies
 
 - [Imports](#imports)
+- [One primary type per file](#one-primary-type-per-file)
 - [The stdlib root](#the-stdlib-root)
 - [External dependencies (`zlpkg`)](#external-dependencies-zlpkg)
 
@@ -16,6 +17,62 @@ If neither `src` nor a project boundary is found, the entry file's own directory
 is used.
 
 Transitive imports, diamond imports, and circular-import detection are all handled.
+
+## One primary type per file
+
+Every `.zl` file must declare one **primary type** whose name matches the file stem
+exactly: `Helpers.zl` declares `class Helpers`, `Point.zl` declares `data Point`. The
+loader enforces this for the entry file and for every imported file, and names the
+file in the diagnostic when it does not hold:
+
+```text
+module error: file /path/to/split_test.zl must define primary type 'split_test'
+```
+
+The primary type does not have to be a `class`: `class`, `data`, `interface`, and
+`enum` declarations all satisfy the rule, so `Point.zl` may declare `data Point` and
+`Shape.zl` may declare `interface Shape`. Helper declarations may sit alongside it -
+a file whose primary type is `Helpers` may also declare a second class, a `data`, an
+`enum`, and so on, in any order.
+
+### Why the rule exists
+
+**An import names a type, and resolving it is a path computation.** `import
+io.github.test.Helpers` becomes `<sourceRoot>/io/github/test/Helpers.zl` by replacing
+dots with separators - no file is opened, no declaration is read, and there is no
+index of "which type lives where" to build or to keep fresh. The stem match is what
+makes that one name do both jobs: the last segment is simultaneously the file to load
+and the type it delivers. If `Helpers.zl` were allowed to declare `class Utils`
+instead, the import would resolve to a file that does not contain the name it asked
+for, and answering "where does `Utils` live?" would mean scanning every file in every
+root.
+
+**The dotted name is the module's identity, not just its address.** Diamond imports
+are merged once, circular imports are refused, and a type declared twice is reported
+as `class 'X' is defined in both <module> and <module>` - all keyed on the dotted
+module name (`src/compiler/module_graph.cpp`, driven from
+`src/compiler/module_loader.cpp`). One file, one name, one node in that graph. A file
+that exported two importable types would be two nodes backed by one file, and then a
+rename, a conflict report, or a cycle would have to say which of the two it meant.
+
+**A diagnostic can name the file or the type, interchangeably.** `Point.zl:12` and
+`Point` point at the same thing, which is worth more than it sounds when the message
+is all the user gets.
+
+### What that costs, and the escape hatch
+
+Only the primary type is importable *by name*: `import app.LibHelper` fails with
+`cannot resolve import` when `LibHelper` is a helper class inside `app/Lib.zl`, because
+there is no `LibHelper.zl` to resolve to. The helper is not lost, though - importing
+the file brings everything it declares with it, so `import app.Lib` makes both `Lib`
+and `LibHelper` visible to the importer.
+
+So the choice is about reach, not permission: a type that only matters next to its
+primary type can live in the same file and still travel with it; a type meant to be
+imported on its own gets its own file. The examples follow that convention:
+`examples/intermediate/_lib/` holds one type per file precisely because the examples
+import them individually (`Inheritance.zl` imports `Animal` and `Dog`;
+`Interfaces.zl` imports `Named`, `Shape` and `Circle`).
 
 ## The stdlib root
 

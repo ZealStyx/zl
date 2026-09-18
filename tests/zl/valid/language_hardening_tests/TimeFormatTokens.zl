@@ -1,0 +1,70 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - TimeFormatTokens
+//
+// P2-2: Time.format takes ZL's own tokens (YYYY, MM, DD, HH, mm, ss), not
+// strftime. An unrecognised token used to be left in place silently, so
+// Time.format(now, "%Y-%m-%d") returned the pattern unchanged - a wrong date
+// that looks like a right one. It now raises instead, naming the token set
+// (shared by Time.format and Time.utcFormat).
+//
+// Pinned here:
+//   * every documented token expands (checked through Time.utcFormat, which
+//     is deterministic - no local-time dependency in the expectations)
+//   * a full UTC pattern on the epoch and on a leap day
+//   * a strftime-shaped pattern raises on both format and utcFormat
+//   * a bare % anywhere in the pattern is treated as an unknown token
+// ============================================================================
+
+class TimeFormatTokens {
+    func check(bool cond, string what): void {
+        if (!cond) {
+            throw new Exception("TimeFormatTokens failed: " + what)
+        }
+    }
+
+    func messageOf(func action): string {
+        try {
+            action()
+        } catch e {
+            return "" + e
+        }
+        return ""
+    }
+
+    func main(): void {
+        var self = new TimeFormatTokens()
+
+        // ---- every token expands (UTC, so the expectations are stable) ----
+        self.check(Time.utcFormat(0, "YYYY") == "1970", "YYYY")
+        self.check(Time.utcFormat(0, "MM") == "01", "MM")
+        self.check(Time.utcFormat(0, "DD") == "01", "DD")
+        self.check(Time.utcFormat(0, "HH") == "00", "HH")
+        self.check(Time.utcFormat(0, "mm") == "00", "mm")
+        self.check(Time.utcFormat(0, "ss") == "00", "ss")
+
+        // ---- full patterns: the epoch, and a leap day ----
+        self.check(Time.utcFormat(0, "YYYY-MM-DD HH:mm:ss") == "1970-01-01 00:00:00",
+                   "epoch pattern")
+        self.check(Time.utcFormat(1709164800, "YYYY-MM-DD") == "2024-02-29",
+                   "leap day pattern")
+
+        // ---- strftime-shaped patterns raise instead of passing through ----
+        var msg = self.messageOf(func() => Time.format(0, "%Y-%m-%d"))
+        self.check(msg != "", "Time.format raises on a strftime pattern")
+        self.check(String.contains(msg, "Time.format"), "the error names Time.format")
+        self.check(String.contains(msg, "YYYY"), "the error names the token set")
+
+        self.check(self.messageOf(func() => Time.utcFormat(0, "%Y-%m-%d")) != "",
+                   "Time.utcFormat raises on a strftime pattern too")
+
+        // A bare % is an unknown token, even next to valid tokens.
+        self.check(self.messageOf(func() => Time.format(0, "YYYY at 50%")) != "",
+                   "a lone % is an unknown token")
+
+        // ---- a valid pattern still formats in local time without raising ----
+        var local = Time.format(0, "YYYY-MM-DD")
+        self.check(String.length(local) == 10, "local pattern returns a formatted date")
+
+        log("ok")
+    }
+}
