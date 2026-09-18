@@ -74,6 +74,13 @@ TracingGC::Collection TracingGC::collect(const GCRoots& roots) {
     }
     return {};
 }
+// The controlled stub never retires a box (collect returns an empty
+// Collection), so reclamation has nothing to destroy or recycle. Keep the
+// definition here - the real one lives in gc.cpp, which this seam does not
+// link - so the poll() path that calls reclaim() still resolves.
+void TracingGC::Collection::reclaim() noexcept {
+    retired_.clear();
+}
 } // namespace zl
 
 int main() {

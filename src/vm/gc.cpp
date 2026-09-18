@@ -7,9 +7,69 @@
 #include <utility>
 #include <type_traits>
 #include <algorithm>
+#include <chrono>
 #include <limits>
 
 namespace zl {
+namespace {
+
+// ---------------------------------------------------------------------------
+// Phase 0 box recycling: a retired box is returned to the free list only in a
+// default state, so a pooled box keeps nothing alive - a box that held a list
+// of live values must not pin those values (transitively) until it is reused,
+// and one that held a ChannelState or a Thread-joined mutex must have that
+// state destroyed now, exactly as `retired_.clear()` used to.
+// The mutexes inside a box (MapBox::mutex, ObjectBox::stateInitMutex) are not
+// reset: a retired box has no concurrent users by definition, and a live mutex
+// is the correct starting state for the next incarnation.
+// ---------------------------------------------------------------------------
+void resetListBox(ListBox& box) noexcept {
+    box.storageType.reset();
+    box.items.clear();
+    box.frontIndex = 0;
+}
+
+void resetMapBox(MapBox& box) noexcept {
+    box.storageType.reset();
+    box.entries.clear();
+    box.stringKeyIndexValid = false;
+    box.stringKeyIndex.clear();
+}
+
+void resetObjectBox(ObjectBox& box) noexcept {
+    box.genericTypeName.clear();
+    box.mutexState.reset();
+    box.rwLockState.reset();
+    box.atomicState.reset();
+    box.atomicBoolState.reset();
+    box.atomicDoubleState.reset();
+    box.atomicRefMutex.reset();
+    box.sharedValueMutex.reset();
+    box.atomicRefState.reset();
+    box.semaphoreState.reset();
+    box.conditionState.reset();
+    box.channelState.reset();
+    box.className.clear();
+    box.runtimeType.reset();
+    box.fields.clear();
+    box.extraFields.clear();
+}
+
+void resetClosureBox(ClosureBox& box) noexcept {
+    box.functionName.clear();
+    box.paramNames.clear();
+    box.parameterTypeNames.clear();
+    box.returnTypeName.clear();
+    box.isAsync = false;
+    box.isNative = false;
+    box.entryAddress = 0;
+    box.functionIndex = 0;
+    box.chunk.reset();
+    box.captured.clear();
+    box.typeBindings.clear();
+}
+
+} // namespace
 namespace {
 
 void appendValueChildren(const Value& value, std::vector<Value>& work, std::vector<const Chunk*>& programs) {
@@ -26,7 +86,7 @@ void appendValueChildren(const Value& value, std::vector<Value>& work, std::vect
             }
         } else if constexpr (std::is_same_v<T, ObjectRef>) {
             if (!held) return;
-            for (const auto& field : held->fields) work.push_back(field.second);
+            objectFieldForEach(*held, [&work](const std::string&, const Value& field) { work.push_back(field); });
             if (held->atomicRefState) work.push_back(held->atomicRefState->value);
             if (held->channelState) {
                 for (const auto& item : held->channelState->items) work.push_back(item);
@@ -112,43 +172,85 @@ void appendExceptionRoots(const std::exception_ptr& error, std::vector<Value>& r
     }
 }
 
+// Every runtime allocation goes through one of these four, which is why each
+// of them can consult the free list: a recycled box is byte-for-byte the same
+// allocation as a fresh one, already in a default state, so callers never see
+// the difference except in Counters::reused.
 ListRef makeGCList() {
     auto& gc = TracingGC::instance();
     std::lock_guard<std::mutex> lock(gc.mutex_);
-    auto box = std::make_unique<ListBox>();
+    // Pre-reserve the pool so reclaim()'s nothrow handoff cannot reallocate;
+    // a no-op once the capacity exists (see kFreeListCap).
+    gc.freeLists_.reserve(TracingGC::kFreeListCap);
+    std::unique_ptr<ListBox> box;
+    if (!gc.freeLists_.empty()) {
+        box = std::move(gc.freeLists_.back());
+        gc.freeLists_.pop_back();
+        ++gc.totalReused_;
+    } else {
+        box = std::make_unique<ListBox>();
+    }
     ListRef ref(box.get());
     gc.entries_.push_back(TracingGC::Entry{TracingGC::Entry::Kind::List, std::move(box), {}, {}, {}});
     ++gc.allocationsSinceCollection_;
+    ++gc.totalAllocations_;
     return ref;
 }
 
 MapRef makeGCMap() {
     auto& gc = TracingGC::instance();
     std::lock_guard<std::mutex> lock(gc.mutex_);
-    auto box = std::make_unique<MapBox>();
+    gc.freeMaps_.reserve(TracingGC::kFreeListCap);
+    std::unique_ptr<MapBox> box;
+    if (!gc.freeMaps_.empty()) {
+        box = std::move(gc.freeMaps_.back());
+        gc.freeMaps_.pop_back();
+        ++gc.totalReused_;
+    } else {
+        box = std::make_unique<MapBox>();
+    }
     MapRef ref(box.get());
     gc.entries_.push_back(TracingGC::Entry{TracingGC::Entry::Kind::Map, {}, std::move(box), {}, {}});
     ++gc.allocationsSinceCollection_;
+    ++gc.totalAllocations_;
     return ref;
 }
 
 ObjectRef makeGCObject() {
     auto& gc = TracingGC::instance();
     std::lock_guard<std::mutex> lock(gc.mutex_);
-    auto box = std::make_unique<ObjectBox>();
+    gc.freeObjects_.reserve(TracingGC::kFreeListCap);
+    std::unique_ptr<ObjectBox> box;
+    if (!gc.freeObjects_.empty()) {
+        box = std::move(gc.freeObjects_.back());
+        gc.freeObjects_.pop_back();
+        ++gc.totalReused_;
+    } else {
+        box = std::make_unique<ObjectBox>();
+    }
     ObjectRef ref(box.get());
     gc.entries_.push_back(TracingGC::Entry{TracingGC::Entry::Kind::Object, {}, {}, std::move(box), {}});
     ++gc.allocationsSinceCollection_;
+    ++gc.totalAllocations_;
     return ref;
 }
 
 ClosureRef makeGCClosure() {
     auto& gc = TracingGC::instance();
     std::lock_guard<std::mutex> lock(gc.mutex_);
-    auto box = std::make_unique<ClosureBox>();
+    gc.freeClosures_.reserve(TracingGC::kFreeListCap);
+    std::unique_ptr<ClosureBox> box;
+    if (!gc.freeClosures_.empty()) {
+        box = std::move(gc.freeClosures_.back());
+        gc.freeClosures_.pop_back();
+        ++gc.totalReused_;
+    } else {
+        box = std::make_unique<ClosureBox>();
+    }
     ClosureRef ref(box.get());
     gc.entries_.push_back(TracingGC::Entry{TracingGC::Entry::Kind::Closure, {}, {}, {}, std::move(box)});
     ++gc.allocationsSinceCollection_;
+    ++gc.totalAllocations_;
     return ref;
 }
 
@@ -199,6 +301,9 @@ TracingGC::Collection TracingGC::collect(const GCRoots& roots) {
     // The coordinator must stop all mutators before entering this method.
     // Serializing collectors alone does not make tracing concurrent-safe.
     std::lock_guard<std::mutex> collectLock(collectMutex_);
+    // Phase 0 measures "% of run time in collect" as this span: trace +
+    // protected-root resolution + the sweep, not lock waits.
+    const auto started = std::chrono::steady_clock::now();
 
     std::unordered_set<const void*> protectedIds;
     {
@@ -287,14 +392,85 @@ TracingGC::Collection TracingGC::collect(const GCRoots& roots) {
     // Adapt the next collection threshold to the live heap instead of using
     // only a fixed allocation count. A small floor avoids overly frequent
     // collections for tiny heaps, while allowing stable larger heaps to grow
-    // proportionally between collections.
+    // proportionally between collections. This is the Phase 0 growth policy:
+    // the trigger is 2x the live heap after every collection (floor 128), so
+    // a stable heap collects roughly once per heap-size of new allocations
+    // instead of once per 128 regardless of size.
     constexpr std::size_t kMinimumAllocationThreshold = 128;
     const std::size_t liveHeapBudget = entries_.size() > (std::numeric_limits<std::size_t>::max() / 2)
         ? std::numeric_limits<std::size_t>::max()
         : entries_.size() * 2;
     allocationThreshold_ = std::max(kMinimumAllocationThreshold, liveHeapBudget);
     allocationsSinceCollection_ = 0;
+    ++totalCollections_;
+    totalCollectNs_ += static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
+    if (entries_.size() > peakTracked_) peakTracked_ = entries_.size();
     return result;
+}
+
+TracingGC::Counters TracingGC::counters() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Counters c;
+    c.allocations = totalAllocations_;
+    c.reused = totalReused_;
+    c.collections = totalCollections_;
+    c.collectNs = totalCollectNs_;
+    c.tracked = entries_.size();
+    c.peakTracked = peakTracked_;
+    c.threshold = allocationThreshold_;
+    return c;
+}
+
+void TracingGC::Collection::reclaim() noexcept {
+    // Retired boxes are unreachable - no root, live or parked, names them -
+    // and retired_ is owned by this Collection alone, so neither the walk
+    // nor the reset needs the registry lock. The reset MUST run without that
+    // lock: a payload destructor can join a thread (a ThreadRef, whose
+    // deleter re-enters the runtime) or allocate, and both would deadlock
+    // against a held mutex_ - this is the same reason reclamation is
+    // deferred out of the trace in the first place. Resetting also guarantees
+    // a pooled box keeps nothing alive and that the overflow's destruction
+    // below happens in a known state.
+    for (auto& entry : retired_) {
+        switch (entry.kind) {
+            case TracingGC::Entry::Kind::List: resetListBox(*entry.list); break;
+            case TracingGC::Entry::Kind::Map: resetMapBox(*entry.map); break;
+            case TracingGC::Entry::Kind::Object: resetObjectBox(*entry.object); break;
+            case TracingGC::Entry::Kind::Closure: resetClosureBox(*entry.closure); break;
+        }
+    }
+    // Hand the reset boxes to the free list under the lock so makeGC* never
+    // sees a half-pooled box. The pools are pre-reserved to their cap in
+    // TracingGC's constructor, so these push_backs cannot reallocate and
+    // this noexcept path cannot throw. The cap keeps a churn burst from
+    // reserving an unbounded pool; overflow is destroyed after the loop,
+    // still with no lock held.
+    auto& gc = TracingGC::instance();
+    {
+        std::lock_guard<std::mutex> lock(gc.mutex_);
+        for (auto& entry : retired_) {
+            switch (entry.kind) {
+                case TracingGC::Entry::Kind::List:
+                    if (gc.freeLists_.size() < TracingGC::kFreeListCap)
+                        gc.freeLists_.push_back(std::move(entry.list));
+                    break;
+                case TracingGC::Entry::Kind::Map:
+                    if (gc.freeMaps_.size() < TracingGC::kFreeListCap)
+                        gc.freeMaps_.push_back(std::move(entry.map));
+                    break;
+                case TracingGC::Entry::Kind::Object:
+                    if (gc.freeObjects_.size() < TracingGC::kFreeListCap)
+                        gc.freeObjects_.push_back(std::move(entry.object));
+                    break;
+                case TracingGC::Entry::Kind::Closure:
+                    if (gc.freeClosures_.size() < TracingGC::kFreeListCap)
+                        gc.freeClosures_.push_back(std::move(entry.closure));
+                    break;
+            }
+        }
+    }
+    retired_.clear();
 }
 
 void TracingGC::protect(const void* identity) {

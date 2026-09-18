@@ -95,30 +95,55 @@ void initializeObjectType(Value& value, const std::string& typeName, const Chunk
     (*object)->genericTypeName = spec.args.empty() ? std::string{} : describeTypeName(spec);
     const auto meta = chunk.classReflection.find(spec.name);
     if (meta != chunk.classReflection.end()) (*object)->runtimeType = meta->second.runtimeType;
-    if (meta != chunk.classReflection.end()) {
-        // Declared instance fields start at their type's zero value, not nil:
-        // reading an `int` field the constructor never assigned must yield 0
-        // (not a nil that then explodes in arithmetic), `double` 0.0, `bool`
-        // false, `string` "". Everything with reference semantics (objects,
-        // collections, funcs, unresolved type parameters) stays nil, which is
-        // the only sensible absent value. Only fields the object does not
-        // already carry are defaulted, so a factory that pre-set a field keeps
-        // its value and still gets type-asserted below. The field's EFFECTIVE
-        // type is used, so a generic class instantiated as Gen<int> defaults
-        // its T payload to 0, not nil.
+    if (meta != chunk.classReflection.end() && (*object)->runtimeType) {
+        // Flat storage initialisation, in two steps:
+        //
+        // 1. Materialise. A factory can write declared fields BEFORE this
+        //    call attaches the runtime type (native factories build the box,
+        //    then the VM initialises it): those writes landed in
+        //    extraFields, where a layout read would miss them. Move every
+        //    in-layout extra entry into its slot first, so the two stores
+        //    never disagree about a declared name.
+        const auto& layout = *(*object)->runtimeType;
+        if (!(*object)->extraFields.empty()) {
+            std::vector<std::string> pending;
+            for (const auto& [name, value] : (*object)->extraFields)
+                if (layout.fieldIndex.count(name)) pending.push_back(name);
+            for (const auto& name : pending) {
+                const auto slot = layout.fieldIndex.at(name);
+                if ((*object)->fields.size() <= slot) (*object)->fields.resize(slot + 1);
+                (*object)->fields[slot] = std::move((*object)->extraFields[name]);
+                (*object)->extraFields.erase(name);
+            }
+        }
+        // 2. Default. Declared instance fields start at their type's zero
+        //    value, not nil: reading an `int` field the constructor never
+        //    assigned must yield 0 (not a nil that then explodes in
+        //    arithmetic), `double` 0.0, `bool` false, `string` "".
+        //    Everything with reference semantics (objects, collections,
+        //    funcs, unresolved type parameters) stays nil, which is the only
+        //    sensible absent value. Only slots that were never materialised
+        //    take a default, so a factory that pre-set a field keeps its
+        //    value and still gets type-asserted below. The field's EFFECTIVE
+        //    type is used, so a generic class instantiated as Gen<int>
+        //    defaults its T payload to 0, not nil.
         for (const auto& field : meta->second.fields) {
             if (field.isStatic) continue;
-            if ((*object)->fields.find(field.name) == (*object)->fields.end()) {
-                (*object)->fields.emplace(
-                    field.name,
-                    defaultFieldValue(runtimeFieldType(chunk, spec.name, field.name, object->get()), chunk));
+            const auto slot = objectFieldSlot(**object, field.name);
+            if (!slot) continue;
+            if ((*object)->fields.size() <= *slot) {
+                (*object)->fields.resize(*slot + 1);
+                (*object)->fields[*slot] =
+                    defaultFieldValue(runtimeFieldType(chunk, spec.name, field.name, object->get()), chunk);
             }
         }
         RuntimeTypeCheck fields(&chunk);
         for (const auto& field : meta->second.fields) {
-            const auto value = (*object)->fields.find(field.name);
-            if (!field.isStatic && value != (*object)->fields.end())
-                fields.require(value->second, runtimeFieldType(chunk, spec.name, field.name, object->get()));
+            if (field.isStatic) continue;
+            const auto slot = objectFieldSlot(**object, field.name);
+            if (!slot || (*object)->fields.size() <= *slot) continue;
+            fields.require((*object)->fields[*slot],
+                           runtimeFieldType(chunk, spec.name, field.name, object->get()));
         }
         fields.commit();
     }

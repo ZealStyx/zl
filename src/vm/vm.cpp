@@ -94,18 +94,34 @@ ObjectRef makeRuntimeExceptionObject(const std::string& className, const std::st
     }
     Value objectValue = makeEmptyObject(resolved);
     auto object = std::get<ObjectRef>(objectValue);
-    object->fields["message"] = message;
-    object->fields["stackTrace"] = formatStackTrace(state, traceFallback);
+    // The flat field layout resolves names through the box's own runtimeType,
+    // so the type must be attached BEFORE the declared fields are written -
+    // otherwise message/stackTrace would land in extraFields and the
+    // in-layout read would see nil (the ObjectBox comment in value.hpp).
     if (chunk) {
         auto it = chunk->classReflection.find(resolved);
         if (it != chunk->classReflection.end()) object->runtimeType = it->second.runtimeType;
     }
+    objectFieldAccess(*object, "message") = message;
+    objectFieldAccess(*object, "stackTrace") = formatStackTrace(state, traceFallback);
     return object;
 }
 
 [[noreturn]] void throwRuntimeFault(const ZlRuntimeFault& fault, const Chunk* chunk,
                                     const ExecutionState* state) {
     throw ZlThrownException(makeRuntimeExceptionObject(fault.className(), fault.what(), chunk, state, "at <runtime>"));
+}
+
+// CancellationException for the async invocation paths. The flat field layout
+// resolves "message" through the box's runtime class, so the type is attached
+// before the first write (see makeRuntimeExceptionObject).
+ObjectRef makeCancellationException(const Chunk& chunk) {
+    Value object = makeEmptyObject("CancellationException");
+    auto ex = std::get<ObjectRef>(object);
+    const auto it = chunk.classReflection.find("CancellationException");
+    if (it != chunk.classReflection.end()) ex->runtimeType = it->second.runtimeType;
+    objectFieldAccess(*ex, "message") = std::string("task was cancelled");
+    return ex;
 }
 
 // A plain std::runtime_error escaping the interpreter core is still a genuine
@@ -935,12 +951,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     throw std::runtime_error("VM: await expects a Task value");
                 }
                 if (asyncInvocation_ && asyncInvocation_->task && asyncInvocation_->task->cancellationRequested()) {
-                    throw ZlThrownException([&]() {
-                        Value object = makeEmptyObject("CancellationException");
-                        auto ex = std::get<ObjectRef>(object);
-                        ex->fields["message"] = std::string("task was cancelled");
-                        return ex;
-                    }());
+                    throw ZlThrownException(makeCancellationException(chunk));
                 }
                 const TaskStatus status = (*taskRef)->status();
                 if (status == TaskStatus::Succeeded || status == TaskStatus::Failed || status == TaskStatus::Cancelled) {
@@ -1093,6 +1104,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 copy->className = src->className;
                 copy->runtimeType = src->runtimeType;
                 copy->fields = src->fields;
+                copy->extraFields = src->extraFields;
                 state_.push(ObjectRef(copy));
                 ip++;
                 break;
@@ -1206,9 +1218,8 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 if (const auto* listRef = std::get_if<ListRef>(&object)) {
                     list = *listRef;
                 } else if (const auto* objRef = std::get_if<ObjectRef>(&object); objRef && *objRef) {
-                    auto it = (*objRef)->fields.find("__native");
-                    if (it != (*objRef)->fields.end()) {
-                        if (const auto* nativeList = std::get_if<ListRef>(&it->second)) list = *nativeList;
+                    if (const Value* nativeField = objectFieldLookup(**objRef, "__native")) {
+                        if (const auto* nativeList = std::get_if<ListRef>(nativeField)) list = *nativeList;
                     }
                 }
                 if (!list) {
@@ -1234,14 +1245,12 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     throw std::runtime_error("VM: cannot read field '" + fieldName + "' of non-object (or nil)");
                 }
                 
-                auto& fields = (*objRef)->fields;
-                auto it = fields.find(fieldName);
-                if (it != fields.end()) {
-                    state_.push(it->second);
-                } else {
-                    // Field isn't present - currently defaults to nil
-                    state_.push(Value{}); 
-                }
+                // Flat layout: the name resolves through the box's runtime
+                // class once, and the slot is a vector index from then on.
+                // A name with no value (declared but never materialised, or
+                // never written at all) keeps its historical nil default.
+                const Value* found = objectFieldLookup(**objRef, fieldName);
+                state_.push(found ? *found : Value{});
                 ip++;
                 break;
             }
@@ -1261,7 +1270,7 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                 {
                     RuntimeTypeCheck types(&chunk);
                     types.require(value, runtimeFieldType(chunk, (*objRef)->className, fieldName, objRef->get()));
-                    std::swap((*objRef)->fields[fieldName], replacement);
+                    std::swap(objectFieldAccess(**objRef, fieldName), replacement);
                     types.commit();
                 }
                 state_.push(value); // assignment leaves the value on the stack
@@ -1416,14 +1425,14 @@ VM::ExecuteStatus VM::execute(const Chunk& chunk, std::size_t startIp, bool stop
                     throw std::runtime_error("throw requires an Exception-derived object");
                 }
                 auto ex = std::get<ObjectRef>(std::move(thrown));
-                if (ex->fields.find("stackTrace") != ex->fields.end() || ex->className == "Exception" || isSubclass(chunk, ex->className, "Exception")) {
+                if (objectFieldLookup(*ex, "stackTrace") != nullptr || ex->className == "Exception" || isSubclass(chunk, ex->className, "Exception")) {
                     std::string trace;
                     for (const auto& name : state_.callStackNames()) {
                         if (!trace.empty()) trace += "\n";
                         trace += "at " + name;
                     }
                     if (trace.empty()) trace = "at <runtime>";
-                    ex->fields["stackTrace"] = trace;
+                    objectFieldAccess(*ex, "stackTrace") = trace;
                 }
                 throw ZlThrownException(std::move(ex));
             }
@@ -1490,8 +1499,8 @@ bool VM::dispatchThrownException(const Chunk& chunk, const ObjectRef& thrown,
     } else {
         // An untyped `catch e` binds the failure message, preserving the
         // historical contract for both thrown objects and runtime faults.
-        const auto message = thrown->fields.find("message");
-        state_.push(message != thrown->fields.end() ? message->second : Value(valueToString(Value(thrown))));
+        const Value* message = objectFieldLookup(*thrown, "message");
+        state_.push(message ? *message : Value(valueToString(Value(thrown))));
     }
     ip = h.catchIp;
     return true;
@@ -1540,10 +1549,7 @@ void VM::resumeAsyncInvocation() {
             asyncInvocation_->started = true;
         }
         if (asyncInvocation_->task->cancellationRequested()) {
-            Value object = makeEmptyObject("CancellationException");
-            auto ex = std::get<ObjectRef>(object);
-            ex->fields["message"] = std::string("task was cancelled");
-            pendingResumeException_ = std::make_exception_ptr(ZlThrownException(std::move(ex)));
+            pendingResumeException_ = std::make_exception_ptr(ZlThrownException(makeCancellationException(*asyncInvocation_->chunk)));
         }
         Value result;
         // Pass the invocation's chunk owner along so closures and nested async
@@ -1591,9 +1597,9 @@ Value VM::invokeReflectiveFunction(const Value& functionValue, const Value& args
     auto list = std::get_if<ListRef>(&argsList);
     if (!functionObj || !(*functionObj) || (*functionObj)->className != "Function" || !list || !(*list))
         throwReflectionException("ReflectionError.InvalidArguments: malformed function invocation", activeChunk_, &state_);
-    auto cit = (*functionObj)->fields.find("__closure");
-    if (cit == (*functionObj)->fields.end()) throwReflectionException("ReflectionError: invalid function handle", activeChunk_, &state_);
-    auto closure = std::get_if<ClosureRef>(&cit->second);
+    const Value* closureField = objectFieldLookup(**functionObj, "__closure");
+    if (closureField == nullptr) throwReflectionException("ReflectionError: invalid function handle", activeChunk_, &state_);
+    auto closure = std::get_if<ClosureRef>(closureField);
     if (!closure || !(*closure) || !(*closure)->chunk)
         throwReflectionException("ReflectionError: invalid function closure", activeChunk_, &state_);
     if ((*closure)->functionIndex == Chunk::INVALID_FUNCTION_INDEX ||
@@ -1622,17 +1628,17 @@ Value VM::invokeReflectiveMethod(const Value& methodValue, const Value& receiver
     auto list = std::get_if<ListRef>(&argsList);
     if (!methodObj || !*methodObj || (*methodObj)->className != "Method" || !list || !*list)
         throwReflectionException("ReflectionError.InvalidArguments: malformed method invocation", activeChunk_, &state_);
-    auto fit = (*methodObj)->fields.find("__functionIndex");
-    auto ait = (*methodObj)->fields.find("access");
-    auto sit = (*methodObj)->fields.find("static");
-    if (fit == (*methodObj)->fields.end() || !std::holds_alternative<std::int64_t>(fit->second))
+    const Value* fit = objectFieldLookup(**methodObj, "__functionIndex");
+    const Value* ait = objectFieldLookup(**methodObj, "access");
+    const Value* sit = objectFieldLookup(**methodObj, "static");
+    if (fit == nullptr || !std::holds_alternative<std::int64_t>(*fit))
         throwReflectionException("ReflectionError: invalid method handle", activeChunk_, &state_);
-    const auto access = ait != (*methodObj)->fields.end() && std::holds_alternative<std::string>(ait->second) ? std::get<std::string>(ait->second) : "public";
+    const auto access = ait != nullptr && std::holds_alternative<std::string>(*ait) ? std::get<std::string>(*ait) : "public";
     if (access != "public") throwReflectionException("ReflectionError.AccessViolation: method is not public", activeChunk_, &state_);
-    const bool isStatic = sit != (*methodObj)->fields.end() && std::holds_alternative<bool>(sit->second) && std::get<bool>(sit->second);
+    const bool isStatic = sit != nullptr && std::holds_alternative<bool>(*sit) && std::get<bool>(*sit);
     if (!isStatic && (!std::holds_alternative<ObjectRef>(receiver) || !std::get<ObjectRef>(receiver)))
         throwReflectionException("ReflectionError.InvalidArguments: instance method requires object receiver", activeChunk_, &state_);
-    const auto index = static_cast<std::size_t>(std::get<std::int64_t>(fit->second));
+    const auto index = static_cast<std::size_t>(std::get<std::int64_t>(*fit));
     if (!activeChunk_ || index == Chunk::INVALID_FUNCTION_INDEX || index >= activeChunk_->functions.size())
         throwReflectionException("ReflectionError: invalid method function index", activeChunk_, &state_);
     const auto& fn = activeChunk_->functions[index];
@@ -1660,14 +1666,14 @@ Value VM::invokeReflectiveConstructor(const Value& constructorValue, const Value
     auto list = std::get_if<ListRef>(&argsList);
     if (!ctorObj || !*ctorObj || (*ctorObj)->className != "Constructor" || !list || !*list)
         throwReflectionException("ReflectionError.InvalidArguments: malformed constructor invocation", activeChunk_, &state_);
-    auto fit = (*ctorObj)->fields.find("__functionIndex");
-    auto oit = (*ctorObj)->fields.find("__owner");
-    auto ait = (*ctorObj)->fields.find("__access");
-    if (fit == (*ctorObj)->fields.end() || !std::holds_alternative<std::int64_t>(fit->second) || oit == (*ctorObj)->fields.end() || !std::holds_alternative<std::string>(oit->second))
+    const Value* fit = objectFieldLookup(**ctorObj, "__functionIndex");
+    const Value* oit = objectFieldLookup(**ctorObj, "__owner");
+    const Value* ait = objectFieldLookup(**ctorObj, "__access");
+    if (fit == nullptr || !std::holds_alternative<std::int64_t>(*fit) || oit == nullptr || !std::holds_alternative<std::string>(*oit))
         throwReflectionException("ReflectionError: invalid constructor handle", activeChunk_, &state_);
-    const auto access = ait != (*ctorObj)->fields.end() && std::holds_alternative<std::string>(ait->second) ? std::get<std::string>(ait->second) : "public";
+    const auto access = ait != nullptr && std::holds_alternative<std::string>(*ait) ? std::get<std::string>(*ait) : "public";
     if (access != "public") throwReflectionException("ReflectionError.AccessViolation: constructor is not public", activeChunk_, &state_);
-    const auto index = static_cast<std::size_t>(std::get<std::int64_t>(fit->second));
+    const auto index = static_cast<std::size_t>(std::get<std::int64_t>(*fit));
     if (!activeChunk_ || index == Chunk::INVALID_FUNCTION_INDEX || index >= activeChunk_->functions.size())
         throwReflectionException("ReflectionError: invalid constructor function index", activeChunk_, &state_);
     const auto& fn = activeChunk_->functions[index];
@@ -1679,7 +1685,7 @@ Value VM::invokeReflectiveConstructor(const Value& constructorValue, const Value
         if (!runtimeAssignableToType(values[i], expected, activeChunk_))
             throwReflectionException("ReflectionError.InvalidArguments: argument type mismatch at index " + std::to_string(i), activeChunk_, &state_);
     }
-    Value object = makeEmptyObject(std::get<std::string>(oit->second));
+    Value object = makeEmptyObject(std::get<std::string>(*oit));
     auto obj = std::get<ObjectRef>(object);
     auto meta = activeChunk_->classReflection.find(obj->className);
     if (meta != activeChunk_->classReflection.end()) obj->runtimeType = meta->second.runtimeType;

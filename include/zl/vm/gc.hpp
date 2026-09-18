@@ -46,9 +46,32 @@ public:
         std::size_t deferred{0};
     };
 
+    // Process-wide lifetime counters, independent of any single collection.
+    // `allocations` counts every box that entered the registry (fresh or
+    // recycled); `reused` counts the subset that came from the free list, so
+    // fresh = allocations - reused. These are the Phase 0 benchmark inputs:
+    // throughput per allocation and the free list's hit rate.
+    struct Counters {
+        std::size_t allocations{0};
+        std::size_t reused{0};
+        std::size_t collections{0};
+        std::uint64_t collectNs{0};
+        std::size_t tracked{0};
+        std::size_t peakTracked{0};
+        std::size_t threshold{0};
+    };
+    [[nodiscard]] Counters counters() const;
+
     // Trace/sweep only detaches garbage. Keep this result until mutators have
     // resumed, then reclaim: C++ ownership inside an unreachable box can join
     // threads, unregister VMs, or destroy a program's static storage.
+    //
+    // reclaim() runs after the trace but with peers runnable (the collector
+    // drops the coordinator lock first), which is why destruction is deferred
+    // out of the trace at all: a destructor may join a thread or allocate.
+    // The recycled-box path returns storage to the free list here instead of
+    // destroying it; the free list has its own lock, and a retired box is
+    // unreachable by definition, so pooling is safe with mutators running.
     class Collection {
     public:
         Collection() = default;
@@ -57,11 +80,15 @@ public:
         Collection(const Collection&) = delete;
         Collection& operator=(const Collection&) = delete;
         Stats stats;
-        void reclaim() noexcept { retired_.clear(); }
+        void reclaim() noexcept;
     private:
         friend class TracingGC;
         std::vector<Entry> retired_;
     };
+
+    TracingGC() = default;
+    TracingGC(const TracingGC&) = delete;
+    TracingGC& operator=(const TracingGC&) = delete;
 
     static TracingGC& instance();
 
@@ -87,13 +114,31 @@ private:
     friend ObjectRef makeGCObject();
     friend ClosureRef makeGCClosure();
 
+    // Phase 0 box recycling: retired boxes are reset to a default state and
+    // handed back to a per-kind free list instead of destroyed, so a churn
+    // workload reuses storage instead of paying a fresh allocation each time.
+    // The cap bounds the pool: a benchmark that allocates a million boxes and
+    // drops them must not keep a million boxes resident "for later". A pool
+    // that exceeds the cap destroys the overflow; the hit-rate counter in
+    // Counters::reused is how the benchmark sees the trade.
+    static constexpr std::size_t kFreeListCap = 8192;
 
     mutable std::mutex mutex_;
     mutable std::mutex collectMutex_;
     std::vector<Entry> entries_;
+    std::vector<std::unique_ptr<ListBox>> freeLists_;
+    std::vector<std::unique_ptr<MapBox>> freeMaps_;
+    std::vector<std::unique_ptr<ObjectBox>> freeObjects_;
+    std::vector<std::unique_ptr<ClosureBox>> freeClosures_;
     std::unordered_map<const void*, std::size_t> protectedRoots_;
     std::size_t allocationsSinceCollection_{0};
     std::size_t allocationThreshold_{128};
+    // Lifetime counters (see Counters). Guarded by mutex_.
+    std::size_t totalAllocations_{0};
+    std::size_t totalReused_{0};
+    std::size_t totalCollections_{0};
+    std::uint64_t totalCollectNs_{0};
+    std::size_t peakTracked_{0};
 };
 
 // Retain a root across a queued/running native callback, including enqueue or

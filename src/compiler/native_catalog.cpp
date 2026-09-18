@@ -298,6 +298,11 @@ std::vector<NativeSignature> buildSignatureTable() {
     sigs.push_back({NativeId::INT_PARSE, "Int.parse",    {ZlType::STRING}, ZlType::INT});
     sigs.push_back({NativeId::DOUBLE_PARSE, "Double.parse", {ZlType::STRING}, ZlType::DOUBLE});
     sigs.push_back({NativeId::BOOL_PARSE, "Bool.parse",   {ZlType::STRING}, ZlType::BOOL});
+    // Phase 0 benchmark measurement surface (memory-domains.md §9/§10): the
+    // process-wide collector counters as a plain string-keyed map of ints.
+    // Returns a bare map so the caller can read any counter by name without a
+    // fixed shape; the keys are stable and documented in gcStats().
+    sigs.push_back({NativeId::GC_STATS, "GC.stats", {}, ZlType::MAP, "zl.lang", {}, NativeReturnTypeRule::NONE, ZlType::UNKNOWN, "map<string,int>"});
 
     return sigs;
 }

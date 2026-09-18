@@ -33,10 +33,9 @@ std::string thrownField(const std::function<void()>& call, bool& threw, const st
         return {};
     } catch (const ZlThrownException& e) {
         threw = true;
-        const auto& fields = e.value()->fields;
-        auto it = fields.find(field);
-        if (it != fields.end() && std::holds_alternative<std::string>(it->second)) {
-            return std::get<std::string>(it->second);
+        const Value* it = objectFieldLookup(*e.value(), field);
+        if (it != nullptr && std::holds_alternative<std::string>(*it)) {
+            return std::get<std::string>(*it);
         }
         return {};
     }

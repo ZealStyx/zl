@@ -1,0 +1,73 @@
+// ============================================================================
+// ZL Examples - Advanced - Ownership basics
+//
+// The four slot modifiers, in one small program:
+//
+//   gc      the default: `var t = new T()` is collector-managed and needs
+//           no spelling at all
+//   owned   one owner; `move t` transfers it and ends the binding
+//   borrow  a read-only view of an owned value; the owner keeps the box
+//   shared  the thread-synchronised cell `Shared<T>` (not reference
+//           counting - it is a lock-guarded value slot)
+//
+// What each one buys: `owned` and `borrow` are checked at compile time, so a
+// use-after-move or a move under a live borrow is a compile error - see
+// tests/zl/invalid/ownership_tests/ for the two rejects. Reclamation of an
+// owned box is still the collector's schedule; the modifier governs
+// aliasing, not when memory comes back.
+// ============================================================================
+
+class Ticket {
+    private string label
+
+    func Ticket(string label): void {
+        this.label = label
+    }
+
+    public func label(): string {
+        return this.label
+    }
+}
+
+class OwnershipBasics {
+    static func read(borrow Ticket t): string {
+        return t.label()
+    }
+
+    static func consume(owned Ticket t): string {
+        return t.label() + ":consumed"
+    }
+
+    func main(): void {
+        // gc: no modifier, collector-managed.
+        var gcTicket = new Ticket("gc")
+        log("gc=" + gcTicket.label())
+
+        // owned: this function owns the box; `read` only borrows it.
+        owned Ticket ownedTicket = new Ticket("owned")
+        log("owned=" + OwnershipBasics.read(ownedTicket))
+
+        // `move` ends the binding - one more owner takes the box.
+        log("moved=" + OwnershipBasics.consume(move ownedTicket))
+
+        // borrow: a view that must not outlive its owner.
+        owned Ticket kept = new Ticket("kept")
+        borrow Ticket view = kept
+        log("view=" + view.label())
+        log("owner-still-holds=" + kept.label())
+
+        // shared: a synchronised cell, the capture-safe way to share state.
+        var cell = new Shared<int>(0)
+        cell.setValue(cell.get() + 7)
+        log("cell=" + cell.get())
+    }
+}
+
+// --- Expected output (verified by examples/run_all.sh) ---
+// gc=gc
+// owned=owned
+// moved=owned:consumed
+// view=kept
+// owner-still-holds=kept
+// cell=7
+// --- End expected output ---
