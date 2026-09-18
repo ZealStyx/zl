@@ -1,0 +1,107 @@
+import zl.lang.Atomic
+import zl.lang.Condition
+
+// ============================================================================
+// Regression fixture - valid/concurrency_regressions - ConditionWorkerSignal
+//
+// P2-4: `Condition` had never been exercised from a worker thread. The example
+// named after it (examples/basics/Conditions.zl) is about `elif`,
+// tests/runtime_sync_tests.cpp pokes the primitive's C++ state directly, and
+// this directory held no Condition case at all - so "a thread can block on a
+// condition and a different thread can wake it" was an untested claim.
+//
+// Everything below waits inside a spawned thread and is signalled from another
+// one:
+//
+//   1. the documented safe pattern (`Condition.waitUntil` over a state flag)
+//      hands off correctly twenty rounds running, not once - a wakeup that only
+//      works on the first attempt is a race, not a feature;
+//   2. the bare primitive (`Condition.wait` / `Condition.notifyAll`) really
+//      blocks a worker and really wakes it. A notification delivered before the
+//      waiter blocks is lost by design (see stdlib/zl/lang/Condition.zl), so
+//      the signaller keeps notifying until the waiter reports itself awake:
+//      bounded, which turns a broken wait into a failed check rather than a
+//      hung fixture;
+//   3. `Condition.waitFor` gives up when its timeout expires first and says so,
+//      from a worker thread - the bounded wait is not a blocking one in
+//      disguise.
+// ============================================================================
+
+class ConditionWorkerSignal {
+    func check(bool cond, string what): void {
+        if (!cond) {
+            throw new Exception("ConditionWorkerSignal failed: " + what)
+        }
+    }
+
+    func main(): void {
+        var self = new ConditionWorkerSignal()
+
+        // ---- 1. twenty rounds of wait-until-signalled ----------------------
+        var rounds = 0
+        for round in 0..20 {
+            var gate = new Condition()
+            var released = new Atomic()
+            var observed = new Atomic()
+
+            var waiter = Thread.start(func() {
+                Condition.waitUntil(gate, func() { return Atomic.loadBool(released) })
+                // What the waiter sees once it is awake is the point: the state
+                // the signaller published, not whatever was there before.
+                if (Atomic.loadBool(released)) { Atomic.store(observed, 1) }
+            })
+            var signaller = Thread.start(func() {
+                Atomic.storeBool(released, true)
+                Condition.signal(gate)
+            })
+            Thread.join(waiter)
+            Thread.join(signaller)
+
+            self.check(Atomic.load(observed) == 1,
+                       "round " + round + ": the waiter woke on the published state")
+            rounds = rounds + 1
+        }
+        self.check(rounds == 20, "all twenty rounds ran")
+
+        // ---- 2. the bare primitive blocks a worker, and a notify wakes it --
+        var bareGate = new Condition()
+        var awake = new Atomic()
+        var notifies = new Atomic()
+
+        var bareWaiter = Thread.start(func() {
+            Condition.wait(bareGate)
+            Atomic.storeBool(awake, true)
+        })
+        var bareSignaller = Thread.start(func() {
+            var sent = 0
+            while (!Atomic.loadBool(awake) && sent < 500) {
+                Condition.notifyAll(bareGate)
+                sent = sent + 1
+                Atomic.store(notifies, sent)
+                Time.sleep(0.01)
+            }
+        })
+        Thread.join(bareSignaller)
+        Thread.join(bareWaiter)
+
+        self.check(Atomic.loadBool(awake),
+                   "a notify from another thread wakes a worker blocked in Condition.wait")
+        self.check(Atomic.load(notifies) < 500,
+                   "the waiter woke while the signaller was still signalling")
+
+        // ---- 3. the bounded wait is bounded --------------------------------
+        var quietGate = new Condition()
+        var timedOut = new Atomic()
+        var timer = Thread.start(func() {
+            // Nobody notifies this gate, so waitFor must give up on its own and
+            // report false rather than park the worker indefinitely.
+            if (!Condition.waitFor(quietGate, 0.2)) { Atomic.storeBool(timedOut, true) }
+        })
+        Thread.join(timer)
+
+        self.check(Atomic.loadBool(timedOut),
+                   "Condition.waitFor reports false when the timeout expires first")
+
+        log("ok")
+    }
+}

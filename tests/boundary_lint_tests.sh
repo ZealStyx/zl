@@ -24,6 +24,19 @@ fi
 failures=0
 checks=0
 
+# Literal substring test with no pipeline in it. `printf ... | grep -q` looks
+# equivalent and is not: grep -q exits at the first match, printf then dies of
+# SIGPIPE, and `set -o pipefail` reports the *pipeline* as failed - so this
+# suite intermittently announced "diagnostic does not name src/main.cpp:3"
+# while printing that very line underneath, and `ctest -j2` went red for a
+# reason that had nothing to do with the change under test.
+contains() {  # contains HAYSTACK NEEDLE
+    case "$1" in
+        *"$2"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 expect_fail() {  # $1 = case name; the lint output is asserted to name $2:$3
     local name="$1" file="$2" line="$3" output code
     output=$(bash "$LINT" "$WORK" 2>&1)
@@ -35,7 +48,7 @@ expect_fail() {  # $1 = case name; the lint output is asserted to name $2:$3
         failures=$((failures + 1))
         return
     fi
-    if ! printf '%s\n' "$output" | grep -q "$file:$line:"; then
+    if ! contains "$output" "$file:$line:"; then
         echo "FAIL: $name: diagnostic does not name $file:$line"
         echo "$output" | sed 's/^/    /'
         failures=$((failures + 1))
@@ -181,7 +194,7 @@ expect_fail "native tier acquires the VM runtime" "src/native/select.cpp" 1
 
 # --- the real tree holds -----------------------------------------------------
 checks=$((checks + 1))
-if output=$(bash "$LINT" "$ROOT" 2>&1) && printf '%s\n' "$output" | grep -q "rules 1-4 hold"; then
+if output=$(bash "$LINT" "$ROOT" 2>&1) && contains "$output" "rules 1-4 hold"; then
     echo "PASS: the repository itself passes the boundary lint"
 else
     echo "FAIL: the repository does not pass its own boundary lint:"
