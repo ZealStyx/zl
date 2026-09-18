@@ -9,16 +9,16 @@
 //   Time.sleep(seconds)     block the current thread
 //   Time.year/month/day/hour/minute/second(timestamp)
 //
-// TWO TRAPS, both confirmed by running this:
+// ONE TRAP, confirmed by running this:
 //
-//   * `Time.nowMillis()` in zl.time/Time.zl is declared as
-//     `public static func nowMillis(): int { return Time.nowMillis() }`, which
-//     shadows the native of the same name and calls itself forever. It ends in
-//     "stack overflow: maximum call depth (100000) exceeded". Use `Time.now()`.
 // `Time.format` takes its OWN tokens, not strftime: `YYYY`, `MM`, `DD`, `HH`,
-// `mm`, `ss`. A token it does not recognise is left in place rather than
-// reported, so `"%Y-%m-%d"` comes back unchanged - easy to mistake for a broken
-// function.
+// `mm`, `ss`. A token it does not recognise raises instead of being left in
+// place, so `"%Y-%m-%d"` is rejected loudly rather than returned unchanged -
+// it used to come back silently, easy to mistake for a broken function.
+//
+// (A second trap - `Time.nowMillis()` in zl.time/Time.zl recursing into
+// itself forever - is gone: the redundant wrapper was deleted, and the native
+// is reachable directly as `Time.nowMillis()`.)
 //
 // Timestamps and clock readings are obviously machine-dependent, so this
 // example only asserts the parts that are stable: ordering, and the shape of a
@@ -51,6 +51,15 @@ class TimeLib {
         log(String.length(Time.format(now, "YYYY-MM-DD")) == 10)
         log(TimeLib.twoDigits(month) == Time.format(now, "MM"))
 
+        // A strftime-shaped pattern is rejected loudly, not passed through.
+        var threw = false
+        try {
+            Time.format(now, "%Y-%m-%d")
+        } catch e {
+            threw = true
+        }
+        log("strftime pattern rejected: " + threw)
+
         // Sleeping is measured by wall clock, so only check that it returns.
         Time.sleep(0.01)
         log("slept")
@@ -68,6 +77,7 @@ class TimeLib {
 // true
 // true
 // true
+// strftime pattern rejected: true
 // slept
 // duration constructed
 // --- End expected output ---

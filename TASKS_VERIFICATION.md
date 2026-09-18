@@ -1,5 +1,12 @@
 # TASKS.md Verification — Second Pass — 2026-09-17 (static analysis, no build)
 
+> **Superseded (2026-09-17, later the same day):** this pass ran without a
+> build. A later pass with a working build re-verified against the real binary
+> and closed P0-1, P0-2, P1-5, P2-1, P2-2, P2-3 and S1-S3 — several verdicts
+> below (e.g. P2-2 "documented as intentional") are since fixed. See
+> `docs/changelog.md` (2026-09-17) and the Done section of `TASKS.md`. Kept as
+> the record of the static pass only.
+
 Build environment still blocked: `cmake` missing, `build/` missing, `apt-get` network isolated (`deb.debian.org Connection failed`). Cannot run `zl_language`. This pass is static code reading plus grep, cross-referenced against first verification `TASKS_VERIFICATION.md` (which remains valid). Focus: re-check each TASKS.md entry, plus deeper stdlib/runtime edge cases mentioned in session memory (Time.addMonths negative era, FileSystem path traversal, Text split O(n²), Serialize vs printer cycle divergence, empty {} literal).
 
 Legend: **REAL** = reproduces via static path, **STALE** = fixed, **DOC** = doc/measurement task still open, **PLAUSIBLE** = needs runtime but code path exists, **NEW** = additional issue not in TASKS.md.

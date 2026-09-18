@@ -2,6 +2,123 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-17 - A block-body lambda with an untyped parameter compiles on both pipelines (P0-1)
+
+```zl
+static func twice(func f): int { return f(3) }
+log(twice(func(x) { return x * 2 }))    // was: refused outright, now: 6
+```
+
+The default (MIR) pipeline rejected the whole program with
+`[mir.return]: block b1 returns a value from a void function`, and the
+reference AST compiler died at runtime with an argument-count mismatch - while
+the arrow form `func(x) => x * 2` worked. The cause was return-type inference
+for the block body: a lambda's inferred return stayed UNKNOWN when every
+`return` in the block had an UNKNOWN type, and UNKNOWN then collapsed to
+nil/void. The checker now tracks that a return was *seen* even when its type is
+UNKNOWN (`lastFunctionHadReturn_` in `src/compiler/type_checker.cpp`), so a bare-`func` block body keeps the UNKNOWN return the arrow form already
+gets, instead of dropping to void while the body still emits `return x * 2`.
+
+Both spellings are pinned side by side - block and arrow, bare `func` callee
+and `func(int): int` callee - by
+`tests/zl/valid/language_hardening_tests/LambdaBlockBody.zl`, which prints `6`
+from every form and is exercised by `scripts/run_regressions.sh`; the
+reproducer above prints `6` under MIR, the reference AST compiler, unoptimized
+MIR, and `--backend native`.
+
+## 2026-09-17 - `log` prints a collection's data, not its storage (P2-1)
+
+`log(l)` on a `List<double>` printed `List{__native: [3.14, 1]}` - the wrapper's
+plumbing rather than the payload. `Serialize.encode` had already learned to
+look through the `List`/`Map`/`Set` wrappers (REVIEW.md O11); the printer now
+does the same: `formatValueInner` (`src/vm/value.cpp`) unwraps the `__native`
+field of the three generic collections and formats the payload directly, so
+`log(l)` prints `[3.14, 1]`, `log(m)` prints `{"pi": 3.14}`, and a value keeps
+one spelling through `log`, concatenation, `Text.format`, and the JSON
+encoder. The look-through preserves the existing totality guards: a collection
+that (indirectly) contains itself still prints a `<cyclic>` marker instead of
+overflowing the stack.
+
+No example printed a bare collection, so no expected output changed. The
+behaviour is pinned by `tests/zl/valid/core_tests/CollectionPrinting.zl`
+(payloads, empty collections, nesting, string quoting, cycles), documented in
+`docs/language-guide.md` (Generic collections), and REVIEW.md O11 records the
+printer half next to the encoder half.
+
+## 2026-09-17 - `Time.format` rejects a token it does not recognise (P2-2)
+
+`Time.format(0, "%Y-%m-%d")` returned the pattern unchanged - the tokens are
+ZL's own (`YYYY`, `MM`, `DD`, `HH`, `mm`, `ss`), and an unrecognised one was
+left in place silently, which was the easiest way to print a wrong date
+confidently. `formatCivilTime` (`src/vm/native.cpp`, shared by `Time.format`
+and `Time.utcFormat`) now raises on any unknown `%`-token, naming the expected
+token set.
+
+`docs/stdlib.md` documents the raise, `examples/advanced/TimeLib.zl`
+demonstrates the rejection next to the correct tokens (expected output
+updated), REVIEW.md O10 is closed, and
+`tests/zl/valid/language_hardening_tests/TimeFormatTokens.zl` pins the token
+set - every token through the deterministic `Time.utcFormat`, a full pattern on
+the epoch and a leap day, and the raise on strftime-shaped patterns for both
+entry points.
+
+## 2026-09-17 - One voice for the empty list (P2-3)
+
+`List.first()` on an empty list threw `List.first called on empty list` (ZL,
+naming the declared type), while `List.pop()` delegated to the storage
+primitive and surfaced `Collection.pop: cannot pop from an empty list` (native,
+naming the primitive). `List.pop` (`src/compiler/builtin_library.cpp`) now
+guards emptiness in ZL exactly like `first()`/`last()` already did, so every
+wrapper method names the type the user declared and the operation they asked
+for. The raw `Collection.pop` primitive keeps its own name when called
+directly - which is then what the user asked for.
+
+`tests/zl/valid/core_tests/EmptyListErrors.zl` pins both messages (and
+`List.last`, and the direct primitive call, and the `firstOr`/`lastOr`
+fallbacks, and that a successful pop still round-trips). REVIEW.md's note
+under O18 is updated.
+
+## 2026-09-17 - The legacy IR folder spells a folded double exactly (P0-2)
+
+`rewriteInstructionConstants` wrote a folded double back into the instruction's
+`symbol` with `std::to_string` - six fixed decimals - and `parseConst` read it
+back with `stod`, so any constant needing more precision was silently rounded
+on its way through the optimizer. Latent (the only consumer is the legacy
+`--emit-native` tier, which refuses double-returning `@native` functions), but
+one feature away from a miscompile. All double-writing sites in
+`src/compiler/ir_optimizer.cpp` now use the runtime's
+`zl::doubleToShortestString` - the language's one spelling for a double - and
+the integer-only identity folds keep `std::to_string` on `std::int64_t`, which
+is exact.
+
+`tests/ir_tests.cpp` gained `testOptimizerFoldsDoublesExactly`: `0.1 + 0.2`
+folds to a `Const` whose symbol is the full 17-digit `0.30000000000000004`,
+unary minus keeps every digit (`-0.30000000000000004`), and both spellings
+parse back to bit-identical doubles.
+
+## 2026-09-17 - Stale claims deleted, and the fixed-array gap re-verified (P1-5, S1-S3)
+
+Four write-ups recorded failures that no longer reproduce, and each one cost
+the next reader a full reproduction:
+
+- REVIEW.md O19 (`INT64_MIN` cannot be written as a literal) now records the
+  fix instead of teaching the `(0 - INT64_MAX) - 1` workaround.
+- The block-bodied-lambda claim in `research/report.md` §2.7 now points at the
+  real remaining gap (the untyped block-body parameter, P0-1) instead of the
+  already-working typed form.
+- `research/corpus/limitations/FixedArrayNative.zl` and
+  `docs/status/mir-safety-evaluation.md` recorded that passing a fixed array
+  through `Collection.*` lost the element type (`array[5]<int>` downgraded to
+  `list<unknown>`) and the verifier rejected it. It does not:
+  `isCollectionType` (`src/mir/type.cpp`) classifies `TypeKind::Array` as a
+  collection, the fixture verifies clean and runs on both pipelines (re-run
+  today: `len=5`, `last=5`), and the status document marks the two affected
+  workflows as fixed rather than deleting them - the baseline's other findings
+  stand.
+
+All four TASKS.md entries are deleted; nothing here changed behaviour, so the
+gates that cover the underlying fixes are the ones named above.
+
 ## 2026-09-17 - Doubles print as the shortest decimal that reads back (F9)
 
 `log(3.14)` printed `3.1400000000000001`. The arithmetic was never wrong - the
