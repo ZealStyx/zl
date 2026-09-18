@@ -612,8 +612,16 @@ metadata that type checking consumes and discards:
   exit (early return, exception), so the two paths release the same storage at
   the same points.
 - Slots and parameters with `gc` storage get no drop events: the collector
-  owns those values. `shared` storage is reference-counted elsewhere and
-  likewise carries no release event here.
+  owns those values. `shared` storage is a thread-synchronised cell
+  (`Shared<T>`), not a reference count - nothing counts a managed box
+  anywhere in the runtime - so it likewise carries no release event here.
+- Every release event here is a **rooting** release, not a free: `DropVar`
+  calls `ExecutionState::dropLocal`, and frame teardown calls
+  `dropOwnedLocals`, both of which end a binding's ability to keep a box
+  alive. Physical storage returns in the collector's reclaim phase. Eager,
+  deterministic reclamation is the subject of
+  [memory-domains.md](memory-domains.md), whose `release` is what would first
+  hand bytes back.
 - Closure captures are always GC values (the checker forbids owned/borrow
   captures), so `MakeClosure` needs no ownership events.
 

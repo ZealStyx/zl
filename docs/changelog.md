@@ -2,6 +2,51 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-19 - Memory domains: a plan that fits the runtime (design, no behaviour change)
+
+The direction for letting a ZL program choose - and eventually write - its own
+automatic memory strategy now lives in
+[`docs/memory-domains.md`](memory-domains.md). It replaces an earlier draft, and
+most of the replacing came from the code disagreeing with it:
+
+- the draft's `MemoryDomain::allocate(size)` has nothing to intercept. Managed
+  allocation here is `make_unique<ObjectBox>` into one global registry, and a
+  box's payload is RAII (`std::string`, `vector<Value>`, `unordered_map`), so a
+  chunk reset could not free it - a bump arena would leak exactly the memory it
+  came to reclaim. The contract is typed instead (`acquire(MemoryShape)` /
+  `release(MemorySlot)`), modelled on the native-resource registry ZL already
+  has and verifies.
+- the ownership half of the abstraction is already built: `gc`/`owned`/`borrow`/
+  `shared` are parsed, checked and carried through MIR to the runtime. So the
+  plan adds an *orthogonal* storage-domain id rather than the fused
+  `Arena<'a, T>` the draft proposed, which would have re-opened every ownership
+  rule in the checker, the verifier and both backends.
+- `shared` is the thread-synchronised cell, not a reference count, and no
+  managed box is counted anywhere - so the draft's `shared Object` is out, and
+  `docs/mir.md`'s "reference-counted elsewhere" is corrected.
+- `with` is the data-update operator, `@name` annotations have no allowlist (an
+  unknown one compiles and is ignored), and `unsafe` does not exist. Domains
+  need none of the three: they never receive an address, and reclamation happens
+  only where the domain's policy and the compiler's liveness proof agree - which
+  is what turns a lying domain from a memory-safety bug into a performance bug.
+- escape checking is scoped to what the checker can prove: it extends the region
+  paths `borrowRegionForExpr`/`regionOverlaps` already compute to `FieldStore`,
+  `StaticStore` and captures, instead of promising the heap alias analysis
+  `docs/mir-safety.md` says the project does not have.
+
+Two doc gaps the plan exposed, and which this change closes: `docs/language-guide.md`
+never documented the `owned`/`borrow` declarations at all, and said nothing about
+what `Drop` does - which is to end a binding's rootedness, not to free anything.
+`TASKS.md` gains **P2-8** for that second half: the lifetime language is checked
+end to end with no eager reclamation behind it, which is the real reason a memory
+domain would be worth its complexity. Phase 0 of the plan is deliberately the
+runtime's own easy wins - flat `ObjectBox` fields, recycling boxes from the
+collector's deferred vector, a measured baseline - gated so that if those beat an
+arena, no syntax is added.
+
+No compiler, runtime, stdlib or test change: documentation only, so the build,
+ctest, examples and the differential harnesses are untouched by definition.
+
 ## 2026-09-18 - An empty literal says what kind of collection it is (P2-10)
 
 ```zl
