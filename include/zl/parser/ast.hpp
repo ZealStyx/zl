@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -607,6 +608,15 @@ struct MethodCallExpr : AstNode {
     std::vector<NodePtr> arguments;
     mutable DispatchSignature resolvedDispatch; // see CallExpr::resolvedDispatch
     mutable bool isTaskMethod{false};
+    // Set by TypeChecker::inferMethodCall when the receiver is a `string`:
+    // the call is the native catalog entry in `nativeMethodName`, with the
+    // receiver bound as that native's first argument. Both backends read this
+    // back instead of dispatching a method - there is no class behind a
+    // `string`, and no second implementation behind the method spelling.
+    // See docs/language-guide.md#string-methods.
+    mutable bool isStringMethod{false};
+    mutable std::string nativeMethodName;      // catalog name, e.g. "String.length"
+    mutable std::int32_t nativeMethodId{-1};   // its NativeId, or -1 when unresolved
     MethodCallExpr() : AstNode(NodeKind::MethodCallExpr) {}
 };
 

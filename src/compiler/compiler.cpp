@@ -1659,6 +1659,22 @@ void Compiler::compileFieldAssign(const FieldAssignExpr* node) {
 }
 
 void Compiler::compileMethodCall(const MethodCallExpr* node) {
+    if (node->isStringMethod) {
+        // A method on a `string` is the resolved `String.*` native with the
+        // receiver as its first argument (TypeChecker::inferMethodCall). The
+        // native's own arity tells the VM how many values to pop, so the
+        // receiver and the arguments are simply pushed in order.
+        const auto idx = findNativeFunction(node->nativeMethodName);
+        if (!idx) {
+            throw std::runtime_error("Compiler: unknown string method native '" +
+                                     node->nativeMethodName + "'");
+        }
+        compileExpression(node->object.get());
+        for (const auto& arg : node->arguments) compileExpression(arg.get());
+        emit(OpCode::CallNative, *idx, node->line);
+        return;
+    }
+
     if (node->isTaskMethod) {
         compileExpression(node->object.get());
         if (node->methodName == "block") {

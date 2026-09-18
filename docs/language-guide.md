@@ -5,6 +5,7 @@ Reference for the language surface. For the standard library see
 
 - [File and class rule](#file-and-class-rule)
 - [Values and declarations](#values-and-declarations)
+- [String methods](#string-methods)
 - [Lambda expressions](#lambda-expressions)
 - [Generic collections](#generic-collections)
 - [Static methods](#static-methods)
@@ -110,6 +111,58 @@ backing storage. Access modifiers are enforced against the declaring owner: prot
 inherited access works from subclasses, private inherited access is rejected, and
 interface-qualified static-field access is rejected because interfaces own no static
 storage.
+
+## String methods
+
+A `string` has methods, and every one of them is an existing `String.*` native
+primitive: the receiver binds the native's first parameter and the call's arguments
+bind the rest, so `s.length()` and `String.length(s)` are the same call and produce
+the same bytecode. There is no class behind `string` and no second implementation
+behind the method spelling — the compiler resolves the method to the catalog entry
+(`src/compiler/type_checker.cpp`, table `kStringMethods`), and both backends emit that
+native call.
+
+```zl
+var s = "Hello, World"
+log(s.length())                     // 12      (bytes, like String.length)
+log(s.upper())                      // HELLO, WORLD
+log(s.startsWith("Hello"))          // true
+log(s.substring(0, 5))              // Hello
+log(s.replace("World", "ZL"))       // Hello, ZL
+log("42".toInt() + 1)               // 43
+log(Collection.get(s.split(", "), 1))   // World
+```
+
+The surface, in the order the "no such method" diagnostic lists it:
+
+| Method | Native | Notes |
+| --- | --- | --- |
+| `length()` | `String.length` | bytes, not characters |
+| `charAt(i)`, `substring(start, end)`, `codePointAt(i)` | `String.charAt`, `String.substring`, `String.codePointAt` | byte indexing |
+| `upper()`, `lower()`, `trim()`, `trimStart()`, `trimEnd()` | `String.upper`, `String.lower`, `String.trim`, `String.trimStart`, `String.trimEnd` | `upper`/`lower` case ASCII only |
+| `contains(s)`, `startsWith(p)`, `endsWith(s)`, `indexOf(s)`, `lastIndexOf(s)`, `indexOfFrom(s, i)`, `compare(o)`, `compareIgnoreCase(o)` | `String.contains`, `String.startsWith`, `String.endsWith`, `String.indexOf`, `String.lastIndexOf`, `String.indexOfFrom`, `String.compare`, `String.compareIgnoreCase` | byte positions; a miss is `-1` |
+| `replace(from, to)`, `split(sep)`, `repeatText(n)` | `String.replace`, `String.split`, `String.repeatText` | `split` returns the native `list<string>` storage, exactly as `String.split` does — read it with `Collection.*`, or use `Text.split` for a `List<string>` |
+| `utf8Length()`, `utf8CharAt(i)`, `utf8Substring(start, end)`, `utf8Reverse()`, `utf8CodePointAt(i)`, `utf8ByteIndex(i)`, `utf8IndexFromByte(i)` | the matching `String.utf8*` natives | scalar indexing, the boundary `Text.*` wraps |
+| `toInt()`, `toFloat()` | `String.toInt`, `String.toFloat` | throw on unparsable input; `Text.toIntOr` and friends are the total forms |
+
+Indexing follows the primitive: `"héllo".length()` is `6` bytes, `"héllo".utf8Length()`
+is `5` scalars, and `"héllo".length()` and `String.length("héllo")` never disagree — see
+[stdlib.md](stdlib.md#zltext) for where `String.*` ends and `Text.*` begins.
+
+A name outside the surface is a compile-time type error that lists the surface:
+
+```text
+type error: type 'string' has no method 'trimLeft' (string methods: charAt, ...)
+```
+
+Arity and argument types are checked against the catalog entry, so `s.length(1)` and
+`s.contains(3)` are compile errors rather than native contract throws at run time.
+`repeat` is a loop keyword, which is why the repeat method keeps the native spelling
+`repeatText` (the same reason `Text.repeatText` exists).
+
+An **untyped** lambda parameter (`func(name) => name.length()`) is `UNKNOWN` until a
+type is written, so a string method on it is still rejected — annotate the parameter
+(`func(string name) => name.length()`).
 
 ## Lambda expressions
 

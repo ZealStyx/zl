@@ -1183,6 +1183,20 @@ struct FunctionLowerer {
         }
         const TypeId resultType = typeOfNode(&node);
         const bool returnsVoid = isVoid(resultType);
+        // A method on a `string` is the `String.*` native the checker resolved,
+        // with the receiver bound as its first argument
+        // (TypeChecker::inferMethodCall): the method spelling and the qualified
+        // native call reach the same catalog entry, so there is nothing to
+        // duplicate here either.
+        if (node.isStringMethod && node.nativeMethodId >= 0) {
+            std::vector<Operand> nativeArguments;
+            nativeArguments.reserve(arguments.size() + 1);
+            nativeArguments.push_back(receiver);
+            for (auto& argument : arguments) nativeArguments.push_back(std::move(argument));
+            const TempId temp = fb.emitCallNative(node.nativeMethodName, node.nativeMethodId,
+                                                 std::move(nativeArguments), resultType, false, loc);
+            return returnsVoid ? Operand::none() : Operand::temp(temp, resultType);
+        }
         const Type* receiverType = ctx.builder.types().find(receiver.type);
         // Task and Shared instance methods are runtime operations, not ordinary
         // dispatch: Task.block/ignore/cancel are task lifecycle (the reference

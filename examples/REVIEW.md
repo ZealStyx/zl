@@ -740,12 +740,21 @@ values via `String.utf8*` natives. `String.*` remains the byte-string
 primitive. `upper` / `lower` still only case ASCII. Covered by
 `tests/zl/valid/language_hardening_tests/Utf8Text.zl`; see `docs/stdlib.md`.
 
-Two smaller notes found in the same pass, still open:
+Two smaller notes found in the same pass:
 
-- `string` has no methods at all. `s.length()` fails with `cannot call method
-  'length' on value of type string`; the `Text.length(s)` free-function form is
-  the only option. Every other collection type is method-based, so this reads as
-  an inconsistency rather than a decision.
+- `string` has no methods at all — **fixed**. `s.length()` used to fail with
+  `cannot call method 'length' on value of type string`, leaving the
+  `Text.length(s)` free-function form as the only option while every collection
+  type was method-based. `string` now has a method surface, and each method *is*
+  an existing `String.*` native with the receiver bound as its first argument,
+  so nothing is implemented twice. `startsWith`/`endsWith` became native
+  primitives (byte prefix/suffix tests) and `Text.startsWith`/`endsWith`
+  delegate to them instead of carrying a second ZL copy. Pinned by
+  `tests/zl/valid/language_hardening_tests/StringMethods.zl` (every method
+  checked against its qualified spelling) plus
+  `tests/zl/invalid/type_errors/StringMethodUnknown.zl` and
+  `testStringMethodsAreTheStringNatives` in `tests/pipeline_tests.cpp`; see
+  `docs/language-guide.md#string-methods`.
 - `List.pop()` reported `Collection.pop: cannot pop from an empty list` while
   `List.first()` reported `List.first called on empty list` - two voices for one
   condition (fixed: `List.pop` now guards emptiness in ZL and names itself; the
