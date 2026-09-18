@@ -230,6 +230,19 @@ Verdict: **STALE**.
 
 ## Additional issues found (not in TASKS.md)
 
+> **Since fixed (2026-09-18):** A6 (the unreachable `return nil` tail), A9 (empty
+> collection literals) and A10 (`String.split` with an empty separator splitting
+> bytes) are closed - see [docs/changelog.md](docs/changelog.md) and the Done
+> section of [TASKS.md](TASKS.md). Two more items below were checked against a
+> working build and are not what they look like: A17's untested `Condition` claim
+> now has a fixture
+> (`tests/zl/valid/concurrency_regressions/ConditionWorkerSignal.zl`), and writing
+> that fixture exposed a lambda-inference bug which made any lambda containing a
+> nested lambda plus a branch run its body forever (pinned by
+> `tests/zl/valid/language_hardening_tests/NestedLambdaReturn.zl`). The findings
+> themselves are left exactly as written - this file is the record of the static
+> pass.
+
 ### A1 · Lambda param types not inferred from expected `func(T):R` in argument position — NEW REAL
 
 - `inferArguments` `type_checker.cpp:3042-3060` calls `inferExpr` for each arg, no expectation.

@@ -4,6 +4,11 @@
 // Text.* indexes Unicode scalars. String.* stays a byte boundary, so a
 // two-byte UTF-8 character is one Text character and two String bytes.
 // Reverse must not split a multi-byte scalar.
+//
+// The one String.* primitive that is about characters rather than bytes is
+// `String.split(s, "")`: an empty separator means "every character", so it
+// walks scalars like String.utf8CharAt does instead of cutting multi-byte ones
+// in half. Text.split forwards to it and inherits the behaviour.
 // ============================================================================
 
 import zl.text.Text
@@ -35,6 +40,22 @@ class Utf8Text {
         var smile = Text.fromCodePoint(128512)
         self.check(Text.length(smile) == 1, "U+1F600 is one scalar")
         self.check(Text.reverse("a" + smile + "b") == "b" + smile + "a", "reverse supplementary")
+
+        // An empty separator means "every character", and a character is a
+        // scalar: splitting on bytes cut é in half and returned six fragments
+        // for a five-character word.
+        var pieces = String.split(word, "")
+        self.check(Collection.length(pieces) == 5, "String.split with an empty separator yields one piece per scalar")
+        self.check(Collection.get(pieces, 1) == e, "and each piece is a whole scalar")
+        self.check(Collection.get(pieces, 0) == "h", "the first piece is the first scalar")
+
+        var textPieces = Text.split(word, "")
+        self.check(textPieces.length() == 5, "Text.split with an empty separator yields one piece per scalar")
+        self.check(Text.join(textPieces, "") == word, "splitting on nothing and joining back round-trips")
+
+        var wide = Text.split("a" + smile + "b", "")
+        self.check(wide.length() == 3, "a supplementary scalar is one piece, not four bytes")
+        self.check(wide.get(1) == smile, "and it survives the split intact")
 
         log("ok")
     }

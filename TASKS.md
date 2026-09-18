@@ -25,7 +25,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release           # once
 cmake --build build --config Release --target zl-tests   # core + every regression target
 (cd build && ctest -C Release)                           # 41 tests, includes both parity scripts
 examples/run_all.sh build/zl_language                    # 51 examples, byte-compared to their expected output
-bash scripts/run_regressions.sh build/zl_language all    # 54 fixtures under tests/zl
+bash scripts/run_regressions.sh build/zl_language all    # 57 fixtures under tests/zl
 bash scripts/native_gate.sh build/zl_language            # native tier gate
 ```
 
@@ -35,13 +35,11 @@ Priorities: **P0** produces a wrong result or refuses a valid program ·
 
 ## Start here
 
-The five with the best value-to-risk ratio right now:
+The three with the best value-to-risk ratio right now:
 
 | # | Task | Why first |
 | --- | --- | --- |
 | [P1-3](#p1-3--string-has-no-methods) | `string` methods | The most-felt daily gap, and it maps onto existing `String.*` natives - no second implementation |
-| [P2-4](#p2-4--condition-is-never-exercised-from-a-worker-thread) | `Condition` from a worker thread | One fixture, and it closes an untested concurrency claim |
-| [P2-6](#p2-6--one-class-per-file-stem-must-match-the-class-name) | One-class-per-file rationale | Doc-only; every newcomer asks |
 | [P1-4](#p1-4--list--map--set-cannot-be-variable-names) | `list`/`map`/`set` as names | Either the lexer learns context, or the restriction gets documented where it is hit |
 | [P1-1](#p1-1--match-cannot-pattern-match-option--result-reviewmd-o21) | `match` on `Option`/`Result` | The exhaustiveness rules already exist as dead code - scope `isAssignable` before starting |
 
@@ -49,9 +47,11 @@ The five with the best value-to-risk ratio right now:
 
 ## P0 - wrong results, or a valid program refused
 
-Nothing open right now. The last two - the block-body lambda with an untyped
-parameter, and the legacy IR folder's six-decimal double round-trip - closed
-2026-09-17; see [Done](#done) and [docs/changelog.md](docs/changelog.md).
+Nothing open right now. The last three - the block-body lambda with an untyped
+parameter and the legacy IR folder's six-decimal double round-trip (both closed
+2026-09-17), and the lambda-inside-a-lambda that ran its body forever (found and
+closed 2026-09-18 while writing the `Condition` fixture below) - are in
+[Done](#done) and [docs/changelog.md](docs/changelog.md).
 
 ---
 
@@ -167,30 +167,15 @@ written argument that the behaviour is correct as it stands.
 
 ## P2 - polish, measurement, ecosystem
 
-### P2-4 · `Condition` is never exercised from a worker thread
-
-`examples/basics/Conditions.zl` waits and signals on the main thread;
-`tests/runtime_sync_tests.cpp` covers the primitive, and
-`tests/zl/valid/concurrency_regressions/` has no `Condition` case at all.
-
-**Done when** a concurrency regression waits on a `Condition` inside a spawned
-thread, is signalled from another, and passes repeatedly (not once).
-
 ### P2-5 · `zlpkg` has no registry
 
 Git URL or local `path` only; exact versions, no ranges, no workspaces, no
-dev-dependencies ([docs/packages.md:71-101](docs/packages.md)).
+dev-dependencies ([docs/packages.md](docs/packages.md#external-dependencies-zlpkg) -
+the pointer is an anchor, not a line range, because this file's own edits keep
+moving the lines).
 
 **Done when** the intended scope is decided and written down - a registry is a
 service, not a feature, and "no registry yet" should say what replaces it.
-
-### P2-6 · One class per file, stem must match the class name
-
-Enforced by the compiler - the file rule in [README](README.md#run-a-program). Fine as a rule; it is
-listed here because nothing states the reason, and every newcomer asks.
-
-**Done when** the rule and its rationale (module identity, import resolution) are
-in [docs/packages.md](docs/packages.md), or relaxed for helper types.
 
 ### P2-7 · Typed field-by-field C struct schemas
 
@@ -200,16 +185,27 @@ FFI passes opaque buffers; a typed schema per C struct is a later ABI extension
 **Done when** `zl-bind` emits a typed schema for a struct with mixed field types
 and a test reads and writes each field by name.
 
-### P2-8 · `zl-native-resource-stress-tests` is flaky
+### P2-9 · An empty literal in argument position still has nothing to declare it
 
-~7% of runs on a 2-core box (4 of 60 solo, and intermittently under `ctest -j2`):
-it prints `all native resource stress regressions passed` and then exits non-zero,
-which points after `main` returns - a static-destruction or thread-teardown race.
-Pre-existing, and unrelated to formatting or the VM's value path.
+Found 2026-09-18 while closing A9. The empty-literal fix reads the container kind
+from the *declaration*, and in argument position there is no declaration yet:
+arguments are inferred before overload resolution runs. So `map<string,int> empty = {}`
+followed by `countEntries(empty)` compiles, while `countEntries({})` against
+`static func countEntries(map<string,int> m)` is still
+`no overload of 'countEntries' matches the given argument types` - on every backend.
+[docs/language-guide.md](docs/language-guide.md#empty-literals) tells users to bind
+first; that is a workaround, not an answer.
 
-**Done when** 500 consecutive solo runs and 50 `ctest -j2` runs are clean, or the
-teardown race is named and fixed. Until then a red suite here is not evidence
-about your change.
+The real fix is expected-type propagation into call arguments, which is exactly the
+plumbing already scoped as P1-1 and as A1 in
+[TASKS_VERIFICATION.md](TASKS_VERIFICATION.md) - it should not be attempted as a
+one-off, and it must not disturb the non-empty `{1, 2}` case (TextLib.zl:61 relies on
+it being a variadic list).
+
+**Done when** `countEntries({})` compiles against a `map<K,V>` parameter on all four
+configs, `Text.format("{0}", {1})` still passes a list, and
+`tests/zl/valid/core_tests/EmptyCollectionLiterals.zl` covers the argument-position
+form directly instead of only the bound one.
 
 ---
 
@@ -260,6 +256,85 @@ confirmed already fixed on 2026-09-17; see [Done](#done) and
 Most recent first. Kept briefly so the gates that cover each fix are findable,
 then deleted - [docs/changelog.md](docs/changelog.md) is the permanent record.
 
+- [x] **P0-3 · A lambda created inside a lambda body handed the outer lambda its
+  return type** (found 2026-09-18 while writing the P2-4 fixture) - the checker
+  infers a block body's return from an accumulator every `return` writes into, and
+  a nested lambda left its own result in it, so
+  `func() { var n = callIt(func() { return 1 }) if (n == 1) { log("y") } }` was
+  typed `func(): int`: a non-void body with no return, which MIR lowered to an
+  `unreachable` exit block and the VM ran as an endless loop (the reference
+  compiler died with `type assertion failed for return: expected int, got void`).
+  The accumulator is now saved and restored around each lambda. Gates:
+  `tests/zl/valid/language_hardening_tests/NestedLambdaReturn.zl` under MIR,
+  `ZL_COMPILER=ast`, `ZL_MIR_OPT=0` and `--backend native`; the fixture did not
+  terminate at all before the fix.
+- [x] **P2-4 · `Condition` was never exercised from a worker thread** - Gates:
+  `tests/zl/valid/concurrency_regressions/ConditionWorkerSignal.zl`: twenty rounds
+  of wait-until-signalled across two threads, the bare `Condition.wait` /
+  `notifyAll` primitive blocking and waking a worker, and `Condition.waitFor`
+  reporting its timeout from a worker. Writing it is what surfaced P0-3.
+- [x] **P2-6 · One primary type per file - the rule and its reason are written
+  down** - [docs/packages.md](docs/packages.md#one-primary-type-per-file): an
+  import names a type and resolves by path alone, so the stem match is what lets
+  one name be both the file and the type; the dotted name is also the module
+  identity that diamond, cycle and duplicate-declaration detection key on. The
+  rule is narrower than it was documented to be: a `data`, `interface` or `enum`
+  satisfies it, and helper declarations may share the file (they travel with the
+  primary import, they just are not importable by name). README and
+  [docs/language-guide.md](docs/language-guide.md) corrected to match.
+- [x] **P2-8 · `zl-native-resource-stress-tests` was flaky - three assertions in
+  the test, not a teardown race after `main`** - (1) a borrow that goes invalid
+  because the owner was consumed between the lookup and the check is the lifetime
+  tracking *working*, and was counted as a dangling handle; (2) the "hammer the
+  drained pool" phase ran before the pool was drained - leaving the claim loop
+  only means every token was claimed, not consumed - so it stole tokens its
+  claimer had not reached; (3) two 5 ms sleeps assumed the invoker threads would
+  be scheduled inside them, which on a loaded 2-core box they were not. All three
+  now wait for the fact they assert on. Gates: 500 solo runs and 50 `ctest -j2`
+  runs clean, plus 300 runs with two cores busy (before: 3 failures in 6 loaded
+  runs, 7 in 40 solo).
+- [x] **An empty `{}` was refused by a map-typed slot and inferred `list` with no
+  declaration** (TASKS_VERIFICATION.md A9) - `map<string,int> m = {}` and
+  `Map<string,int> m = {}` failed with "map literal requires key:value entries",
+  and `var s = {}` inferred `list<unknown>`, so `set<int> t = s` was refused with
+  a MIR type-flow violation. An empty literal now takes its container from the
+  declaration, or from its spelling when there is none (`[]` list, `{}` set); a
+  *non-empty* `{1, 2}` stays a list, because that spelling is also how a variadic
+  argument list is written. Gates:
+  `tests/zl/valid/core_tests/EmptyCollectionLiterals.zl` under MIR, ast, unopt and
+  native; [docs/language-guide.md](docs/language-guide.md#empty-literals).
+- [x] **`String.split(s, "")` split bytes, not characters**
+  (TASKS_VERIFICATION.md A10) - `String.split("héllo", "")` returned six
+  fragments with `é` cut in half; it now walks the same UTF-8 scalars as
+  `String.utf8CharAt`, and `Text.split` inherits it. Gates: the split cases in
+  `tests/zl/valid/language_hardening_tests/Utf8Text.zl`;
+  [docs/stdlib.md](docs/stdlib.md#zltext).
+- [x] **Every function body carried an implicit `return nil` the VM could not
+  reach** (TASKS_VERIFICATION.md A6) - a `return` does not fall through, so the
+  tail after a body that ends in one (or in an if/else whose arms both return) was
+  dead bytes on the reference pipeline. Now emitted only where control flow can
+  actually reach the end of the body. Gates:
+  `testUnreachableReturnTailIsNotEmitted` in `tests/pipeline_tests.cpp`, which
+  counts returns per function and also pins the conservative direction (an `if`
+  with no `else` keeps its tail); it fails 4 checks against the old behaviour.
+- [x] **`zl-runtime-sync-tests` failed whenever the machine was quiet** - the
+  documented gate (`ctest -C Release`, no `-j`) failed it 199 runs in 200 on an idle
+  2-core box and passed 30 in 30 with both cores busy: `testReadWriteLockState`
+  asserts "readers actually ran" while two writers own both cores and the four
+  readers are never scheduled until `writersDone` is set. Writers now wait for every
+  reader's first read (a fact the test establishes instead of hoping for), and
+  readers yield between reads so four spinners do not starve the writers' exclusive
+  lock. Gates: 100 solo runs and 25 loaded runs clean, 0.095 s per run - 4.0 s with
+  the handshake but without the yield.
+- [x] **The boundary lint's own suite reported phantom failures under load** -
+  `printf '%s\n' "$output" | grep -q` with `set -o pipefail`: grep exits at the
+  first match, printf dies of SIGPIPE, and the pipeline reports failure - so
+  `boundary-lint-regressions` announced "diagnostic does not name src/main.cpp:3"
+  while printing that line underneath, and `ctest -j2` went red for reasons that
+  had nothing to do with the change under test (2 of 2 runs before, 0 of 3 after;
+  4 false negatives in 200 loaded trials of the old shape, 0 in 200 of the new).
+  The same shape in `tools/boundary_lint.sh`'s ignore-pattern check would have
+  meant an ignore silently not ignoring. Both are pipe-free now.
 - [x] **P0-1 · A block-body lambda with an untyped parameter was refused on both
   pipelines** - the checker keeps an UNKNOWN return for a bare-`func` block body
   the way the arrow form always did. Gates: reproducer prints `6` under MIR,

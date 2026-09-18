@@ -993,6 +993,146 @@ void testDiagnosticsAreData() {
             "the module should contain the program's functions");
 }
 
+// ---------------------------------------------------------------------------
+// The reference compiler emits no bytes the VM cannot reach
+// ---------------------------------------------------------------------------
+
+// Every function body used to be followed by an implicit `push nil; return`,
+// including a body that already ended in `return` or `throw` - a Return does
+// not fall through, so those instructions were unreachable. The tail is now
+// emitted only where control flow can actually reach the end of the body, and
+// this pins both directions: a body that cannot fall through carries exactly
+// the returns its source has, and a body that can still carries the implicit
+// one (without it the VM would run off the end of the chunk).
+const char* kTailProgram =
+    "class Tail {\n"
+    "    static func doubled(int x): int {\n"
+    "        return x * 2\n"
+    "    }\n"
+    "    static func branchy(int x): int {\n"
+    "        if (x > 0) { return 1 } else { return 0 }\n"
+    "    }\n"
+    "    static func guarded(int x): int {\n"
+    "        if (x < 0) { throw new Exception(\"negative\") }\n"
+    "        return x\n"
+    "    }\n"
+    "    static func quiet(): void {\n"
+    "        log(\"quiet\")\n"
+    "    }\n"
+    "    static func partial(int x): void {\n"
+    "        if (x > 0) { return }\n"
+    "        log(\"fell through\")\n"
+    "    }\n"
+    "    func main(): void {\n"
+    "        var addOne = func(int y): int { return y + 1 }\n"
+    "        log(Tail.doubled(2))\n"
+    "        log(Tail.branchy(-1))\n"
+    "        log(Tail.guarded(3))\n"
+    "        Tail.quiet()\n"
+    "        Tail.partial(0)\n"
+    "        log(addOne(4))\n"
+    "    }\n"
+    "}\n";
+
+std::size_t countReturns(const zl::Chunk& chunk, std::size_t begin, std::size_t end) {
+    std::size_t returns = 0;
+    for (std::size_t i = begin; i < end && i < chunk.code.size(); ++i) {
+        if (chunk.code[i].op == zl::OpCode::Return) ++returns;
+    }
+    return returns;
+}
+
+// A named function's body is [its entry, the next entry after it): pass 2 hands
+// out entry addresses in emission order. The functions measured here contain no
+// lambdas, whose entries sit inside their enclosing body.
+std::pair<std::size_t, std::size_t> namedFunctionRange(const zl::Chunk& chunk,
+                                                       const std::string& namePrefix) {
+    const zl::FunctionInfo* target = nullptr;
+    for (const auto& fn : chunk.functions) {
+        if (fn.name.rfind(namePrefix, 0) == 0) { target = &fn; break; }
+    }
+    if (target == nullptr) return {0, 0};
+    std::size_t end = chunk.code.size();
+    for (const auto& fn : chunk.functions) {
+        if (fn.entryAddress > target->entryAddress && fn.entryAddress < end) end = fn.entryAddress;
+    }
+    return {target->entryAddress, end};
+}
+
+// A lambda's body ends at the MakeClosure that closes over it, which the
+// compiler emits immediately after the body's last instruction.
+std::pair<std::size_t, std::size_t> lambdaRange(const zl::Chunk& chunk, const std::string& namePrefix) {
+    std::size_t index = chunk.functions.size();
+    std::size_t entry = 0;
+    for (std::size_t i = 0; i < chunk.functions.size(); ++i) {
+        if (chunk.functions[i].name.rfind(namePrefix, 0) == 0) {
+            index = i;
+            entry = chunk.functions[i].entryAddress;
+            break;
+        }
+    }
+    if (index == chunk.functions.size()) return {0, 0};
+    for (std::size_t i = entry; i < chunk.code.size(); ++i) {
+        if (chunk.code[i].op == zl::OpCode::MakeClosure && chunk.code[i].operand == index) {
+            return {entry, i};
+        }
+    }
+    return {entry, chunk.code.size()};
+}
+
+void testUnreachableReturnTailIsNotEmitted() {
+    const fs::path file = writeProgram("Tail", kTailProgram);
+
+    std::unique_ptr<zl::Program> program;
+    {
+        zl::ModuleLoader loader(file, std::vector<fs::path>{});
+        program = loader.load();
+        zl::TypeChecker checker;
+        checker.check(*program, /*requireMain=*/true);
+    }
+    zl::Compiler compiler;
+    const zl::Chunk chunk = compiler.compile(*program);
+
+    // `return x * 2` is the whole body: one return, and no tail after it.
+    const auto doubled = namedFunctionRange(chunk, "Tail.doubled");
+    require(doubled.first != doubled.second, "the fixture's doubled() should be in the chunk");
+    require(countReturns(chunk, doubled.first, doubled.second) == 1,
+            "a body that ends in `return expr` emits that return and nothing after it");
+
+    // Both arms return, so neither path reaches the end of the body.
+    const auto branchy = namedFunctionRange(chunk, "Tail.branchy");
+    require(countReturns(chunk, branchy.first, branchy.second) == 2,
+            "an if/else whose arms both return emits one return per arm and no tail");
+
+    // A `throw` before the only return: the return is still the last exit.
+    const auto guarded = namedFunctionRange(chunk, "Tail.guarded");
+    require(countReturns(chunk, guarded.first, guarded.second) == 1,
+            "a body ending in `return` after a conditional throw emits no tail");
+
+    // The conservative direction: these bodies do fall through, so the
+    // implicit `return nil` is load-bearing and must still be there.
+    const auto quiet = namedFunctionRange(chunk, "Tail.quiet");
+    require(countReturns(chunk, quiet.first, quiet.second) == 1,
+            "a body with no return still gets the implicit one");
+
+    const auto partial = namedFunctionRange(chunk, "Tail.partial");
+    require(countReturns(chunk, partial.first, partial.second) == 2,
+            "an `if` without an `else` can fall through, so the implicit return stays");
+
+    // The same rule applies to a block-body lambda: its explicit return is the
+    // last instruction before MakeClosure.
+    const auto lambda = lambdaRange(chunk, "$lambda");
+    require(lambda.first != lambda.second, "the fixture's block-body lambda should be in the chunk");
+    require(countReturns(chunk, lambda.first, lambda.second) == 1,
+            "a block-body lambda ending in `return expr` emits no unreachable tail");
+
+    // None of this may change what the program does.
+    const RunResult run = runChunk(chunk);
+    require(run.ran, "the fixture should still execute");
+    require(run.output == "4\n0\n3\nquiet\nfell through\n5\n",
+            "the fixture prints the same values as before the tail was dropped: " + run.output);
+}
+
 } // namespace
 
 int main() {
@@ -1022,6 +1162,7 @@ int main() {
     testBackendParsing();
     testDigestIsStableAndSensitive();
     testDiagnosticsAreData();
+    testUnreachableReturnTailIsNotEmitted();
 
     if (failures == 0) {
         std::cout << "compiler pipeline: " << checks << " checks passed\n";
