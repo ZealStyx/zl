@@ -5,13 +5,18 @@
 // one, wrap it: `new Shared<T>(value)` marks that value as shareable, and the
 // thread closure captures the Shared wrapper rather than the object itself.
 //
-//   new Shared<T>(value)     wrap
-//   get() / setValue(v)      read / write
+//   new Shared<T>(value)     wrap (the top-level share(value) does the same)
+//   get() / setValue(v)      read / write - each one synchronised on its own
+//   withLock(func(): T cb)   run cb under the cell's lock
 //
-// IMPORTANT: Shared<T> makes the capture LEGAL; it does not make it SAFE.
-// Nothing here prevents two threads from interleaving a read-modify-write, so
-// `get()`/`setValue()` alone can still lose updates. For a real counter use
-// Atomic (Atomics.zl) or a lock (MutexLocks.zl).
+// IMPORTANT: Shared<T> makes the capture LEGAL; it does not make it SAFE. Each
+// cell operation is individually synchronised, but a read-modify-write across
+// the get()/setValue() pair is not one operation: two threads can interleave
+// their pairs and lose an update. Four threads doing 2000 unsynchronised
+// increments of one cell land around 3000 of the expected 8000, which
+// tests/zl/valid/concurrency_regressions/SharedLostUpdateMeasurement.zl
+// measures on every run. For a real counter use the cell's own `withLock`
+// (below), Atomic (Atomics.zl) or a lock (MutexLocks.zl).
 // ============================================================================
 
 class SharedState {
@@ -26,6 +31,15 @@ class SharedState {
         Thread.join(worker)
         log("after worker " + counter.get())
 
+        // The same increment under the cell's own lock: one indivisible
+        // step, so it stays exact however many threads run it.
+        counter.withLock(func(): int {
+            var next = counter.get() + 1
+            counter.setValue(next)
+            return next
+        })
+        log("after withLock " + counter.get())
+
         var label = new Shared<string>("start")
         var renamer = Thread.start(func() => label.setValue("finished"))
         Thread.join(renamer)
@@ -37,5 +51,6 @@ class SharedState {
 // initial 0
 // after set 10
 // after worker 15
+// after withLock 16
 // label finished
 // --- End expected output ---

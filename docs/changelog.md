@@ -2,6 +2,182 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-18 - An empty literal says what kind of collection it is (P2-10)
+
+```zl
+static func take(map<string, int> m): int { return Collection.length(m) }
+static func take(list<int> l): int { return Collection.length(l) }
+
+take({})
+// was: error [mir.type-flow]: in Demo.main(): block b1[2]: invoke_static of
+//      'Demo.take(list)' argument 0 ('l') passes set<unknown> but the
+//      parameter is list<int>
+// now: no overload of 'take' matches the given argument types; candidates are:
+//        - Demo.take(map)
+//        - Demo.take(list)
+```
+
+Found while closing P2-9, and pre-existing: an empty `{}` inferred a bare `SET`
+with no class name at all. `isAssignable` reads an unparameterized collection as
+an *untyped slot* - the deliberate rule that lets a bare `list` field hold
+anything - so the literal was more permissive than the parameterized
+`set<int>` spelling of the same value, and overload resolution was happy to hand
+it to a `list<int>` parameter. The MIR lowerer types the identical literal
+`set<unknown>` (`lowering.cpp` builds `setType(unknownType())` for it), so the
+module was rejected one stage later, in a message about a block and an
+instruction.
+
+The checker now spells the element type it already knew:
+
+```cpp
+if (node->bracketSyntax) return InferredType(ZlType::LIST, "list<unknown>");
+node->targetCollectionKind = "set";
+return InferredType(ZlType::SET, "set<unknown>");
+```
+
+`genericCollectionCompatible` compares the container base first, so `set<unknown>`
+against `list<int>` is now a mismatch at resolution, while `set<unknown>` against
+`set<int>` still is not - `unknown` arguments stay compatible, which is what
+`var tags = {}` followed by `set<int> declared = tags` relies on. A bare `list`
+or `set` parameter (no class name on the other side) is unaffected, so the
+untyped-slot rule still does its job where it was meant to.
+
+This is the inference every empty literal goes through, so it is not a narrow
+change: where the candidates *agree* on a container, P2-9's expectation declares
+the literal first and none of this is reached (`onlyList({})` against a single
+`list<int>` overload still compiles and returns 0).
+
+Gates: `tests/zl/invalid/type_errors/EmptyLiteralContainerMismatch.zl` pins the
+message; the full gate was rerun - 42 ctest, 51 examples byte-compared across the
+reference/bytecode/native paths, every regression fixture, and all five
+differential harnesses.
+
+## 2026-09-18 - A `func`-typed slot carries its signature, and the call site checks it (P1-2)
+
+```zl
+static func predicate(func(int, string): bool f, int n, string s): bool { return f(n, s) }
+
+var tooFew = func(int n): bool => n > 0
+predicate(tooFew, 3, "abc")
+// was: runtime error: type assertion failed for argument 1:
+//      expected func(int,string):bool, got func
+// now: compile error: argument 1 to func 'predicate':
+//      expected a func with 2 parameter(s), got 1
+```
+
+The signature was already parseable and already checked in two places - a
+`func(int, string): bool` declaration rejected a one-parameter lambda
+(`validateFunctionTypeAssignment`), and a call *through* such a slot checked its
+arity. What was missing was the hand-over, and it was missing unevenly: the
+implicit-self, method-call and `super` paths each carried their own copy of the
+argument check, while the qualified static path (`Class.method(...)`) carried none
+at all. So the same program was a compile error or a runtime error depending on
+how the callee was spelled.
+
+The three copies are now one `TypeChecker::validateFunctionArguments`, called from
+all four paths, comparing arity, parameter types and return type against the
+declared signature. A static method whose return type is `func(int): int` also
+carries the signature out of the call now (`returnFunction*` was read on the other
+paths only), so the value a factory hands back is itself a checked callable rather
+than an opaque `func`.
+
+Two cases are deliberately still unchecked, and both are the bare-`func`
+compatibility escape hatch the task required to keep working: a parameter declared
+bare `func` has no signature to check against, and an argument that carries no
+signature of its own - a bare `func` value forwarded from elsewhere - has nothing
+to compare. `InferredArguments::functionHasSignature` is new and is what says so;
+before, "no signature" and "zero parameters" were the same empty vector, and a
+forwarded bare `func` was refused for having the wrong arity. The runtime type
+assertion still covers both.
+
+Gates: `tests/zl/valid/language_hardening_tests/FuncSignatures.zl` (a signed
+parameter, a signed slot called directly, a signed instance-method parameter, a
+signed return called through a variable, and bare `func` taking any callable)
+under MIR, `ZL_COMPILER=ast`, `ZL_MIR_OPT=0` and `--backend native`;
+`tests/zl/invalid/type_errors/FuncSignatureArity.zl`, `FuncSignatureParamType.zl`
+and `FuncSignatureReturnType.zl` pin the three diagnostics. The README limitation
+is deleted and [`docs/language-guide.md`](language-guide.md#lambda-expressions)
+replaces its "Known gap" paragraph with the contract.
+
+## 2026-09-18 - The `Shared<T>` lost-update measurement is a regression, and the docs stop implying safety (P1-8)
+
+The acceptance was "either confinement is checked at compile time or `share()`
+exists and the docs stop implying safety". Reading the code showed both halves
+already existed and only the writing was wrong: `share()` is a native
+(`NativeId::SHARED_SHARE`, with a checker arm that instantiates `Shared<T>` from
+the argument's type), and the capture rule
+(`capturedValueCrossesThreadBoundary`) has rejected a non-`Shared` mutable
+capture across `Thread.start`/`Task.spawn` since before this change. The README
+nonetheless still said "The top-level `share()` helper and compile-time
+confinement checks are pending."
+
+What was left, and is now done:
+
+- **The README bullet says what is and is not guaranteed.** `Shared<T>` makes a
+  capture legal, not safe; each cell operation is synchronised, a
+  `get()`/`setValue()` read-modify-write across the pair is not.
+- **The language guide names three fixes instead of two.** `withLock` - the cell's
+  own lock, and the one that fits a counter - was missing from the list that only
+  offered `Atomic` and `Mutex`.
+- **`examples/advanced/SharedState.zl` demonstrates the safe form** next to the
+  unsynchronised pair it warns about, instead of warning and moving on.
+- **The 2490 measurement fails loudly instead of silently.**
+  `tests/zl/valid/concurrency_regressions/SharedLostUpdateMeasurement.zl` runs
+  four threads x 2000 unsynchronised `setValue(get() + 1)` on one `Shared<int>`,
+  alongside the same work under `withLock` and under `Atomic`, and asserts all
+  three: `Atomic` exact, `withLock` exact, and the unsynchronised counter *below*
+  8000. The third assertion is the point - if it ever fails, `Shared<T>` became
+  synchronised and the four documents that say otherwise are stale, and the
+  failure message says exactly that. Measured on a 2-core box: plain 2771-3670 of
+  8000, both guarded counters exactly 8000, on all four configs.
+
+No compiler or runtime behaviour changed here; this is the documentation and the
+regression the task asked for. The capture check remains what it always was - a
+check on *what* a closure carries, not on the arithmetic inside it.
+
+## 2026-09-18 - An empty literal in argument position takes the parameter's type (P2-9)
+
+```zl
+static func countEntries(map<string, int> m): int { return Collection.length(m) }
+
+countEntries({})      // was: no overload of 'countEntries' matches the given
+                      //      argument types; candidates are: - P29.countEntries(map)
+                      // now: 0
+```
+
+The empty-literal fix above (A9) read the container kind from the *declaration*,
+and in argument position there is no declaration yet - arguments are inferred
+before overload resolution picks a parameter to offer. This is the other half of
+that plumbing, and it is a reusable step rather than a special case:
+
+- `TypeChecker::argumentExpectations` reads one expectation per argument position
+  from the call's own arity-matching candidates. A position is usable only when
+  every such candidate describes it as the *same* parameterized container
+  (`map<string,int>`, `list<int>`, `Set<int>` - the element types live in the
+  name, which is what `inferCollectionLiteralExpected` checks against).
+- `inferArguments` takes those expectations and re-infers an **empty** literal
+  through the existing `inferExpected`, which is the same route a typed
+  declaration uses - so `expressionTypes_` and `targetCollectionKind` are set
+  exactly as they are there, and all four backends read the result the same way.
+- It is wired into all six argument-inferring call paths: qualified static,
+  implicit self, method call, `new`, `super(...)`, and a call through a func
+  value (which has one signature rather than a candidate set, so it builds its
+  expectations from the slot's own parameter types).
+
+Two limits, both deliberate. A **non-empty** `{1, 2}` never takes an expectation:
+that spelling is also how a variadic argument list is written, and re-reading
+`Text.format("{0}", {1})` as a set would be wrong - the fixture pins it. And where
+the arity-matching candidates disagree about the container (`f(map<K,V>)` and
+`f(list<T>)` together), `{}` has no single answer, so the position is left alone
+and resolution reports the mismatch rather than guessing.
+
+Gates: `tests/zl/valid/core_tests/EmptyCollectionLiterals.zl` now covers the
+argument-position form directly - static, instance method, generic `Map`, a `{}`
+reaching a `list<int>` parameter, a non-empty `{1, 2, 3}` still a list - under
+MIR, `ZL_COMPILER=ast`, `ZL_MIR_OPT=0` and `--backend native`;
+[`docs/language-guide.md`](language-guide.md#empty-literals) drops the "bind it
+first" workaround.
+
 ## 2026-09-18 - `match` destructures `Option`/`Result`, and a value-less `match` is a statement (P1-1, P0)
 
 ```zl
