@@ -2565,6 +2565,13 @@ struct FunctionLowerer {
         if (subject.isNone()) return Operand::none();
 
         const TypeId resultType = typeOfNode(&node);
+        // A `match` in statement position has no value - every arm is a `log`,
+        // an assignment, a `throw`. MIR has no value of type void, so such a
+        // match owns no result slot at all: the arms run their bodies and jump
+        // straight to the join block, which is then simply where the statement
+        // ends. Declaring a void-typed slot (or storing the nil constant into
+        // one) is exactly the contract violation the verifier reports.
+        const bool returnsVoid = isVoid(resultType);
         // Arms produce their value in different blocks, so the result travels
         // through a slot - the same join mechanism `try` uses. There is no phi
         // in this IR, and inventing one for one construct would leave every
@@ -2572,7 +2579,9 @@ struct FunctionLowerer {
         // Mutable because every arm writes it, even though the source cannot
         // observe an intermediate value: the join block reads it only after
         // exactly one arm has stored.
-        const SlotId resultSlot = fb.addSlot("", resultType, true, zl::OwnershipKind::GC, {}, loc);
+        const SlotId resultSlot = returnsVoid
+            ? kNoSlot
+            : fb.addSlot("", resultType, true, zl::OwnershipKind::GC, {}, loc);
         const BlockId joinBlock = newBlock(const_cast<zl::MatchExpr*>(&node));
         // Where the last arm's failed test lands. The checker proves static
         // coverage, so only a value it could not classify reaches here; the
@@ -2637,8 +2646,11 @@ struct FunctionLowerer {
             // --- the arm's body -------------------------------------------
             gotoBlock(bodyBlock);
             Operand value = expression(arm.result.get());
-            if (failed || value.isNone()) { popScope(); return Operand::none(); }
-            fb.emitStore(resultSlot, coerce(value, resultType, armLoc), armLoc);
+            // A void arm legitimately produces no operand - the same `none` a
+            // void-returning method call yields - so only a failed lowering
+            // aborts here. A match with a result still requires the operand.
+            if (failed || (!returnsVoid && value.isNone())) { popScope(); return Operand::none(); }
+            if (!returnsVoid) fb.emitStore(resultSlot, coerce(value, resultType, armLoc), armLoc);
             fb.emitJump(joinBlock, armLoc);
             popScope();
 
@@ -2658,6 +2670,7 @@ struct FunctionLowerer {
         fb.emitThrow(instance, loc);
 
         gotoBlock(joinBlock);
+        if (returnsVoid) return Operand::constant(ctx.builder.constantNil(), ctx.builder.types().voidType());
         return Operand::temp(fb.emitLoad(resultSlot, loc), resultType);
     }
 

@@ -39,6 +39,14 @@ private:
     bool match(std::initializer_list<TokenType> types);
     const Token& advance();
     const Token& expect(TokenType type, const std::string& errorMessage);
+    // A name position: an IDENTIFIER, or one of the spellings that are both a
+    // type keyword and a legal name. `list`, `set` and `map` are type
+    // annotations (`list<int> xs`), but nothing stops a program from calling a
+    // variable `list`; the lexer cannot tell the two readings apart, so the
+    // parser accepts them as a name wherever no type can appear and resolves
+    // the statement-level ambiguity in looksLikeTypedDeclStart.
+    [[nodiscard]] bool checkName() const;
+    const Token& expectName(const std::string& errorMessage);
     // Consume the '>' that closes a type argument / parameter list.
     //
     // The lexer runs without context, so the `>>` at the end of

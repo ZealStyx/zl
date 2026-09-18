@@ -1,0 +1,111 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - ContextualNames
+//
+// `list`, `set` and `map` are type spellings, and the lexer has no context, so
+// they were reserved words everywhere: `var list = new List<int>()` died with
+// `syntax error: Expected variable name -- got "list"` and there was no
+// escaping hatch. They are now read as names wherever no type can appear, the
+// way `shared` already was:
+//
+//   * a variable, field, parameter, loop variable, catch variable or lambda
+//     parameter may be called `list`, `map` or `set`;
+//   * statement position resolves the one real ambiguity by lookahead - a
+//     statement is a typed declaration only when a complete type annotation is
+//     followed by a name, so `list<int> xs = []` is a declaration while
+//     `list = []`, `list.add(1)` and `list.length()` are use of a variable;
+//   * the type readings are untouched: `list<int>`, `map<K,V>` and `set<T>`
+//     still parse everywhere they did before.
+//
+// A comparison chain can still spell the same token sequence as a declaration
+// (`list < n > x`); a statement of that shape is read as the declaration, the
+// same way it already is for a user-defined generic type.
+// ============================================================================
+
+class ContextualNames {
+    private int set
+
+    static func sum(int list, int map, int set): int {
+        return list + map + set
+    }
+
+    static func namedLikeTypes(): int {
+        int list = 5
+        int map = 6
+        int set = 7
+        return list + map + set
+    }
+
+    func check(bool cond, string what): void {
+        if (!cond) {
+            throw new Exception("ContextualNames failed: " + what)
+        }
+    }
+
+    // A generic collection whose variable is also a native type spelling: the
+    // declaration is the type reading, the two `list.add(...)` statements are
+    // not - they start with the keyword and are method calls on the variable.
+    func genericListNamedList(): int {
+        List<int> list = []
+        list.push(1)
+        list.push(2)
+        return list.length()
+    }
+
+    func main(): void {
+        var self = new ContextualNames()
+
+        // ---- the type readings are untouched ------------------------------
+        list<int> order = [1, 2]
+        map<string, int> counts = {}
+        set<int> unique = {}
+        Collection.mapSet(counts, "a", 1)
+        Collection.setAdd(unique, 7)
+        self.check(Collection.length(order) == 2, "list<int> is still a type")
+        self.check(Collection.length(counts) == 1, "map<K,V> is still a type")
+        self.check(Collection.length(unique) == 1, "set<T> is still a type")
+
+        // ---- the same spellings as names ----------------------------------
+        var list = order
+        var map = 3
+        var set = false
+        self.check(Collection.length(list) == 2, "a variable may be called list")
+        list = [4, 5, 6]
+        self.check(Collection.length(list) == 3, "... and assigned")
+        Collection.push(list, 7)
+        self.check(Collection.length(list) == 4, "... and passed as an argument")
+        self.check(map == 3, "a variable may be called map")
+        map = map + 1
+        self.check(map == 4, "... and assigned")
+        self.check(!set, "a variable may be called set")
+        set = !set
+        self.check(set, "... and assigned")
+
+        // ---- a statement that starts with the keyword, and is not a type --
+        self.check(self.genericListNamedList() == 2,
+                   "`List<int> list` declares a generic List called list, and `list.push(1)` is a statement that starts with the keyword")
+        // ---- parameters, fields and other binding positions ---------------
+        self.check(ContextualNames.sum(1, 2, 3) == 6, "parameters may be called list, map and set")
+        self.check(ContextualNames.namedLikeTypes() == 18, "typed declarations may name the variable list, map or set")
+        self.set = 11
+        self.check(self.set == 11, "a field may be called set")
+
+        var total = 0
+        for set in 0..3 {
+            total = total + 1
+        }
+        self.check(total == 3, "a loop variable may be called set")
+
+        var caught = ""
+        try {
+            throw new Exception("boom")
+        } catch Exception list {
+            caught = list.message
+        }
+        self.check(caught == "boom", "a catch variable may be called list")
+
+        var increment = func(map) => map + 1
+        self.check(increment(41) == 42, "a lambda parameter may be called map")
+
+        log("ok")
+    }
+}

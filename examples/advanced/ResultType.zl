@@ -17,7 +17,12 @@
 //
 // Result<T,E> is built in - no import needed. Like Option, it works as a
 // declared return or parameter type: `Ok<int,string>` satisfies
-// `Result<int,string>`.
+// `Result<int,string>`, and `match` destructures it by case:
+//
+//     match r { Ok v => v.value  Err e => e.error }
+//
+// The two cases are the whole story for a Result, so the arms above are
+// exhaustive without a wildcard; the pattern arguments come from the subject.
 // ============================================================================
 
 class ResultType {
@@ -27,9 +32,13 @@ class ResultType {
         return new Ok<int, string>(a / b)
     }
 
+    // The case patterns are idiomatic here: `Ok v` binds an `Ok<int,string>`
+    // (payload in `v.value`), `Err e` binds an `Err<int,string>` (`e.error`).
     static func report(Result<int, string> r): string {
-        if (r.isOk()) { return "ok " + r.unwrap() }
-        return "err " + r.unwrapErr()
+        return match r {
+            Ok v => "ok " + v.value
+            Err e => "err " + e.error
+        }
     }
 
     func main(): void {

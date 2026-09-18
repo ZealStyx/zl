@@ -7,6 +7,17 @@
 
 namespace zl {
 
+namespace {
+// Token types that may appear in a name position. `list`, `set` and `map` are
+// type spellings first, but the lexer runs without context, so a variable may
+// carry the same spelling and the parser decides by position (see
+// Parser::checkName and Parser::looksLikeTypedDeclStart).
+bool isNameToken(TokenType type) {
+    return type == TokenType::IDENTIFIER || type == TokenType::KW_SHARED ||
+           type == TokenType::KW_LIST || type == TokenType::KW_SET || type == TokenType::KW_MAP;
+}
+} // namespace
+
 Parser::Parser(std::vector<Token> tokens)
     : tokens_(std::move(tokens)), typeLookahead_(tokens_) {}
 
@@ -39,6 +50,15 @@ const Token& Parser::advance() {
 
 const Token& Parser::expect(TokenType type, const std::string& errorMessage) {
     if (check(type)) return advance();
+    error(errorMessage);
+}
+
+bool Parser::checkName() const {
+    return !isAtEnd() && isNameToken(peek().type);
+}
+
+const Token& Parser::expectName(const std::string& errorMessage) {
+    if (checkName()) return advance();
     error(errorMessage);
 }
 
@@ -653,7 +673,10 @@ Param Parser::parseFunctionParam() {
     else if (match({TokenType::KW_BORROW})) p.ownership = OwnershipKind::BORROW;
     else if (match({TokenType::KW_SHARED})) p.ownership = OwnershipKind::SHARED;
     else if (match({TokenType::KW_GC})) p.ownership = OwnershipKind::GC;
-    if (check(TokenType::IDENTIFIER) &&
+    // A parameter name may also be `list`, `map` or `set`: the bare-name form
+    // is only taken when the name is the whole parameter, so a type keyword
+    // that is followed by a type is still read as a type.
+    if (checkName() &&
         (peekNext().type == TokenType::COMMA || peekNext().type == TokenType::RPAREN)) {
         p.name = advance().lexeme;
         return p;
@@ -661,7 +684,7 @@ Param Parser::parseFunctionParam() {
 
     if (startsTypeAnnotation()) {
         p.type = parseTypeAnnotation();
-        Token nameTok = expect(TokenType::IDENTIFIER, "Expected a parameter name after its type");
+        Token nameTok = expectName("Expected a parameter name after its type");
         p.name = nameTok.lexeme;
         if (check(TokenType::COLON)) {
             error("Parameter types use `Type Name`; remove ':' from this parameter");
@@ -669,7 +692,7 @@ Param Parser::parseFunctionParam() {
         return p;
     }
 
-    p.name = expect(TokenType::IDENTIFIER, "Expected a parameter name").lexeme;
+    p.name = expectName("Expected a parameter name").lexeme;
     if (check(TokenType::COLON)) {
         error("Parameter types use `Type Name`; remove ':' from this parameter");
     }
@@ -827,25 +850,35 @@ bool Parser::looksLikeTypedDeclStart() const {
         }
         return false;
     }
-    if (check(TokenType::KW_ARRAY) || check(TokenType::KW_LIST) ||
-        check(TokenType::KW_SET) || check(TokenType::KW_MAP)) {
+    if (check(TokenType::KW_ARRAY)) {
         return true;
+    }
+    // `list`, `set` and `map` are also legal names, so the keyword alone does
+    // not decide: `list<int> xs = []` is a declaration, while `list = []` and
+    // `list.push(1)` are ordinary use of a variable called `list`. A
+    // declaration is the reading that has a complete type annotation followed
+    // by the name - the same one-token-of-lookahead rule `shared` uses above.
+    if (check(TokenType::KW_LIST) || check(TokenType::KW_SET) || check(TokenType::KW_MAP)) {
+        const long end = typeLookahead_.scanAnnotation(pos_);
+        return end >= 0 && static_cast<std::size_t>(end) < tokens_.size() &&
+               isNameToken(tokens_[static_cast<std::size_t>(end)].type);
     }
     if (check(TokenType::KW_FUNC)) {
         const long end = typeLookahead_.scanAnnotation(pos_);
         return end >= 0 && static_cast<std::size_t>(end) < tokens_.size() &&
-               tokens_[static_cast<std::size_t>(end)].type == TokenType::IDENTIFIER;
+               isNameToken(tokens_[static_cast<std::size_t>(end)].type);
     }
     // "int x" (type name, then variable name) vs "foo(x)" (call) or "foo = x"
     // (assignment - not supported yet) or just "foo" alone: the only case
     // that's unambiguously a typed declaration is IDENTIFIER immediately
     // followed by another IDENTIFIER - OR a full type annotation (which may
     // be a union chain like `int|string`) immediately followed by another
-    // IDENTIFIER, e.g. `int|string unionValue`.
+    // IDENTIFIER, e.g. `int|string unionValue`. The name may itself be a
+    // contextual type spelling: `int list = 3` declares an int called `list`.
     if (!check(TokenType::IDENTIFIER)) return false;
     long end = typeLookahead_.scanAnnotation(pos_);
     return end >= 0 && static_cast<std::size_t>(end) < tokens_.size() &&
-           tokens_[static_cast<std::size_t>(end)].type == TokenType::IDENTIFIER;
+           isNameToken(tokens_[static_cast<std::size_t>(end)].type);
 }
 
 // ---------- statements ----------
@@ -871,8 +904,11 @@ NodePtr Parser::parseVarDecl(AccessModifier access) {
     bool isConst = check(TokenType::KW_LET);
     advance(); // consume 'var' or 'let'
 
+    // `list`, `set` and `map` are type spellings, but a variable may share the
+    // spelling: `var list = [1, 2]` is unambiguous because `var` has already
+    // said that a name follows.
     Token nameTok;
-    if (check(TokenType::IDENTIFIER) || check(TokenType::KW_SHARED)) nameTok = advance();
+    if (checkName()) nameTok = advance();
     else error("Expected variable name");
 
     auto node = std::make_unique<VarDecl>();
@@ -894,7 +930,9 @@ NodePtr Parser::parseTypedVarDecl(AccessModifier access) {
     else if (match({TokenType::KW_SHARED})) ownership = OwnershipKind::SHARED;
     else if (match({TokenType::KW_GC})) ownership = OwnershipKind::GC;
     TypeAnnotation type = parseTypeAnnotation();
-    Token nameTok = expect(TokenType::IDENTIFIER, "Expected a variable name after the type");
+    // The name may share a spelling with a type keyword: `list<int> list = []`
+    // declares a list called `list`, and `int map = 3` a field called `map`.
+    Token nameTok = expectName("Expected a variable name after the type");
 
     auto node = std::make_unique<VarDecl>();
     node->line = nameTok.line;
@@ -974,7 +1012,7 @@ NodePtr Parser::parseReturnStmt() {
 // for i in start..end step s { body }   -- 'step s' is optional (defaults to 1)
 NodePtr Parser::parseForStmt() {
     Token forTok = advance(); // consume 'for'
-    Token varTok = expect(TokenType::IDENTIFIER, "Expected a loop variable name after 'for'");
+    Token varTok = expectName("Expected a loop variable name after 'for'");
     expect(TokenType::KW_IN, "Expected 'in' after the loop variable, e.g. for i in 0..10");
 
     auto node = std::make_unique<ForStmt>();
@@ -1041,10 +1079,12 @@ NodePtr Parser::parseTryStmt() {
     while (match({TokenType::KW_CATCH})) {
         CatchClause clause;
         clause.line = previous().line;
-        if (check(TokenType::IDENTIFIER) && peekNext().type == TokenType::IDENTIFIER) {
+        // `catch Exception e { }` types the caught value; the bound name may
+        // be a contextual type spelling (`catch Exception list { }`).
+        if (check(TokenType::IDENTIFIER) && isNameToken(peekNext().type)) {
             clause.type = parseTypeAnnotation();
         }
-        Token varTok = expect(TokenType::IDENTIFIER,
+        Token varTok = expectName(
             "Expected a variable name to bind the caught exception to, e.g. catch Exception e { }");
         clause.varName = varTok.lexeme;
         clause.block = parseBlock();
