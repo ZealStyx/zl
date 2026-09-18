@@ -1,0 +1,16 @@
+// Regression fixture - invalid/type_errors - FuncSignatureParamType
+//
+// A declared `func(...)` signature checks parameter types, not just the count:
+// `func(string): bool` cannot stand in for `func(int, string): bool` even
+// though a one-parameter func of the same name shape might look close. The
+// mismatch is reported at the call site rather than surfacing as a runtime
+// type assertion (P1-2).
+
+class FuncSignatureParamType {
+    static func predicate(func(int, string): bool f, int n, string s): bool { return f(n, s) }
+
+    func main(): void {
+        var wrongParams = func(string s, int n): bool => n > 0 && s.length() > 0
+        log("x=" + FuncSignatureParamType.predicate(wrongParams, 3, "abc"))
+    }
+}

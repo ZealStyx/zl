@@ -236,9 +236,37 @@ log(c())  // 1
 log(c())  // 2
 ```
 
-**Known gap.** Full function-type signatures — parameter and return types on a
-`func`-typed slot — are not checked yet. Calling a `func`-typed value with the wrong
-number of arguments is caught at runtime, not at compile time.
+**Function-type signatures.** A `func`-typed slot may carry the whole signature —
+`func(int, string): bool` — as a parameter type, a return type, or the type of a
+declaration. The signature is a checked contract, not a comment: the callable handed
+to it is checked where it is handed over, and a call through the slot is checked
+against the argument list.
+
+```zl
+func predicate(func(int, string): bool f, int n, string s): bool { return f(n, s) }
+
+predicate(func(int n, string s): bool => n > 0, 3, "abc")   // ok
+
+var tooFew = func(int n): bool => n > 0
+predicate(tooFew, 3, "abc")
+// error: argument 1 to func 'predicate': expected a func with 2 parameter(s), got 1
+
+func(int, string): bool same = func(int n, string s): bool => n == s.length()
+same(3)
+// error: func value 'same' expects 2 argument(s), got 1
+```
+
+Parameter types and the return type are checked the same way (`incompatible func
+parameter type`, `incompatible func return type`), and a `func(...): T` return type
+keeps its signature out of the call, so a factory that hands back a callable produces
+a value the next call site can check. An `unknown` on either side — an untyped lambda
+parameter, say — is accepted rather than guessed at.
+
+Bare `func` is the compatibility spelling and stays dynamic: it carries no signature,
+so there is nothing to check statically, and calling it with the wrong number of
+arguments is still a runtime error (`VM: function '…' argument count mismatch`). Write
+the signature when the callee is going to call the value; leave it bare only where the
+signature genuinely is not known.
 
 ## Union types and narrowing
 
@@ -441,15 +469,22 @@ set<int> tags = {}
 List<int> values = []
 ```
 
-The literal still needs something to declare it. In *argument* position there is
-nothing yet — `countEntries({})` against `static func countEntries(map<string,int> m)`
-is a compile error ("no overload … matches"), because argument types are inferred
-before overload resolution picks the parameter. Bind it first and pass the variable:
+The literal still needs something to declare it, and in *argument* position that is the
+parameter type: the call's own candidates say what the position wants, and an empty
+literal — which holds nothing that could contradict them — is inferred against it.
 
 ```zl
-map<string, int> empty = {}
+static func countEntries(map<string, int> m): int { return Collection.length(m) }
+
+log(countEntries({}))               // 0 - the parameter declares the literal
+
+map<string, int> empty = {}         // the bound spelling is the same value
 log(countEntries(empty))            // 0
 ```
+
+Only an *empty* literal takes the expectation, and only where every arity-matching
+candidate agrees on the container: with overloads for both `map<K,V>` and `list<T>`,
+`{}` has no single answer and the call is reported as unmatched rather than guessed at.
 
 With no declaration to go by, the spelling decides: `[]` infers an empty `list` and
 `{}` an empty `set`, so `var tags = {}` followed by `set<int> declared = tags` type
@@ -750,6 +785,36 @@ var counter = new Atomic()
 Thread.start(func() { Atomic.add(counter, 1) })   // fine
 ```
 
-Wrapping a value in `Shared<T>` makes the capture legal, not automatically safe:
-`get()`/`setValue()` on their own can still interleave a read-modify-write, so use
-`Atomic` for counters and `Mutex` or `RwLock` for larger critical sections.
+Wrapping a value in `Shared<T>` makes the capture legal, not automatically safe. Each
+cell operation is individually synchronised, but a read-modify-write across two of them
+is not: `get()` and `setValue()` can interleave with another thread's pair and lose the
+update. Four threads doing 2000 unsynchronised increments of one `Shared<int>` land
+around 3000 of the expected 8000
+(`tests/zl/valid/concurrency_regressions/SharedLostUpdateMeasurement.zl` measures it on
+every run, and fails if the number ever becomes exact — that would mean `Shared<T>`
+became synchronised and these docs are stale).
+
+Three ways to make the same increment correct:
+
+```zl
+import zl.lang.Atomic
+import zl.lang.Mutex
+
+var counter = new Shared<int>(0)     // or: var counter = share(0)
+
+counter.withLock(func(): int {       // the cell's own lock
+    var next = counter.get() + 1
+    counter.setValue(next)
+    return next
+})
+
+var atomic = new Atomic()            // an atomic slot, for counters
+Atomic.add(atomic, 1)
+
+var m = new Mutex()                  // a lock, for a larger critical section
+Mutex.withLock(m, func() { counter.setValue(counter.get() + 1) })
+```
+
+All three land on exactly 8000 in that fixture. Use `withLock` when the state is the
+cell's own, `Atomic` for a single slot, and `Mutex`/`RwLock` when several values have
+to move together.

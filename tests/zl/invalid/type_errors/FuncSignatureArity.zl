@@ -1,0 +1,19 @@
+// Regression fixture - invalid/type_errors - FuncSignatureArity
+//
+// A parameter declared `func(int, string): bool` is checked against the
+// callable actually passed. Handing it a one-parameter func used to compile
+// and fail later, in the VM ("function 'FuncSignatureArity.$lambda0' argument
+// count mismatch") or at the runtime type assertion; it is now a compile error
+// at the call site naming both arities (P1-2).
+//
+// Bare `func` is the opposite case and stays dynamic - see
+// tests/zl/valid/language_hardening_tests/FuncSignatures.zl.
+
+class FuncSignatureArity {
+    static func predicate(func(int, string): bool f, int n, string s): bool { return f(n, s) }
+
+    func main(): void {
+        var tooFew = func(int n): bool => n > 0
+        log("x=" + FuncSignatureArity.predicate(tooFew, 3, "abc"))
+    }
+}
