@@ -17,7 +17,13 @@
 //
 // Option<T> is built in - no import needed. A subclass instantiation widens to
 // its parameterized parent, so `Some<int>` satisfies a declared `Option<int>`
-// and functions can take and return Options normally.
+// and functions can take and return Options normally. `match` destructures by
+// case, and the two cases are the whole story, so no wildcard is needed:
+//
+//     match o { Some v => v.value  None => 0 }
+//
+// (`None` names the case in pattern position; it does not bind a variable.
+// `Some v` takes its `int` from the subject.)
 // ============================================================================
 
 class OptionType {
@@ -31,8 +37,10 @@ class OptionType {
     }
 
     static func describe(Option<int> found): string {
-        if (found.isSome()) { return "found " + found.unwrap() }
-        return "no even number"
+        return match found {
+            Some v => "found " + v.value
+            None => "no even number"
+        }
     }
 
     func main(): void {

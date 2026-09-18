@@ -671,6 +671,15 @@ if(BUILD_TESTING)
             ${CMAKE_SOURCE_DIR}/tests/double_format_parity.py $<TARGET_FILE:zl_language>)
         set_tests_properties(double-format-parity PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endif()
+    # Sum-match parity: matching Option/Result, and a match whose arms produce
+    # no value, must be the same program on every backend - the checker's case
+    # coverage, the inferred pattern arguments and the statement-position
+    # lowering all meet in this fixture.
+    if(ZL_PARITY_PYTHON)
+        add_test(NAME sum-match-parity COMMAND ${ZL_PARITY_PYTHON}
+            ${CMAKE_SOURCE_DIR}/tests/sum_match_parity.py $<TARGET_FILE:zl_language>)
+        set_tests_properties(sum-match-parity PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endif()
 endif()
 
 # --- Platform link-requirement guard ----------------------------------------

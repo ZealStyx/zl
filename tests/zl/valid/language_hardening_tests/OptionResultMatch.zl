@@ -1,0 +1,176 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - OptionResultMatch
+//
+// `match` could not pattern-match `Option` or `Result` at all, although the
+// checker's exhaustiveness rules had been written for exactly those subjects:
+//
+//   * `Ok v` was rejected before it got anywhere - the resolver demanded the
+//     type arguments, even though the subject already fixes them:
+//     "generic type 'Ok' requires 2 type argument(s)".
+//   * `Ok<int, string> v` passed the pattern test and then failed the
+//     exhaustiveness subtraction: no case pattern could ever cover a member
+//     that was the parent class, so even `Ok … Err …` reported
+//     "non-exhaustive match: uncovered Result<int,string>|nil".
+//
+// A built-in sum is now read as its case set. `Option<T>` is exactly
+// `Some<T> | None<T>` and `Result<T,E>` exactly `Ok<T,E> | Err<T,E>`, so:
+//
+//   * omitted pattern arguments are filled from the subject (`Ok v` against a
+//     `Result<int,string>` means `Ok<int,string> v`), and the annotation is
+//     written back so the checker, the bytecode compiler and the MIR lowerer
+//     all see one spelled-out type;
+//   * `None` / `Err` in pattern position name the case instead of binding a
+//     variable of that name;
+//   * covering every case is exhaustive - no wildcard, and no `null` arm, is
+//     required. Nil is not a case, so a `null` subject reaches no arm and
+//     raises the same catchable "non-exhaustive match" any unmatched value
+//     raises; an explicit `null` arm is accepted and takes it.
+//
+// A hierarchy a program reopens by extending the sum is not closed any more:
+// see tests/zl/invalid/type_errors/OpenSumMatch.zl.
+//
+// The output is exactly "side ok" then "ok" - the only lines the program
+// prints - so tests/sum_match_parity.py can require the same bytes from the
+// MIR, AST, unoptimized-MIR and native configs.
+// ============================================================================
+
+class OptionResultMatch {
+    func check(bool cond, string what): void {
+        if (!cond) {
+            throw new Exception("OptionResultMatch failed: " + what)
+        }
+    }
+
+    // ---- Result, with the arguments the subject fixes ----------------------
+    static func describe(Result<int, string> r): string {
+        return match r {
+            Ok v => "ok " + v.value
+            Err e => "err " + e.error
+        }
+    }
+
+    // The spelled-out spelling is the same program: the checker writes the
+    // inferred arguments into the bare form, so both lower identically.
+    static func describeExplicit(Result<int, string> r): string {
+        return match r {
+            Ok<int, string> v => "ok " + v.value
+            Err<int, string> e => "err " + e.error
+        }
+    }
+
+    // A pattern naming the sum itself covers every case.
+    static func kind(Result<int, string> r): string {
+        return match r {
+            Result<int, string> whole => "result"
+        }
+    }
+
+    // A guard is not a cover: the unguarded case pattern after it is what makes
+    // the match exhaustive.
+    static func classify(Result<int, string> r): string {
+        return match r {
+            Ok v when v.value > 10 => "big"
+            Ok v => "small"
+            Err e => "err"
+        }
+    }
+
+    // ---- Option, both cases, two different instantiations ------------------
+    static func optionText(Option<int> o): string {
+        return match o {
+            Some v => "some " + v.value
+            None => "none"
+        }
+    }
+
+    static func optionString(Option<string> o): string {
+        return match o {
+            Some v => v.value
+            None => "none"
+        }
+    }
+
+    // `null` is reachable even after every case is covered, and a catch-all is
+    // allowed for the same reason - neither is required.
+    static func tolerant(Option<int> o): string {
+        return match o {
+            Some v => "some"
+            None => "none"
+            null => "nil"
+        }
+    }
+
+    static func catchAll(Option<int> o): string {
+        return match o {
+            Some v => "some"
+            None => "none"
+            _ => "other"
+        }
+    }
+
+    // No null arm: a nil subject matches no case and the mismatch raises.
+    static func strict(Result<int, string> r): string {
+        return match r {
+            Ok v => "ok"
+            Err e => "err"
+        }
+    }
+
+    func main(): void {
+        var self = new OptionResultMatch()
+
+        // ---- Result -------------------------------------------------------
+        self.check(OptionResultMatch.describe(new Ok<int, string>(7)) == "ok 7",
+                   "a bare Ok pattern binds the case and its payload")
+        self.check(OptionResultMatch.describe(new Err<int, string>("boom")) == "err boom",
+                   "a bare Err pattern binds the case and its error")
+        self.check(OptionResultMatch.describe(new Ok<int, string>(7)) ==
+                   OptionResultMatch.describeExplicit(new Ok<int, string>(7)),
+                   "the bare and spelled-out case patterns agree")
+        self.check(OptionResultMatch.kind(new Err<int, string>("e")) == "result",
+                   "a pattern naming the sum itself covers every case")
+        self.check(OptionResultMatch.classify(new Ok<int, string>(11)) == "big",
+                   "a guarded case pattern runs its guard")
+        self.check(OptionResultMatch.classify(new Ok<int, string>(3)) == "small",
+                   "and falls through to the unguarded case pattern")
+        self.check(OptionResultMatch.classify(new Err<int, string>("e")) == "err",
+                   "which leaves the other case reachable")
+
+        // ---- Option, at two instantiations --------------------------------
+        self.check(OptionResultMatch.optionText(new Some<int>(42)) == "some 42",
+                   "Some carries the subject's argument")
+        self.check(OptionResultMatch.optionText(new None<int>()) == "none",
+                   "None names the case, it does not bind a variable")
+        self.check(OptionResultMatch.optionString(new Some<string>("hi")) == "hi",
+                   "the arguments come from the subject, not from the first use")
+
+        // ---- nil is not a case --------------------------------------------
+        self.check(OptionResultMatch.tolerant(new None<int>()) == "none",
+                   "an explicit null arm does not disturb the case patterns")
+        Option<int> missing = null
+        self.check(OptionResultMatch.tolerant(missing) == "nil",
+                   "and it takes a nil subject")
+        self.check(OptionResultMatch.catchAll(new None<int>()) == "none",
+                   "a catch-all after the cases is reachable, not unreachable")
+
+        var caught = false
+        Result<int, string> absent = null
+        try {
+            log(OptionResultMatch.strict(absent))
+        } catch Exception e {
+            caught = true
+        }
+        self.check(caught, "a nil subject with no null arm raises catchably")
+
+        // ---- and the match as a statement, with no result ------------------
+        // Every arm here is a `log`, so the match produces no value at all;
+        // MIR used to refuse that shape outright.
+        Result<int, string> side = new Ok<int, string>(1)
+        match side {
+            Ok v => log("side ok")
+            Err e => log("side err")
+        }
+
+        log("ok")
+    }
+}

@@ -480,8 +480,10 @@ NodePtr ExpressionParser::parsePrimary() {
 
     // `shared` doubles as an ownership modifier and a plain identifier; the
     // statement parser only treats it as a modifier when a type follows, so by
-    // the time it reaches expression position it names a variable.
-    if (parser_.check(TokenType::IDENTIFIER) || parser_.check(TokenType::KW_SHARED)) {
+    // the time it reaches expression position it names a variable. The same
+    // holds for `list`, `set` and `map`, which are type spellings but legal
+    // names: no type can appear here, so the token names the variable.
+    if (parser_.checkName()) {
         Token tok = parser_.advance();
         // Check if it's ClassName(args...) for constructor call without 'new'
         if (parser_.check(TokenType::LPAREN) && tok.lexeme.length() > 0 && std::isupper(tok.lexeme[0])) {

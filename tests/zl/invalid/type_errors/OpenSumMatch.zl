@@ -1,0 +1,24 @@
+// Regression fixture - invalid/type_errors - OpenSumMatch
+//
+// The case set is closed only while it is exactly the declared cases. This
+// program extends `Result<int,string>`, so a `Mine` value is neither `Ok` nor
+// `Err`; covering the two built-in cases is no longer the whole story and the
+// match must say what a `Mine` does. Reading a reopened hierarchy as closed
+// would make this arm set silently swallow a value it does not describe, so
+// the checker keeps the parent member and reports it as uncovered instead.
+
+class Mine extends Result<int, string> {
+}
+
+class OpenSumMatch {
+    static func describe(Result<int, string> r): string {
+        return match r {
+            Ok v => "ok"
+            Err e => "err"
+        }
+    }
+
+    func main(): void {
+        log(OpenSumMatch.describe(new Ok<int, string>(1)))
+    }
+}

@@ -454,6 +454,121 @@ bool TypeChecker::isAssignable(ZlType from, ZlType to, const std::string& fromCl
     return false;
 }
 
+std::vector<ResolvedTypeArg> TypeChecker::builtinSumCases(const std::string& subjectClassName) const {
+    // The case set each built-in sum is closed over. The names are the classes
+    // the standard library declares (src/compiler/builtin_library.cpp), listed
+    // in the order the model sorts direct subclasses in.
+    static const std::unordered_map<std::string, std::vector<std::string>> kBuiltinSums = {
+        {"Option", {"None", "Some"}},
+        {"Result", {"Err", "Ok"}},
+    };
+    const TypeName subject = parseTypeName(subjectClassName);
+    if (subject.name.empty() || subject.args.empty()) return {};
+    const auto sumIt = kBuiltinSums.find(subject.name);
+    if (sumIt == kBuiltinSums.end()) return {};
+    // A hierarchy is closed only while it is exactly the declared cases: a
+    // program that extends `Result<int,string>` has added a shape the two case
+    // patterns do not describe, so the plain pair stops being exhaustive. The
+    // same check keeps a user class that merely reuses a case name from being
+    // read as the built-in case.
+    if (semanticModel_.directSubclasses(subject.name) != sumIt->second) return {};
+
+    std::vector<ResolvedTypeArg> cases;
+    cases.reserve(sumIt->second.size());
+    for (const auto& caseName : sumIt->second) {
+        const auto* shape = semanticModel_.findClass(caseName);
+        if (shape == nullptr || shape->typeParams.size() != subject.args.size()) return {};
+        // Both cases instantiate their parent positionally (`Some<T> extends
+        // Option<T>`, `Ok<T,E> extends Result<T,E>`); a case that reorders or
+        // transforms its arguments is not a shape this rule understands, so the
+        // hierarchy stays open rather than being guessed at.
+        if (shape->parentName != subject.name || shape->parentTypeArgs.size() != shape->typeParams.size()) return {};
+        for (std::size_t i = 0; i < shape->typeParams.size(); ++i) {
+            if (describeTypeAnnotation(shape->parentTypeArgs[i]) != shape->typeParams[i]) return {};
+        }
+        std::string caseType = caseName + "<";
+        for (std::size_t i = 0; i < subject.args.size(); ++i) {
+            if (i) caseType += ",";
+            caseType += describeTypeName(subject.args[i]);
+        }
+        caseType += ">";
+        cases.push_back({ZlType::OBJECT, std::move(caseType)});
+    }
+    return cases;
+}
+
+bool TypeChecker::typePatternCovers(const ResolvedTypeArg& member, ZlType patternType,
+                                     const std::string& patternClass) const {
+    if (isAssignable(member.type, patternType, member.className, patternClass)) return true;
+    if (member.type != ZlType::OBJECT || patternType != ZlType::OBJECT) return false;
+    // The case classes are only related to their sum by name until something
+    // instantiates them, so a pattern naming the sum itself (`Result<int,string>`
+    // covering `Ok<int,string>`) is decided on the template relationship plus
+    // matching arguments - the same shape the runtime check accepts.
+    const TypeName memberName = parseTypeName(member.className);
+    const TypeName patternName = parseTypeName(patternClass);
+    if (memberName.name.empty() || patternName.name.empty()) return false;
+    if (memberName.args.size() != patternName.args.size()) return false;
+    if (!semanticModel_.isSubclassOf(memberName.name, patternName.name)) return false;
+    for (std::size_t i = 0; i < memberName.args.size(); ++i) {
+        if (describeTypeName(memberName.args[i]) != describeTypeName(patternName.args[i])) return false;
+    }
+    return true;
+}
+
+void TypeChecker::fillTypePatternArgs(TypeAnnotation& pattern, const std::string& subjectClassName) const {
+    if (!pattern.typeArgs.empty() || pattern.name.empty() || subjectClassName.empty()) return;
+    const auto* shape = semanticModel_.findClass(pattern.name);
+    if (shape == nullptr || shape->typeParams.empty()) return;
+    const TypeName subject = parseTypeName(subjectClassName);
+    if (subject.name.empty() || subject.args.empty()) return;
+
+    // Walk from the pattern's class up to the class the subject instantiates,
+    // carrying each parent's argument list - written in terms of the child's
+    // parameters - down into bindings for the ancestor's parameters.
+    std::unordered_map<std::string, std::string> bindings;
+    std::string current = pattern.name;
+    const ClassShapeInfo* ancestor = nullptr;
+    for (int depth = 0; depth < 64; ++depth) {
+        const auto* child = semanticModel_.findClass(current);
+        if (child == nullptr || child->parentName.empty()) return;
+        const auto* parent = semanticModel_.findClass(child->parentName);
+        if (parent == nullptr) return;
+        std::unordered_map<std::string, std::string> next;
+        for (std::size_t i = 0; i < child->parentTypeArgs.size() && i < parent->typeParams.size(); ++i) {
+            next.emplace(parent->typeParams[i],
+                         substituteTypeParams(describeTypeAnnotation(child->parentTypeArgs[i]), bindings));
+        }
+        bindings = std::move(next);
+        current = parent->name;
+        if (current == subject.name) { ancestor = parent; break; }
+        // An instantiated ancestor may itself carry arguments; `findClass`
+        // resolves the template for those spellings, so continue from the
+        // template's own name.
+        const auto open = current.find('<');
+        if (open != std::string::npos) current = current.substr(0, open);
+    }
+    if (ancestor == nullptr) return;
+
+    // The subject fixes each ancestor parameter. A pattern parameter is only
+    // recoverable when that argument is exactly that bare parameter - for
+    // example `Wrapper<A> extends Base<list<A>>` cannot be inverted, and the
+    // pattern then keeps the spelling the user wrote.
+    std::unordered_map<std::string, std::string> argsByParam;
+    for (std::size_t i = 0; i < ancestor->typeParams.size() && i < subject.args.size(); ++i) {
+        const auto binding = bindings.find(ancestor->typeParams[i]);
+        if (binding == bindings.end()) continue;
+        if (std::find(shape->typeParams.begin(), shape->typeParams.end(), binding->second) == shape->typeParams.end()) continue;
+        argsByParam.emplace(binding->second, describeTypeName(subject.args[i]));
+    }
+    if (argsByParam.size() != shape->typeParams.size()) return;
+
+    pattern.typeArgs.clear();
+    for (const auto& param : shape->typeParams) {
+        pattern.typeArgs.push_back(typeAnnotationFromName(parseTypeName(argsByParam.at(param))));
+    }
+}
+
 void TypeChecker::typeError(const std::string& message, std::size_t line) {
     throw TypeCheckError("type error (line " + std::to_string(line) + "): " + message);
 }
@@ -3248,10 +3363,23 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
     };
     std::vector<ResolvedTypeArg> remaining = subjectIsUnion
         ? typeResolver_.unionMembers(subject.className) : std::vector<ResolvedTypeArg>{{subject.type, subject.className}};
+    // A built-in sum subject is closed, so completeness is decided over its
+    // cases (`Some`/`None`, `Ok`/`Err`) rather than over the parent class -
+    // which no single case pattern can ever cover, and which also carries the
+    // implicit nil alternative. Every other hierarchy stays open: its parent
+    // member remains, so a subclass arm alone never makes a match exhaustive.
+    std::vector<ResolvedTypeArg> builtinCases = subjectIsUnion ? std::vector<ResolvedTypeArg>{}
+                                                              : builtinSumCases(subject.className);
+    const bool subjectIsBuiltinSum = !builtinCases.empty();
+    if (subjectIsBuiltinSum) remaining = std::move(builtinCases);
     {
         // Reference types are nullable in ZL. A string/object type pattern
-        // excludes nil, so its implicit nil alternative still needs coverage.
-        if (std::any_of(remaining.begin(), remaining.end(), [&](const auto& member) {
+        // excludes nil, so its implicit nil alternative still needs coverage -
+        // except on a built-in sum, where the cases are every value the type
+        // has: a nil subject matches no case, and the lowering's unmatched path
+        // raises the catchable "non-exhaustive match" instead of guessing.
+        if (!subjectIsBuiltinSum &&
+            std::any_of(remaining.begin(), remaining.end(), [&](const auto& member) {
                 return isAssignable(ZlType::NIL, member.type, "", member.className);
             }) && std::none_of(remaining.begin(), remaining.end(), [](const auto& member) { return member.type == ZlType::NIL; }))
             remaining.push_back({ZlType::NIL, ""});
@@ -3491,7 +3619,18 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
 
     for (auto& arm : node->arms) {
         symbols_.restore(fallthroughTypes);
-        if (remaining.empty()) typeError("unreachable match arm: subject is already covered", arm.line);
+        if (remaining.empty()) {
+            // A built-in sum is exhausted by its cases, but nil is still a
+            // value of the subject's type - it matches no case - so a null
+            // literal, or a catch-all that also covers nil, is a reachable arm
+            // even with no case left. Anything else here really is unreachable.
+            const bool matchesNil = arm.patternKind == MatchExpr::PatternKind::Wildcard ||
+                                    arm.patternKind == MatchExpr::PatternKind::Variable ||
+                                    (arm.patternKind == MatchExpr::PatternKind::Literal &&
+                                     arm.literalType == TokenType::KW_NULL);
+            if (!(subjectIsBuiltinSum && matchesNil))
+                typeError("unreachable match arm: subject is already covered", arm.line);
+        }
         if (unconditionalPatternSeen)
             typeError("unreachable match arm: a previous irrefutable pattern matches every value", arm.line);
         const bool armUnconditional = (arm.guard == nullptr);
@@ -3535,6 +3674,35 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
                 }
             }
         }
+        auto armSubject = ResolvedTypeArg{subject.type, subject.className};
+        const bool catchAll = arm.patternKind == MatchExpr::PatternKind::Wildcard ||
+                              arm.patternKind == MatchExpr::PatternKind::Variable;
+        if (subjectIsUnion && catchAll && !remaining.empty())
+            armSubject = remaining.size() == 1 ? remaining.front() : typeResolver_.makeUnion(remaining);
+        // In a pattern, the name of a case of a built-in sum means that case:
+        // `None =>` and `Err =>` test it rather than binding a variable named
+        // `None`. Only the two closed sums read this way, and only when the
+        // subject is the sum itself, so an ordinary hierarchy keeps binding a
+        // variable of that name.
+        if (arm.patternKind == MatchExpr::PatternKind::Variable && !arm.bindingName.empty()) {
+            for (const auto& caseType : builtinSumCases(armSubject.className)) {
+                if (parseTypeName(caseType.className).name != arm.bindingName) continue;
+                arm.patternKind = MatchExpr::PatternKind::Type;
+                arm.typePattern = TypeAnnotation{};
+                arm.typePattern.name = arm.bindingName;
+                arm.typePattern.line = arm.line;
+                arm.bindingName = "_";
+                break;
+            }
+        }
+        // A type pattern may name a generic class without repeating the
+        // arguments the subject already fixes: against `Result<int,string>`,
+        // `Ok v` means `Ok<int,string> v`. The checker writes the concrete
+        // annotation back here - the same write-back the positional data
+        // patterns get above - so the binding, the bytecode compiler and the
+        // MIR lowerer all see one spelled-out type.
+        if (arm.patternKind == MatchExpr::PatternKind::Type)
+            fillTypePatternArgs(arm.typePattern, armSubject.className);
         MatchExpr::Pattern p;
         p.kind = arm.patternKind; p.raw = arm.raw; p.literalType = arm.literalType;
         p.enumTypeName = arm.enumTypeName; p.enumMemberName = arm.enumMemberName;
@@ -3557,10 +3725,6 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
             p.mapEntries.push_back(std::move(copied));
         }
         p.containerKind = arm.containerKind; p.line = arm.line;
-        auto armSubject = ResolvedTypeArg{subject.type, subject.className};
-        const bool catchAll = arm.patternKind == MatchExpr::PatternKind::Wildcard || arm.patternKind == MatchExpr::PatternKind::Variable;
-        if (subjectIsUnion && catchAll && !remaining.empty())
-            armSubject = remaining.size() == 1 ? remaining.front() : typeResolver_.makeUnion(remaining);
         const bool irrefutableShape = checkPattern(p, armSubject.type, armSubject.className);
         if (stableSubject) {
             if (arm.patternKind == MatchExpr::PatternKind::Type || arm.patternKind == MatchExpr::PatternKind::Data ||
@@ -3604,9 +3768,16 @@ TypeChecker::InferredType TypeChecker::inferMatchExpr(MatchExpr* node) {
                     auto type = resolveType(arm.typePattern, &cls);
                     if (member.type == ZlType::NIL) return type == ZlType::NIL;
                     if (member.type == ZlType::UNKNOWN) return arm.typePattern.name == "unknown";
-                    return isAssignable(member.type, type, member.className, cls);
+                    return typePatternCovers(member, type, cls);
                 }
                 if (arm.patternKind == MatchExpr::PatternKind::Data && irrefutableShape) {
+                    // A data pattern on a built-in sum case (`Some{value: v}`)
+                    // names the case directly, and the expanded member is the
+                    // instantiated case (`Some<int>`), so the base name is what
+                    // identifies it.
+                    if (member.type == ZlType::OBJECT && !member.className.empty() &&
+                        parseTypeName(member.className).name == arm.typePattern.name)
+                        return true;
                     return member.type == ZlType::OBJECT &&
                            isAssignable(member.type, ZlType::OBJECT, member.className, arm.typePattern.name);
                 }

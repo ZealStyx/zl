@@ -260,7 +260,10 @@ A type arm refines both its binding and the original subject identifier while
 that identifier remains unchanged. The catch-all binding carries the remaining
 alternatives. Guards do not establish exhaustive coverage. ZL reference types,
 including `string`, remain nullable: cover `null` or use a wildcard as well.
-Enums and primitive numbers/bools are not nullable.
+The two built-in sums are the exception - their cases are the subject's whole
+value set, so matching every case is exhaustive without a `null` arm; see
+[`Option<T>` and `Result<T,E>`](#optiont-and-resultte). Enums and primitive
+numbers/bools are not nullable.
 
 The subject is evaluated once. If a guard reassigns it, subsequent patterns still
 inspect the original snapshot; use the pattern binding to read that snapshot.
@@ -374,8 +377,11 @@ arguments. A method type parameter may not reuse a name already bound as a class
 type parameter (`class Box<T> { func identity<T>(...) }` is a compile error).
 
 **Naming note.** The index/key-assignment method is `put`, not `set`, because `set` is a
-reserved keyword (the lowercase `set<T>` annotation). This is a keyword-collision
-workaround, not a design preference.
+type spelling (`set<T>`) and a *declared member name* is still an identifier position.
+`list`, `set` and `map` may name a variable, field, parameter, loop variable, catch
+variable or lambda parameter - see [Naming and the collection keywords](#naming-and-the-collection-keywords) -
+but a method or function *name* may not be one of them, so `set` stays a
+keyword-collision workaround rather than a design preference.
 
 ### Algorithms
 
@@ -579,12 +585,78 @@ static func find(int n): Option<int> {
 }
 
 static func label(Option<int> o): string {
-    if (o.isSome()) { return "found " + o.unwrap() }
-    return "empty"
+    return match o { Some v => "found " + v.value  None => "empty" }
 }
 ```
 
+### Matching a sum
+
+A case pattern names the case and binds the case object - `Some v` binds a
+`Some<T>` whose payload is `v.value`, `Err e` binds an `Err<T,E>` whose error is
+`e.error`. The arguments come from the subject, so the case name alone is
+enough; spelling them out (`Ok<int,string> v`) is the same program:
+
+```zl
+static func report(Result<int, string> r): string {
+    return match r {
+        Ok v when v.value > 0 => "positive"
+        Ok v => "ok " + v.value
+        Err e => "err " + e.error
+    }
+}
+```
+
+The two cases are the whole value set, so covering both is exhaustive with no
+wildcard and no `null` arm, and a missing case is a compile error naming it
+(`non-exhaustive match: uncovered Err<int,string>`). Inside an arm the subject
+identifier is refined to the matched case, so `v.value` type-checks.
+
+Two consequences are worth knowing:
+
+- **`None` and `Err` name their case in pattern position**, they do not bind a
+  variable called `None` or `Err`; a binding is written as `Some name`,
+  `Ok name`. A variable really named `None` is still readable in expression
+  position - only a pattern reads it as the case.
+- **Nil is not a case.** A `null` subject matches no case and reaches the
+  lowering's unmatched path, which raises a catchable
+  `Exception("non-exhaustive match")`. A `null` arm (or a wildcard) is allowed
+  and is reachable even after every case is covered, but it is never required.
+
+The case set is closed only while it is exactly the declared cases. A program
+that extends a sum (`class Mine extends Result<int,string>`) reopens it, and
+then a `Mine` value is neither case, so the plain pair is reported as
+non-exhaustive again - see `tests/zl/invalid/type_errors/OpenSumMatch.zl`.
+
 See `examples/advanced/OptionType.zl` and `examples/advanced/ResultType.zl`.
+
+### Naming and the collection keywords
+
+`list`, `set` and `map` are type spellings, and the lexer has no context, so
+they are read as names wherever no type can appear:
+
+```zl
+var list = [1, 2]              // a variable called list
+var map = 3
+Collection.push(list, 4)       // ... used as an argument
+list = [5, 6]                  // ... and assigned
+for set in 0..3 { }            // a loop variable
+try { ... } catch Exception list { }   // a catch variable
+var f = func(map) => map + 1   // a lambda parameter
+
+list<int> order = [1, 2]       // and the type readings are untouched
+map<string, int> counts = {}
+set<int> unique = {}
+```
+
+Statement position resolves the one real ambiguity by lookahead: a statement is
+a typed declaration only when a complete type annotation is followed by a name,
+so `list<int> xs = []` declares while `list = []`, `list.push(1)` and
+`list.length()` use the variable. The same rule applies to a name in a typed
+declaration - `int list = 3` declares an int called `list`. A statement whose
+token sequence spells both readings (`list < n > x`) is read as the declaration,
+exactly as it already is for a user-defined generic type. Function and method
+*names* remain identifiers, which is why the collection API still spells
+`put` rather than `set`.
 
 ## Reflection
 
