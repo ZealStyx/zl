@@ -1,0 +1,14 @@
+// Regression fixture - invalid/type_errors - FuncSignatureReturnType
+//
+// The declared return type is part of the signature too: a callable returning
+// `int` cannot be handed to a `func(int): bool` parameter, because the callee
+// will use the result as a bool. Compile-time, at the call site (P1-2).
+
+class FuncSignatureReturnType {
+    static func test(func(int): bool f, int n): bool { return f(n) }
+
+    func main(): void {
+        var wrongReturn = func(int n): int => n + 1
+        log("x=" + FuncSignatureReturnType.test(wrongReturn, 3))
+    }
+}

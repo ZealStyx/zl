@@ -1,0 +1,85 @@
+// ============================================================================
+// Regression fixture - valid/concurrency_regressions - SharedLostUpdateMeasurement
+//
+// `Shared<T>` makes a capture LEGAL; it does not make it SAFE. That is not a
+// hypothetical - it is measured here, on every run, and the measurement is the
+// regression (P1-8 / REVIEW.md O20).
+//
+// Four threads each do 2000 unsynchronised `setValue(get() + 1)` on one
+// `Shared<int>`, alongside the same work done under `Shared.withLock` and under
+// `Atomic`. Measured on a 2-core box: plain lands between 2200 and 4400 of the
+// expected 8000, while both guarded counters land on 8000 exactly.
+//
+// The three assertions are the point of the fixture:
+//
+//   * `Atomic` is exact - it always was;
+//   * `withLock` is exact - the cell's own lock is enough for a
+//     read-modify-write, which is the fix this file exists to demonstrate;
+//   * the unsynchronised counter LOSES updates. That assertion is the loud one.
+//     If it ever fails, the unsynchronised read-modify-write stopped losing
+//     updates - i.e. `Shared<T>` became synchronised - and the documentation
+//     that says it is not (README "Current limitations",
+//     docs/language-guide.md "Memory-model direction", docs/stdlib.md
+//     "Concurrency", examples/advanced/SharedState.zl) is now wrong and has to
+//     be corrected in the same change. Losing updates is a documented
+//     property of the type, not a bug to be preserved: what must not happen is
+//     the property changing while the docs keep describing the old one.
+//
+// Runs on every pipeline; threads are real OS threads on all of them.
+// ============================================================================
+
+import zl.lang.Atomic
+
+class SharedLostUpdateMeasurement {
+    static func fail(string what): void {
+        throw new Exception("SharedLostUpdateMeasurement failed: " + what)
+    }
+
+    func main(): void {
+        var plain = new Shared<int>(0)
+        var locked = new Shared<int>(0)
+        var atomic = new Atomic()
+
+        // The measured hazard: read-modify-write with no synchronisation.
+        var racy = func() {
+            for i in 0..2000 { plain.setValue(plain.get() + 1) }
+        }
+        // The same work under the cell's own lock - indivisible, so exact.
+        var guarded = func() {
+            for i in 0..2000 {
+                locked.withLock(func(): int {
+                    var next = locked.get() + 1
+                    locked.setValue(next)
+                    return next
+                })
+            }
+        }
+        // And under an atomic slot, for the comparison the docs quote.
+        var exact = func() {
+            for i in 0..2000 { Atomic.add(atomic, 1) }
+        }
+
+        var workers = new List<Thread>()
+        var k = 0
+        while (k < 4) {
+            workers.push(Thread.start(racy))
+            workers.push(Thread.start(guarded))
+            workers.push(Thread.start(exact))
+            k = k + 1
+        }
+        for i in 0..workers.length() { Thread.join(workers.get(i)) }
+
+        log("plain  (expect < 8000)  " + plain.get())
+        log("locked (expect 8000)    " + locked.get())
+        log("atomic (expect 8000)    " + Atomic.load(atomic))
+
+        if (Atomic.load(atomic) != 8000) { SharedLostUpdateMeasurement.fail("Atomic lost an update") }
+        if (locked.get() != 8000) { SharedLostUpdateMeasurement.fail("Shared.withLock lost an update") }
+        if (plain.get() >= 8000) {
+            SharedLostUpdateMeasurement.fail(
+                "the unsynchronised read-modify-write on Shared<int> stopped losing updates; " +
+                "Shared<T> is now synchronised - update the docs that say it is not")
+        }
+        log("ok")
+    }
+}

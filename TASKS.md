@@ -39,9 +39,9 @@ The three with the best value-to-risk ratio right now:
 
 | # | Task | Why first |
 | --- | --- | --- |
-| [P1-2](#p1-2--func-carries-no-signature-readme-researchcorpuslimitationsbarefuncparamzl) | `func` carries no signature | An arity mismatch is a runtime error and MIR records the parameter as `unknown`; compile-time checking has the bare-`func` compatibility escape hatch |
-| [P1-8](#p1-8--sharedt-is-shareable-not-thread-safe) | `Shared<T>` thread safety | The unsynchronised-increment loss is measured (2490 vs 4000); either confinement is checked or `share()` exists and the docs stop implying safety |
-| [P2-9](#p2-9--an-empty-literal-in-argument-position-still-has-nothing-to-declare-it) | `countEntries({})` | The last empty-literal hole, and the smallest piece of expected-type propagation left - P1-1 landed without it |
+| [P1-7](#p1-7--async-cancellation-unobserved-failures-async-lambdas) | Async: cancellation, unobserved failures, async lambdas | Three named gaps the README already lists, each with an obvious fixture; `async func(x) => …` is the smallest of them |
+| [P1-9](#p1-9--reachability-is-a-report-nothing-deletes-dead-code) | Reachability is a report; nothing deletes dead code | The report and the deleter both exist and are tested - the missing piece is the argument for where the boundary sits, plus a measured bytecode delta |
+| [P2-7](#p2-7--typed-field-by-field-c-struct-schemas) | Typed field-by-field C struct schemas | Self-contained: one `zl-bind` emitter change and one test that reads and writes each field by name |
 
 ---
 
@@ -56,16 +56,6 @@ closed 2026-09-18 while writing the `Condition` fixture below) - are in
 ---
 
 ## P1 - promised capability, or a daily gap
-
-### P1-2 · `func` carries no signature ([README](README.md#current-limitations), `research/corpus/limitations/BareFuncParam.zl`)
-
-A `func`-typed slot holds no parameter or return types, so an arity mismatch is
-a runtime error (`VM: function 'Bare.$lambda0' argument count mismatch`) and MIR
-records the parameter as `unknown`.
-
-**Done when** a declared `func(int, string): bool` is checked at the call site at
-compile time, bare `func` keeps working for compatibility, and the README
-limitation is deleted.
 
 ### P1-6 · Native backend: not an execution driver, and a small subset
 
@@ -97,17 +87,6 @@ unobserved-failure reporting and async lambdas are pending
 without `block()`/`ignore()` reports its failure instead of vanishing, and
 `async func(x) => …` parses - each with a `tests/zl/valid/concurrency_regressions`
 fixture.
-
-### P1-8 · `Shared<T>` is shareable, not thread-safe
-
-Measured, not hypothetical: two threads doing 2000 unsynchronised increments each
-land on 2490, while `Atomic` lands on 4000 exactly
-([REVIEW.md O20](examples/REVIEW.md), `examples/advanced/SharedState.zl`). The
-top-level `share()` helper and compile-time confinement checks are pending.
-
-**Done when** either confinement is checked at compile time or `share()` exists
-and the docs stop implying safety; the 2490 measurement becomes a regression that
-must fail loudly rather than silently.
 
 ### P1-9 · Reachability is a report; nothing deletes dead code
 
@@ -150,29 +129,6 @@ FFI passes opaque buffers; a typed schema per C struct is a later ABI extension
 
 **Done when** `zl-bind` emits a typed schema for a struct with mixed field types
 and a test reads and writes each field by name.
-
-### P2-9 · An empty literal in argument position still has nothing to declare it
-
-Found 2026-09-18 while closing A9. The empty-literal fix reads the container kind
-from the *declaration*, and in argument position there is no declaration yet:
-arguments are inferred before overload resolution runs. So `map<string,int> empty = {}`
-followed by `countEntries(empty)` compiles, while `countEntries({})` against
-`static func countEntries(map<string,int> m)` is still
-`no overload of 'countEntries' matches the given argument types` - on every backend.
-[docs/language-guide.md](docs/language-guide.md#empty-literals) tells users to bind
-first; that is a workaround, not an answer.
-
-The real fix is expected-type propagation into call arguments - the plumbing scoped
-during P1-1 and recorded as A1 in
-[TASKS_VERIFICATION.md](TASKS_VERIFICATION.md). P1-1 landed without needing it, so
-this is now the first real consumer: it should not be attempted as a one-off, and it
-must not disturb the non-empty `{1, 2}` case (TextLib.zl:61 relies on it being a
-variadic list).
-
-**Done when** `countEntries({})` compiles against a `map<K,V>` parameter on all four
-configs, `Text.format("{0}", {1})` still passes a list, and
-`tests/zl/valid/core_tests/EmptyCollectionLiterals.zl` covers the argument-position
-form directly instead of only the bound one.
 
 ---
 
@@ -223,6 +179,88 @@ confirmed already fixed on 2026-09-17; see [Done](#done) and
 Most recent first. Kept briefly so the gates that cover each fix are findable,
 then deleted - [docs/changelog.md](docs/changelog.md) is the permanent record.
 
+- [x] **P2-10 · An unmatched empty literal was reported by the verifier, not by
+  resolution** (found 2026-09-18 while closing P2-9) - an empty `{}` inferred a
+  bare `SET` with no class name, and `isAssignable` treats an unparameterized
+  collection as an untyped slot, so `take({})` against overloads for
+  `map<string,int>` and `list<int>` resolved to the list one and the MIR
+  verifier then refused the module (`invoke_static of '…take(list)' argument 0
+  passes set<unknown> but the parameter is list<int>`). The same program with
+  the set bound first was refused properly, which is what made the inline form
+  look like a different bug. The checker now spells the element type it already
+  knew - `set<unknown>` / `list<unknown>`, exactly what
+  `lowering.cpp` builds for the same literal - so the kinds are compared and
+  resolution reports `no overload of 'take' matches the given argument types`
+  with the candidate list. Where the candidates *agree*, P2-9's expectation
+  still declares the literal and the call compiles. Gates:
+  `tests/zl/invalid/type_errors/EmptyLiteralContainerMismatch.zl`; the change is
+  in the inference every empty literal goes through, so the whole gate was rerun
+  (42 ctest, 51 examples byte-compared on three backends, every regression
+  fixture, all five differential harnesses).
+- [x] **P1-2 · `func` carries no signature** - a `func(int, string): bool`
+  parameter was checked nowhere on the way in: the implicit-self, method and
+  `super` paths each carried their own copy of the argument check, the
+  qualified static path (`Class.method(...)`) carried none at all, so an arity
+  mismatch reached the VM and died there (`type assertion failed for argument
+  1: expected func(int,string):bool, got func`). The three copies are now one
+  `TypeChecker::validateFunctionArguments`, called from all four paths, and it
+  compares arity, parameter types and return type. Two things are deliberately
+  *not* checked, both being the bare-`func` compatibility escape hatch: a
+  parameter declared bare `func`, and an argument that carries no signature of
+  its own (`InferredArguments::functionHasSignature`, new, is what says so) -
+  the runtime type assertion still covers those. A static method returning
+  `func(int): int` now carries the signature out of the call, so the value a
+  factory hands back is itself checked. Gates:
+  `tests/zl/valid/language_hardening_tests/FuncSignatures.zl` under MIR,
+  `ZL_COMPILER=ast`, `ZL_MIR_OPT=0` and `--backend native`;
+  `tests/zl/invalid/type_errors/FuncSignatureArity.zl`,
+  `FuncSignatureParamType.zl`, `FuncSignatureReturnType.zl`. The README
+  limitation is deleted and
+  [docs/language-guide.md](docs/language-guide.md#lambda-expressions) documents
+  the contract in place of its "Known gap" paragraph.
+- [x] **P1-8 · `Shared<T>` is shareable, not thread-safe** - the acceptance was
+  "either confinement is checked at compile time or `share()` exists and the
+  docs stop implying safety", and the code already had both halves: `share()`
+  is a native (`NativeId::SHARED_SHARE`) with a checker arm, and the capture
+  rule rejects a non-`Shared` mutable capture. What was left was the writing
+  and the measurement. The README bullet claiming `share()` and confinement
+  checks were *pending* was simply wrong and now says what is and is not
+  guaranteed; the language guide names the three ways to make an increment
+  correct (`withLock`, `Atomic`, `Mutex`) instead of two; and
+  `examples/advanced/SharedState.zl` demonstrates `withLock` next to the
+  unsynchronised pair it warns about. The 2490 measurement is now a regression
+  that fails loudly:
+  `tests/zl/valid/concurrency_regressions/SharedLostUpdateMeasurement.zl` runs
+  four threads x 2000 unsynchronised `setValue(get() + 1)` against the same
+  work under `withLock` and under `Atomic`, asserts both guarded counters are
+  exactly 8000 and asserts the unsynchronised one *lost* updates - so if
+  `Shared<T>` ever becomes synchronised the fixture fails and names the docs
+  that have to move with it. Measured here: plain 2771-3670 of 8000, both
+  guarded exactly 8000, on all four configs.
+- [x] **P2-9 · An empty literal in argument position still has nothing to
+  declare it** - the empty-literal fix read the container kind from the
+  declaration, and in argument position there is no declaration: arguments are
+  inferred before overload resolution runs, so `countEntries({})` against
+  `static func countEntries(map<string,int> m)` was `no overload of
+  'countEntries' matches the given argument types` on every backend. The
+  expected-type plumbing is now a reusable step rather than a special case:
+  `TypeChecker::argumentExpectations` reads one expectation per position from
+  the call's own arity-matching candidates, and `inferArguments` re-infers an
+  *empty* literal against it via the existing `inferExpected`. It is wired into
+  all six argument-inferring call paths (qualified static, implicit self,
+  method, `new`, `super(...)`, and a call through a func value, which has one
+  signature rather than a candidate set). Two limits, both deliberate: a
+  non-empty `{1, 2}` never takes an expectation, because that spelling is also
+  how a variadic argument list is written (`Text.format("{0}", {1})` must stay
+  a list - pinned in the fixture), and where the arity-matching candidates
+  disagree on the container there is no single answer, so the position is left
+  alone rather than guessed at. Gates:
+  `tests/zl/valid/core_tests/EmptyCollectionLiterals.zl` now covers the
+  argument-position form directly (static, instance method, generic `Map`, and
+  `{}` reaching a `list<int>` parameter) under MIR, `ZL_COMPILER=ast`,
+  `ZL_MIR_OPT=0` and `--backend native`;
+  [docs/language-guide.md](docs/language-guide.md#empty-literals) drops the
+  "bind it first" workaround.
 - [x] **P1-1 · `match` cannot pattern-match `Option` / `Result`** - both
   spellings were rejected (`Ok v` by the resolver, `Ok<int,string> v` by the
   exhaustiveness subtraction, which reported `uncovered Result<int,string>` even

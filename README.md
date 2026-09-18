@@ -149,6 +149,8 @@ build/         Local CMake build directory (not committed)
 - `class`, `data` records, `enum`, interfaces, inheritance, and `public`/`private`/`protected`
 - Generic classes, including `List<T>`, `Map<K,V>`, and `Set<T>` as real compiled generics
 - Lambdas — `func(x) => x * 2` and `func(x) { ... }` — with by-value capture
+- Function-type signatures — `func(int, string): bool` as a parameter, return, or
+  declaration type, checked at the call site; bare `func` stays dynamically checked
 - Operator overloading via `operator +(...)` declarations
 - `if` / `elif` / `else`, `for`, `while`, `repeat`, `break`, `continue`
 - `async func`, `await`, `Task<T>`, and `Shared<T>` for concurrency
@@ -185,8 +187,6 @@ summarized in [docs/language-guide.md](docs/language-guide.md#memory-model-direc
 
 - The standard library is deliberately hybrid: high-level APIs live in ZL, while the
   VM, OS access, parsing engines, and storage primitives stay native.
-- `func`-typed slots don't carry full signature types yet, so arity mismatches on a
-  closure call are runtime errors rather than compile-time ones.
 - Async is partial: `async func`, `Task<T>`, `await`, and collecting a task from sync
   code with `block()` (plus `ignore()`/`cancel()`) work; cancellation propagation,
   unobserved-failure reporting, and async lambdas are pending.
@@ -195,8 +195,11 @@ summarized in [docs/language-guide.md](docs/language-guide.md#memory-model-direc
 - One primary type per file, matching the file stem (helper declarations may share the
   file, but only the primary type is importable by name) —
   [the rule and its rationale](docs/packages.md#one-primary-type-per-file).
-- `Shared<T>` marks a capture as shareable; it does not itself provide thread safety.
-  The top-level `share()` helper and compile-time confinement checks are pending.
+- `Shared<T>` makes a capture legal, not safe: what is checked at compile time is the
+  *capture*, not the arithmetic. Each cell operation is synchronised, but a
+  `get()`/`setValue()` read-modify-write can still interleave and lose the update — use
+  `withLock`, `Atomic`, or `Mutex` for that
+  ([the measurement and its regression](tests/zl/valid/concurrency_regressions/SharedLostUpdateMeasurement.zl)).
 
 ## License
 

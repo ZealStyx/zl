@@ -2740,6 +2740,58 @@ void TypeChecker::validateFunctionTypeAssignment(const TypeAnnotation& expected,
     }
 }
 
+void TypeChecker::validateFunctionArguments(const std::string& calleeName, const ClassMethodInfo& method,
+                                            const InferredArguments& args, std::size_t line) {
+    for (std::size_t i = 0; i < method.paramTypes.size() && i < args.types.size(); ++i) {
+        if (method.paramTypes[i] != ZlType::FUNCTION || i >= method.functionParamTypes.size()) continue;
+        // A parameter declared bare `func` has no signature to check against;
+        // that spelling stays dynamically checked.
+        if (i < method.functionParamHasSignature.size() && !method.functionParamHasSignature[i]) continue;
+        // The argument has to carry a signature of its own to be comparable.
+        // A bare `func` value forwarded from somewhere else has none, and
+        // refusing it would take away the compatibility escape hatch bare
+        // `func` exists for - the runtime type assertion still covers it.
+        if (i >= args.functionHasSignature.size() || !args.functionHasSignature[i]) continue;
+        const auto& expectedParams = method.functionParamTypes[i];
+        const auto& actualParams = args.functionParamTypes[i];
+        if (expectedParams.size() != actualParams.size()) {
+            typeError("argument " + std::to_string(i + 1) + " to func '" + calleeName +
+                      "': expected a func with " + std::to_string(expectedParams.size()) +
+                      " parameter(s), got " + std::to_string(actualParams.size()), line);
+        }
+        for (std::size_t p = 0; p < expectedParams.size() && p < actualParams.size(); ++p) {
+            const std::string expectedClass =
+                (i < method.functionParamClassNames.size() &&
+                 p < method.functionParamClassNames[i].size())
+                    ? method.functionParamClassNames[i][p] : std::string();
+            const std::string actualClass =
+                (i < args.functionParamClassNames.size() &&
+                 p < args.functionParamClassNames[i].size())
+                    ? args.functionParamClassNames[i][p] : std::string();
+            if (expectedParams[p] != ZlType::UNKNOWN && actualParams[p] != ZlType::UNKNOWN &&
+                (!isAssignable(actualParams[p], expectedParams[p], actualClass, expectedClass) ||
+                 !isAssignable(expectedParams[p], actualParams[p], expectedClass, actualClass))) {
+                typeError("argument " + std::to_string(i + 1) + " to func '" + calleeName +
+                          "': incompatible func parameter type", line);
+            }
+        }
+        const ZlType expectedReturn = i < method.functionReturnTypes.size()
+            ? method.functionReturnTypes[i] : ZlType::UNKNOWN;
+        const ZlType actualReturn = i < args.functionReturnTypes.size()
+            ? args.functionReturnTypes[i] : ZlType::UNKNOWN;
+        const std::string actualReturnClass = i < args.functionReturnClassNames.size()
+            ? args.functionReturnClassNames[i] : std::string();
+        const std::string expectedReturnClass = i < method.functionReturnClassNames.size()
+            ? method.functionReturnClassNames[i] : std::string();
+        if (expectedReturn != ZlType::UNKNOWN && actualReturn != ZlType::UNKNOWN &&
+            (!isAssignable(actualReturn, expectedReturn, actualReturnClass, expectedReturnClass) ||
+             !isAssignable(expectedReturn, actualReturn, expectedReturnClass, actualReturnClass))) {
+            typeError("argument " + std::to_string(i + 1) + " to func '" + calleeName +
+                      "': incompatible func return type", line);
+        }
+    }
+}
+
 void TypeChecker::checkLogStmt(const LogStmt* node) {
     if (node->argument) (void)inferExpr(node->argument.get());
 }
@@ -3224,7 +3276,66 @@ void TypeChecker::checkExprStmt(const ExprStmt* node) {
 // Expressions - type inference
 // ---------------------------------------------------------------------------
 
+// A container expectation is only propagable when the parameter is a
+// parameterized collection - `map<string,int>`, `list<int>`, `Set<int>`. The
+// element types live in the name, and without them
+// inferCollectionLiteralExpected has nothing to check the literal against and
+// says so ("map literal requires map<K,V> type information"). A bare `list`
+// slot, an array (whose size an empty literal cannot satisfy), and everything
+// non-collection are left alone.
+static bool isPropagableContainer(ZlType type, const std::string& className) {
+    if (className.empty() || className.find('<') == std::string::npos) return false;
+    if (type == ZlType::LIST || type == ZlType::SET || type == ZlType::MAP) return true;
+    if (type != ZlType::OBJECT) return false;
+    const std::string base = className.substr(0, className.find('<'));
+    return base == "List" || base == "Map" || base == "Set";
+}
+
+TypeChecker::ArgumentExpectation TypeChecker::argumentExpectation(ZlType type, const std::string& className) const {
+    ArgumentExpectation expectation;
+    expectation.seen = true;
+    expectation.type = type;
+    expectation.className = className;
+    expectation.usable = isPropagableContainer(type, className);
+    if (expectation.usable) expectation.annotation = typeAnnotationFromName(parseTypeName(className));
+    return expectation;
+}
+
+std::vector<TypeChecker::ArgumentExpectation> TypeChecker::argumentExpectations(
+    const std::vector<std::pair<std::string, ClassMethodInfo>>& candidates,
+    std::size_t argumentCount) const {
+    std::vector<ArgumentExpectation> expectations(argumentCount);
+    for (const auto& candidate : candidates) {
+        const ClassMethodInfo& method = candidate.second;
+        // Overload resolution only ever considers arity matches, so a
+        // candidate of a different arity cannot be the one that ends up
+        // receiving this argument - and its parameter types must not veto a
+        // position either.
+        if (method.paramTypes.size() != argumentCount) continue;
+        for (std::size_t i = 0; i < argumentCount; ++i) {
+            ArgumentExpectation& slot = expectations[i];
+            const std::string className =
+                i < method.paramClassNames.size() ? method.paramClassNames[i] : std::string();
+            if (!slot.seen) {
+                slot = argumentExpectation(method.paramTypes[i], className);
+                continue;
+            }
+            // Two overloads that want different containers at this position
+            // (`f(map<K,V>)` and `f(list<T>)`) give the literal no single
+            // answer. Drop the expectation and let resolution report the
+            // mismatch rather than guessing.
+            if (slot.type != method.paramTypes[i] || slot.className != className) slot.usable = false;
+        }
+    }
+    return expectations;
+}
+
 TypeChecker::InferredArguments TypeChecker::inferArguments(const std::vector<NodePtr>& arguments) {
+    return inferArguments(arguments, {});
+}
+
+TypeChecker::InferredArguments TypeChecker::inferArguments(const std::vector<NodePtr>& arguments,
+                                                          const std::vector<ArgumentExpectation>& expectations) {
     InferredArguments result;
     result.types.reserve(arguments.size());
     result.classNames.reserve(arguments.size());
@@ -3232,14 +3343,33 @@ TypeChecker::InferredArguments TypeChecker::inferArguments(const std::vector<Nod
     result.functionParamClassNames.reserve(arguments.size());
     result.functionReturnTypes.reserve(arguments.size());
     result.functionReturnClassNames.reserve(arguments.size());
-    for (const auto& argument : arguments) {
-        const auto inferred = inferExpr(argument.get());
+    result.functionHasSignature.reserve(arguments.size());
+    for (std::size_t index = 0; index < arguments.size(); ++index) {
+        const AstNode* argument = arguments[index].get();
+        InferredType inferred;
+        if (index < expectations.size() && expectations[index].usable &&
+            argument->kind == NodeKind::CollectionLiteral) {
+            // Only an *empty* literal is re-read against the parameter: an
+            // empty one has nothing to contradict the expectation, while a
+            // non-empty `{1, 2}` is also how a variadic argument list is
+            // written (Text.format(pattern, {"a", "b"})) and must stay a list.
+            const auto* literal = static_cast<const CollectionLiteral*>(argument);
+            if (literal->entries.empty() && literal->elements.empty()) {
+                inferred = inferExpected(argument, expectations[index].type, expectations[index].className,
+                                         expectations[index].annotation);
+            } else {
+                inferred = inferExpr(argument);
+            }
+        } else {
+            inferred = inferExpr(argument);
+        }
         result.types.push_back(inferred.type);
         result.classNames.push_back(inferred.className);
         result.functionParamTypes.push_back(inferred.functionParamTypes);
         result.functionParamClassNames.push_back(inferred.functionParamClassNames);
         result.functionReturnTypes.push_back(inferred.functionReturnType);
         result.functionReturnClassNames.push_back(inferred.functionReturnClassName);
+        result.functionHasSignature.push_back(inferred.functionHasSignature);
     }
     return result;
 }
@@ -4293,7 +4423,8 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                 }
                 if (!candidates.empty()) {
                     const auto prepared = prepareGenericOverloads(candidates, node->typeArgs, node->calleeName, node->line);
-                    const auto args = inferArguments(node->arguments);
+                    const auto args = inferArguments(
+                        node->arguments, argumentExpectations(prepared.candidates, node->arguments.size()));
                     std::string owner;
                     const ClassMethodInfo* method = resolveOverload(
                         prepared.candidates, args.types, args.classNames, node->calleeName, node->line, &owner);
@@ -4308,6 +4439,11 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                     warnIfDeprecatedMethod(*method, owner, node->calleeName, node->line);
                     node->resolvedDispatch = dispatchSignature(node->calleeName, *original);
                     node->resolvedTypeArgNames = prepared.resolvedTypeArgNames;
+                    // A `func(int, string): bool` parameter is checked here
+                    // exactly as it is on the implicit-self and method paths:
+                    // a mismatch is a compile error, not the VM's argument
+                    // count mismatch at the moment of the call.
+                    validateFunctionArguments(node->calleeName, *method, args, node->line);
                     if (method->isAsync) {
                         InferredType task(ZlType::TASK);
                         task.taskValueType = method->returnType;
@@ -4315,7 +4451,16 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                         task.className = canonicalTaskTypeName(task.taskValueType, task.taskValueClassName);
                         return task;
                     }
-                    return InferredType(method->returnType, method->returnClassName);
+                    // Carry the returned callable's signature out, so a static
+                    // factory that hands back a `func(...): T` produces a value
+                    // the next call site can check against.
+                    InferredType result(method->returnType, method->returnClassName);
+                    result.functionParamTypes = method->returnFunctionParamTypes;
+                    result.functionParamClassNames = method->returnFunctionParamClassNames;
+                    result.functionReturnType = method->returnFunctionReturnType;
+                    result.functionReturnClassName = method->returnFunctionReturnClassName;
+                    result.functionHasSignature = method->returnFunctionHasSignature;
+                    return result;
                 }
             }
         }
@@ -4496,7 +4641,17 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
                           std::to_string(localVar->functionParamTypes.size()) +
                           " argument(s), got " + std::to_string(node->arguments.size()), node->line);
             }
-            const auto args = inferArguments(node->arguments);
+            // The slot's own declared signature is the only expectation
+            // available here - there is no candidate set to agree on.
+            std::vector<ArgumentExpectation> slotExpectations;
+            slotExpectations.reserve(localVar->functionParamTypes.size());
+            for (std::size_t i = 0; i < localVar->functionParamTypes.size(); ++i) {
+                slotExpectations.push_back(argumentExpectation(
+                    localVar->functionParamTypes[i],
+                    i < localVar->functionParamClassNames.size() ? localVar->functionParamClassNames[i]
+                                                                 : std::string()));
+            }
+            const auto args = inferArguments(node->arguments, slotExpectations);
             for (std::size_t i = 0; i < args.types.size(); ++i) {
                 const ZlType argType = args.types[i];
                 if (i < localVar->functionParamTypes.size()) {
@@ -4528,7 +4683,8 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
             // infer every argument up front rather than per-parameter
             // against a single already-known signature like before.
             const auto prepared = prepareGenericOverloads(candidates, node->typeArgs, node->calleeName, node->line);
-            const auto args = inferArguments(node->arguments);
+            const auto args = inferArguments(
+                node->arguments, argumentExpectations(prepared.candidates, node->arguments.size()));
 
             std::string owner;
             const ClassMethodInfo* method =
@@ -4543,46 +4699,7 @@ TypeChecker::InferredType TypeChecker::inferCall(const CallExpr* node) {
             warnIfDeprecatedMethod(*method, owner, node->calleeName, node->line);
             node->resolvedDispatch = dispatchSignature(node->calleeName, *original);
             node->resolvedTypeArgNames = prepared.resolvedTypeArgNames;
-            for (std::size_t i = 0; i < method->paramTypes.size() && i < args.types.size(); ++i) {
-                if (method->paramTypes[i] != ZlType::FUNCTION || i >= method->functionParamTypes.size()) continue;
-                if (i < method->functionParamHasSignature.size() && !method->functionParamHasSignature[i]) continue;
-                const auto& expectedParams = method->functionParamTypes[i];
-                const auto& actualParams = args.functionParamTypes[i];
-                if (expectedParams.size() != actualParams.size()) {
-                    typeError("argument " + std::to_string(i + 1) + " to func '" + node->calleeName +
-                              "': expected a func with " + std::to_string(expectedParams.size()) +
-                              " parameter(s)", node->line);
-                }
-                for (std::size_t p = 0; p < expectedParams.size(); ++p) {
-                    const std::string expectedClass =
-                        (i < method->functionParamClassNames.size() &&
-                         p < method->functionParamClassNames[i].size())
-                            ? method->functionParamClassNames[i][p] : std::string();
-                    const std::string actualClass =
-                        (i < args.functionParamClassNames.size() &&
-                         p < args.functionParamClassNames[i].size())
-                            ? args.functionParamClassNames[i][p] : std::string();
-                    if (expectedParams[p] != ZlType::UNKNOWN && actualParams[p] != ZlType::UNKNOWN &&
-                        (!isAssignable(actualParams[p], expectedParams[p], actualClass, expectedClass) ||
-                         !isAssignable(expectedParams[p], actualParams[p], expectedClass, actualClass))) {
-                        typeError("argument " + std::to_string(i + 1) + " to func '" + node->calleeName +
-                                  "': incompatible func parameter type", node->line);
-                    }
-                }
-                const ZlType expectedReturn = i < method->functionReturnTypes.size()
-                    ? method->functionReturnTypes[i] : ZlType::UNKNOWN;
-                const ZlType actualReturn = args.functionReturnTypes[i];
-                if (expectedReturn != ZlType::UNKNOWN && actualReturn != ZlType::UNKNOWN &&
-                    (!isAssignable(actualReturn, expectedReturn,
-                                   args.functionReturnClassNames[i],
-                                   i < method->functionReturnClassNames.size() ? method->functionReturnClassNames[i] : std::string()) ||
-                     !isAssignable(expectedReturn, actualReturn,
-                                   i < method->functionReturnClassNames.size() ? method->functionReturnClassNames[i] : std::string(),
-                                   args.functionReturnClassNames[i]))) {
-                    typeError("argument " + std::to_string(i + 1) + " to func '" + node->calleeName +
-                              "': incompatible func return type", node->line);
-                }
-            }
+                        validateFunctionArguments(node->calleeName, *method, args, node->line);
             if (method->isAsync) {
                 InferredType task(ZlType::TASK);
                 task.taskValueType = method->returnType;
@@ -4959,9 +5076,16 @@ TypeChecker::InferredType TypeChecker::inferCollectionLiteral(const CollectionLi
     // (`Text.format(pattern, {"a", "b"})`), where set deduplication would be
     // wrong.
     if (node->elements.empty()) {
-        if (node->bracketSyntax) return InferredType(ZlType::LIST);
+        // The spelling decides the container, and the element type is written
+        // down as `unknown` rather than left off. An empty className reads as a
+        // *bare* collection slot to isAssignable, which then accepts it
+        // anywhere a list or a set is wanted - while MIR, which builds the same
+        // literal as `set<unknown>` (lowering.cpp), refuses it. That
+        // disagreement is what made `take({})` resolve to a `list<int>`
+        // parameter and die in the verifier instead of in resolution (P2-10).
+        if (node->bracketSyntax) return InferredType(ZlType::LIST, "list<unknown>");
         node->targetCollectionKind = "set";
-        return InferredType(ZlType::SET);
+        return InferredType(ZlType::SET, "set<unknown>");
     }
     InferredType result(ZlType::LIST);
     const InferredType first = inferExpr(node->elements.front().get());
@@ -5064,7 +5188,8 @@ TypeChecker::InferredType TypeChecker::inferNewExpr(const NewExpr* node) {
         return fresh;
     }
 
-    const auto args = inferArguments(node->arguments);
+    const auto args = inferArguments(
+        node->arguments, argumentExpectations(candidates, node->arguments.size()));
 
     std::string owner;
     const ClassMethodInfo* ctor = resolveOverload(candidates, args.types, args.classNames, node->className, node->line, &owner);
@@ -5590,7 +5715,8 @@ TypeChecker::InferredType TypeChecker::inferMethodCall(const MethodCallExpr* nod
 
     // Argument types have to be known before an overload can be picked.
     const auto prepared = prepareGenericOverloads(candidates, node->typeArgs, node->methodName, node->line);
-    const auto args = inferArguments(node->arguments);
+    const auto args = inferArguments(
+        node->arguments, argumentExpectations(prepared.candidates, node->arguments.size()));
 
     std::string owner;
     const ClassMethodInfo* method = resolveOverload(prepared.candidates, args.types, args.classNames, node->methodName, node->line, &owner);
@@ -5606,46 +5732,7 @@ TypeChecker::InferredType TypeChecker::inferMethodCall(const MethodCallExpr* nod
     node->resolvedDispatch = dispatchSignature(node->methodName, *original);
     node->resolvedTypeArgNames = prepared.resolvedTypeArgNames;
 
-    for (std::size_t i = 0; i < method->paramTypes.size() && i < args.types.size(); ++i) {
-        if (method->paramTypes[i] != ZlType::FUNCTION || i >= method->functionParamTypes.size()) continue;
-        if (i < method->functionParamHasSignature.size() && !method->functionParamHasSignature[i]) continue;
-        const auto& expectedParams = method->functionParamTypes[i];
-        const auto& actualParams = args.functionParamTypes[i];
-        if (expectedParams.size() != actualParams.size()) {
-            typeError("argument " + std::to_string(i + 1) + " to func '" + node->methodName +
-                      "': expected a func with " + std::to_string(expectedParams.size()) +
-                      " parameter(s)", node->line);
-        }
-        for (std::size_t p = 0; p < expectedParams.size(); ++p) {
-            const std::string expectedClass =
-                (i < method->functionParamClassNames.size() &&
-                 p < method->functionParamClassNames[i].size())
-                    ? method->functionParamClassNames[i][p] : std::string();
-            const std::string actualClass =
-                (i < args.functionParamClassNames.size() &&
-                 p < args.functionParamClassNames[i].size())
-                    ? args.functionParamClassNames[i][p] : std::string();
-            if (expectedParams[p] != ZlType::UNKNOWN && actualParams[p] != ZlType::UNKNOWN &&
-                (!isAssignable(actualParams[p], expectedParams[p], actualClass, expectedClass) ||
-                 !isAssignable(expectedParams[p], actualParams[p], expectedClass, actualClass))) {
-                typeError("argument " + std::to_string(i + 1) + " to func '" + node->methodName +
-                          "': incompatible func parameter type", node->line);
-            }
-        }
-        const ZlType expectedReturn = i < method->functionReturnTypes.size()
-            ? method->functionReturnTypes[i] : ZlType::UNKNOWN;
-        const ZlType actualReturn = args.functionReturnTypes[i];
-        const std::string expectedReturnClass = i < method->functionReturnClassNames.size()
-            ? method->functionReturnClassNames[i] : std::string();
-        const std::string actualReturnClass = i < args.functionReturnClassNames.size()
-            ? args.functionReturnClassNames[i] : std::string();
-        if (expectedReturn != ZlType::UNKNOWN && actualReturn != ZlType::UNKNOWN &&
-            (!isAssignable(actualReturn, expectedReturn, actualReturnClass, expectedReturnClass) ||
-             !isAssignable(expectedReturn, actualReturn, expectedReturnClass, actualReturnClass))) {
-            typeError("argument " + std::to_string(i + 1) + " to func '" + node->methodName +
-                      "': incompatible func return type", node->line);
-        }
-    }
+        validateFunctionArguments(node->methodName, *method, args, node->line);
 
     if (method->isAsync) { InferredType task(ZlType::TASK); task.taskValueType = method->returnType; task.taskValueClassName = method->returnClassName; task.className = canonicalTaskTypeName(task.taskValueType, task.taskValueClassName); return task; }
     InferredType result(method->returnType, method->returnClassName);
@@ -5710,7 +5797,8 @@ TypeChecker::InferredType TypeChecker::inferSuperCallExpr(const SuperCallExpr* n
         candidates.emplace_back(parentName, ctor);
     }
 
-    const auto args = inferArguments(node->arguments);
+    const auto args = inferArguments(
+        node->arguments, argumentExpectations(candidates, node->arguments.size()));
 
     std::string owner;
     const ClassMethodInfo* ctor = resolveOverload(candidates, args.types, args.classNames, parentName, node->line, &owner);
@@ -5736,7 +5824,8 @@ TypeChecker::InferredType TypeChecker::inferSuperMethodCallExpr(const SuperMetho
     }
 
     const auto prepared = prepareGenericOverloads(candidates, node->typeArgs, node->methodName, node->line);
-    const auto args = inferArguments(node->arguments);
+    const auto args = inferArguments(
+        node->arguments, argumentExpectations(prepared.candidates, node->arguments.size()));
 
     std::string owner;
     const ClassMethodInfo* method = resolveOverload(prepared.candidates, args.types, args.classNames, node->methodName, node->line, &owner);
@@ -5751,45 +5840,7 @@ TypeChecker::InferredType TypeChecker::inferSuperMethodCallExpr(const SuperMetho
     node->resolvedDispatch = dispatchSignature(node->methodName, *original);
     node->resolvedTypeArgNames = prepared.resolvedTypeArgNames;
 
-    for (std::size_t i = 0; i < method->paramTypes.size() && i < args.types.size(); ++i) {
-        if (method->paramTypes[i] != ZlType::FUNCTION || i >= method->functionParamTypes.size()) continue;
-        if (i < method->functionParamHasSignature.size() && !method->functionParamHasSignature[i]) continue;
-        const auto& expectedParams = method->functionParamTypes[i];
-        const auto& actualParams = args.functionParamTypes[i];
-        if (expectedParams.size() != actualParams.size()) {
-            typeError("argument " + std::to_string(i + 1) + " to func '" + node->methodName +
-                      "': expected a func with " + std::to_string(expectedParams.size()) +
-                      " parameter(s)", node->line);
-        }
-        for (std::size_t p = 0; p < expectedParams.size(); ++p) {
-            const std::string expectedClass =
-                (i < method->functionParamClassNames.size() &&
-                 p < method->functionParamClassNames[i].size())
-                    ? method->functionParamClassNames[i][p] : std::string();
-            const std::string actualClass =
-                (i < args.functionParamClassNames.size() &&
-                 p < args.functionParamClassNames[i].size())
-                    ? args.functionParamClassNames[i][p] : std::string();
-            if (expectedParams[p] != ZlType::UNKNOWN && actualParams[p] != ZlType::UNKNOWN &&
-                (!isAssignable(actualParams[p], expectedParams[p], actualClass, expectedClass) ||
-                 !isAssignable(expectedParams[p], actualParams[p], expectedClass, actualClass))) {
-                typeError("argument " + std::to_string(i + 1) + " to func '" + node->methodName +
-                          "': incompatible func parameter type", node->line);
-            }
-        }
-        const ZlType expectedReturn = i < method->functionReturnTypes.size()
-            ? method->functionReturnTypes[i] : ZlType::UNKNOWN;
-        const ZlType actualReturn = args.functionReturnTypes[i];
-        const std::string expectedReturnClass = i < method->functionReturnClassNames.size()
-            ? method->functionReturnClassNames[i] : std::string();
-        const std::string actualReturnClass = args.functionReturnClassNames[i];
-        if (expectedReturn != ZlType::UNKNOWN && actualReturn != ZlType::UNKNOWN &&
-            (!isAssignable(actualReturn, expectedReturn, actualReturnClass, expectedReturnClass) ||
-             !isAssignable(expectedReturn, actualReturn, expectedReturnClass, actualReturnClass))) {
-            typeError("argument " + std::to_string(i + 1) + " to func '" + node->methodName +
-                      "': incompatible func return type", node->line);
-        }
-    }
+        validateFunctionArguments(node->methodName, *method, args, node->line);
 
     if (method->isAsync) { InferredType task(ZlType::TASK); task.taskValueType = method->returnType; task.taskValueClassName = method->returnClassName; task.className = canonicalTaskTypeName(task.taskValueType, task.taskValueClassName); return task; }
     InferredType result(method->returnType, method->returnClassName);
