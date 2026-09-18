@@ -1,0 +1,89 @@
+// ============================================================================
+// Regression fixture - valid/core_tests - EmptyCollectionLiterals
+//
+// Two things about an empty literal (`{}` / `[]`) were wrong:
+//
+//   * A map-typed slot refused one. `map<string,int> m = {}` and
+//     `Map<string,int> m = {}` both failed with "map literal requires
+//     key:value entries" - a requirement an empty map satisfies by having
+//     nothing in it. The only way to write an empty map was `new Map<...>()`.
+//   * `{}` with no declared type inferred `list<unknown>`, so the spelling the
+//     language guide gives for sets and maps produced a list: `var s = {}`
+//     followed by `set<int> t = s` was refused with a MIR contract violation
+//     ("store of list<unknown> into slot of type set<int>").
+//
+// An empty literal now takes its container from the declaration where there is
+// one, and from its spelling where there is not: `[]` is a list, `{}` is a set.
+// A *non-empty* `{1, 2}` is untouched and stays a list - that spelling is also
+// how a variadic argument list is written, where set deduplication would be
+// wrong (the Text.format check at the bottom pins exactly that).
+// ============================================================================
+
+import zl.text.Text
+
+class EmptyCollectionLiterals {
+    func check(bool cond, string what): void {
+        if (!cond) {
+            throw new Exception("EmptyCollectionLiterals failed: " + what)
+        }
+    }
+
+    static func countEntries(map<string, int> m): int { return Collection.length(m) }
+    static func countGeneric(Map<string, int> m): int { return m.length() }
+
+    func main(): void {
+        var self = new EmptyCollectionLiterals()
+
+        // ---- an empty literal is accepted where a map is declared ----------
+        map<string, int> ages = {}
+        self.check(Collection.length(ages) == 0, "an empty native map literal is an empty map")
+        Collection.mapSet(ages, "ada", 36)
+        self.check(Collection.length(ages) == 1, "and it takes entries afterwards")
+
+        Map<string, int> genericAges = {}
+        self.check(genericAges.length() == 0, "an empty generic Map literal is an empty Map")
+        genericAges.put("alan", 41)
+        self.check(genericAges.length() == 1, "and it takes entries afterwards")
+
+        // ---- the other declarations keep working ---------------------------
+        set<int> nativeSet = {}
+        self.check(Collection.length(nativeSet) == 0, "an empty native set literal")
+        Set<int> genericSet = {}
+        self.check(genericSet.length() == 0, "an empty generic Set literal")
+        list<int> nativeList = []
+        self.check(Collection.length(nativeList) == 0, "an empty native list literal")
+        List<int> genericList = []
+        self.check(genericList.length() == 0, "an empty generic List literal")
+
+        // ---- with no declaration, the spelling decides ---------------------
+        var braces = {}
+        Collection.setAdd(braces, 1)
+        Collection.setAdd(braces, 1)
+        self.check(Collection.length(braces) == 1, "{} is a set: adding 1 twice holds one element")
+
+        var brackets = []
+        Collection.push(brackets, 1)
+        Collection.push(brackets, 1)
+        self.check(Collection.length(brackets) == 2, "[] is a list: pushing 1 twice holds two elements")
+
+        // The inferred set flows into a declared one - this is the assignment
+        // that used to be refused by the MIR type-flow check.
+        set<int> declared = braces
+        self.check(Collection.length(declared) == 1, "an inferred empty set is assignable to set<int>")
+
+        // ---- and through a call boundary ----------------------------------
+        // Bound first, not written inline: `countEntries({})` is still a compile
+        // error, because argument types are inferred before overload resolution
+        // can offer the parameter's `map<string,int>` as an expectation (P2-9).
+        map<string, int> emptyForCall = {}
+        self.check(EmptyCollectionLiterals.countEntries(emptyForCall) == 0, "an empty map literal reaches a map parameter")
+        Map<string, int> emptyGenericForCall = {}
+        self.check(EmptyCollectionLiterals.countGeneric(emptyGenericForCall) == 0, "and a generic one")
+
+        // ---- a non-empty brace literal is still a list --------------------
+        self.check(Text.format("{0} + {1} = {2}", {"1", "1", "2"}) == "1 + 1 = 2",
+                   "a non-empty {} literal keeps its duplicates (it is a list, not a set)")
+
+        log("ok")
+    }
+}

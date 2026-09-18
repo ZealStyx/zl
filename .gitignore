@@ -4,6 +4,7 @@
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
+Testing/
 compile_commands.json
 Makefile
 *.cmake

@@ -1,0 +1,13 @@
+// Regression fixture - invalid/type_errors - StringMethodUnknown
+//
+// A method that is not part of the string surface is a type error that names
+// the surface, instead of the "cannot call method 'x' on value of type string"
+// a visitor used to get (that message is still the one for receivers with no
+// method surface at all).
+
+class StringMethodUnknown {
+    func main(): void {
+        var s = "abc"
+        log(s.trimLeft())
+    }
+}

@@ -17,6 +17,73 @@
 namespace zl {
 
 namespace {
+
+// The `string` method surface. Each entry is the spelling a program writes on
+// a string receiver and the `String.*` native catalog entry it resolves to -
+// the receiver binds that native's first parameter, the rest come from the
+// call's argument list. This table is the whole definition: the checker
+// validates arity and argument types against the catalog entry, and both
+// backends read the resolved native back off the node. Nothing is implemented
+// twice, and adding a method is adding a row here.
+// See docs/language-guide.md#string-methods.
+struct StringMethodMapping {
+    const char* method;
+    const char* native;
+};
+
+constexpr StringMethodMapping kStringMethods[] = {
+    {"charAt",             "String.charAt"},
+    {"codePointAt",        "String.codePointAt"},
+    {"compare",            "String.compare"},
+    {"compareIgnoreCase",  "String.compareIgnoreCase"},
+    {"contains",           "String.contains"},
+    {"endsWith",           "String.endsWith"},
+    {"indexOf",            "String.indexOf"},
+    {"indexOfFrom",        "String.indexOfFrom"},
+    {"lastIndexOf",        "String.lastIndexOf"},
+    {"length",             "String.length"},
+    {"lower",              "String.lower"},
+    // `repeat` is a loop keyword, so the native spelling is the only one
+    // the lexer can deliver here - same reason Text.repeatText exists.
+    {"repeatText",         "String.repeatText"},
+    {"replace",            "String.replace"},
+    {"split",              "String.split"},
+    {"startsWith",         "String.startsWith"},
+    {"substring",          "String.substring"},
+    {"toFloat",            "String.toFloat"},
+    {"toInt",              "String.toInt"},
+    {"trim",               "String.trim"},
+    {"trimEnd",            "String.trimEnd"},
+    {"trimStart",          "String.trimStart"},
+    {"upper",              "String.upper"},
+    {"utf8ByteIndex",      "String.utf8ByteIndex"},
+    {"utf8CharAt",         "String.utf8CharAt"},
+    {"utf8CodePointAt",    "String.utf8CodePointAt"},
+    {"utf8IndexFromByte",  "String.utf8IndexFromByte"},
+    {"utf8Length",         "String.utf8Length"},
+    {"utf8Reverse",        "String.utf8Reverse"},
+    {"utf8Substring",      "String.utf8Substring"},
+};
+
+// nullptr when `method` is not part of the string method surface.
+const StringMethodMapping* findStringMethodMapping(const std::string& method) {
+    for (const auto& entry : kStringMethods) {
+        if (method == entry.method) return &entry;
+    }
+    return nullptr;
+}
+
+// Every method name, for the diagnostic a miss produces - a wrong method name
+// should teach the surface instead of only rejecting the call.
+std::string stringMethodNames() {
+    std::string names;
+    for (const auto& entry : kStringMethods) {
+        if (!names.empty()) names += ", ";
+        names += entry.method;
+    }
+    return names;
+}
+
 bool genericCollectionCompatible(const std::string& from, const std::string& to) {
     if (from.empty() || to.empty()) return true;
     if (from == to) return true;
@@ -366,13 +433,13 @@ bool TypeChecker::isAssignable(ZlType from, ZlType to, const std::string& fromCl
     }
     // int -> double widening (numeric promotion).
     if (from == ZlType::INT && to == ZlType::DOUBLE) return true;
-    // There's no dedicated array-literal syntax - a `{...}` collection
-    // literal always infers as LIST (see inferCollectionLiteral), and that
-    // same literal is the supported construction form for array-typed
-    // variables (array[N]<T>). Both share the same underlying runtime list
-    // representation, but an explicitly-typed element mismatch must still
-    // be rejected.
-    if (from == ZlType::LIST && to == ZlType::ARRAY) {
+    // There's no dedicated array-literal syntax - a `[...]` collection
+    // literal infers as LIST (and an empty `{...}` as SET; see
+    // inferCollectionLiteral), and that same literal is the supported
+    // construction form for array-typed variables (array[N]<T>). Both share
+    // the same underlying runtime list representation, but an
+    // explicitly-typed element mismatch must still be rejected.
+    if ((from == ZlType::LIST || from == ZlType::SET) && to == ZlType::ARRAY) {
         if (!fromClassName.empty() && !toClassName.empty()) return genericCollectionCompatible(fromClassName, toClassName);
         return true;
     }
@@ -4549,6 +4616,14 @@ ZlType TypeChecker::inferCollectionLiteralExpected(const CollectionLiteral* node
                                                     ZlType expectedType,
                                                     const std::string& expectedClassName,
                                                     const TypeAnnotation& expectedAnnotation) {
+    // An empty literal (`{}` or `[]`) holds nothing that could contradict the
+    // declared type, so the declaration alone decides the container: it is a
+    // map where a map is expected and a list/set where one of those is. The
+    // shape checks below are about *entries*, and an empty literal has none -
+    // `map<string,int> m = {}` is an empty map, not a literal that "requires
+    // key:value entries".
+    const bool literalIsEmpty = node->entries.empty() && node->elements.empty();
+
     // Arrays use the same compact runtime list representation, but their
     // compile-time contract is stricter: element type must match and a fixed
     // size must be satisfied exactly.
@@ -4575,7 +4650,7 @@ ZlType TypeChecker::inferCollectionLiteralExpected(const CollectionLiteral* node
 
     // Primitive collection annotations: list<T>, set<T>, map<K,V>.
     if (expectedType == ZlType::LIST || expectedType == ZlType::SET || expectedType == ZlType::MAP) {
-        if (expectedType == ZlType::MAP && !node->isMap) {
+        if (expectedType == ZlType::MAP && !node->isMap && !literalIsEmpty) {
             typeError("map literal requires key:value entries", node->line);
         }
         if (expectedType != ZlType::MAP && node->isMap) {
@@ -4639,7 +4714,7 @@ ZlType TypeChecker::inferCollectionLiteralExpected(const CollectionLiteral* node
         const std::size_t lt = className.find('<');
         std::string base = lt == std::string::npos ? className : className.substr(0, lt);
         if (base == "List" || base == "Map" || base == "Set") {
-            if ((base == "Map") != node->isMap) {
+            if ((base == "Map") != node->isMap && !literalIsEmpty) {
                 typeError(base == "Map"
                     ? "Map literal requires key:value entries"
                     : "List/Set literal cannot contain map entries", node->line);
@@ -4704,8 +4779,20 @@ TypeChecker::InferredType TypeChecker::inferCollectionLiteral(const CollectionLi
         }
         return result;
     }
+    // An empty literal has no elements to infer from, so its spelling is the
+    // only evidence there is: `[]` is the list spelling and `{}` the set one
+    // (docs/language-guide.md, "Typed collection literals"). Inferring `{}` as
+    // a list made `var s = {}` a `list<unknown>`, which a later `set<int> t = s`
+    // then refused with a MIR type-flow violation. A *non-empty* `{1, 2}` stays
+    // a list: that spelling is also how a variadic argument list is written
+    // (`Text.format(pattern, {"a", "b"})`), where set deduplication would be
+    // wrong.
+    if (node->elements.empty()) {
+        if (node->bracketSyntax) return InferredType(ZlType::LIST);
+        node->targetCollectionKind = "set";
+        return InferredType(ZlType::SET);
+    }
     InferredType result(ZlType::LIST);
-    if (node->elements.empty()) return result;
     const InferredType first = inferExpr(node->elements.front().get());
     bool same = true;
     for (std::size_t i = 1; i < node->elements.size(); ++i) {
@@ -5251,6 +5338,58 @@ TypeChecker::InferredType TypeChecker::inferMethodCall(const MethodCallExpr* nod
         typeError("Task has no method '" + node->methodName + "'", node->line);
     }
 
+    // A `string` receiver: the method is the `String.*` native primitive with
+    // the receiver bound as its first argument (see kStringMethods). There is
+    // no class behind `string`, so there is no dispatch to emit - both
+    // backends read the resolved native off the node and call it, which is how
+    // `s.length()` and `String.length(s)` stay one implementation.
+    if (objType == ZlType::STRING) {
+        const StringMethodMapping* mapping = findStringMethodMapping(node->methodName);
+        if (mapping == nullptr) {
+            typeError("type 'string' has no method '" + node->methodName +
+                      "' (string methods: " + stringMethodNames() + ")", node->line);
+        }
+        const auto signature = findNativeSignature(mapping->native);
+        if (!signature) {
+            // The table and the catalog are compiled together, so this is a
+            // stale row rather than anything a program did.
+            typeError(std::string("internal error: string method '") + mapping->method +
+                      "' maps to unknown native '" + mapping->native + "'", node->line);
+        }
+        const NativeSignature* sig = *signature;
+        if (sig->paramTypes.empty() || sig->paramTypes.front() != ZlType::STRING) {
+            typeError(std::string("internal error: native '") + mapping->native +
+                      "' does not take a string receiver", node->line);
+        }
+        // The receiver occupies the native's first parameter; the call's own
+        // arguments line up with the rest.
+        const std::size_t expectedArguments = sig->paramTypes.size() - 1;
+        if (node->arguments.size() != expectedArguments) {
+            typeError("string method '" + node->methodName + "' expects " +
+                      std::to_string(expectedArguments) + " argument(s), got " +
+                      std::to_string(node->arguments.size()), node->line);
+        }
+        const auto args = inferArguments(node->arguments);
+        for (std::size_t i = 0; i < args.types.size(); ++i) {
+            const ZlType paramType = sig->paramTypes[i + 1];
+            if (!isAssignable(args.types[i], paramType, args.classNames[i])) {
+                typeError("argument " + std::to_string(i + 1) + " to string method '" +
+                          node->methodName + "': expected " + zlTypeName(paramType) +
+                          ", got " + zlTypeName(args.types[i]), node->line);
+            }
+        }
+        node->isStringMethod = true;
+        node->nativeMethodName = sig->qualifiedName;
+        node->nativeMethodId = static_cast<std::int32_t>(sig->id);
+        // A native whose result is a collection names it (String.split returns
+        // list<string>); resolve that the same way the qualified-call path does.
+        if (!sig->returnClassName.empty()) {
+            const auto info = variableInfo(typeAnnotationFromName(parseTypeName(sig->returnClassName)));
+            return InferredType(info.type, info.className);
+        }
+        return InferredType(sig->returnType, sig->returnClassName);
+    }
+
     if (objType != ZlType::OBJECT || objClassName.empty()) {
         for (const auto& arg : node->arguments) (void)inferExpr(arg.get());
         typeError("cannot call method '" + node->methodName + "' on value of type " +
@@ -5510,6 +5649,21 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
                       " variable '" + captured + "' by value", node->line);
         }
     }
+    // A lambda's return inference is its own. These four fields are the scratch
+    // accumulator that the `return` statements of a body write into, and until
+    // this lambda's body is checked they belong to whatever function encloses
+    // it, so they are saved here and restored on the way out - exactly like
+    // currentReturnType_ below. Without that, a lambda *created inside* a
+    // lambda body left its own return type behind in the accumulator, and the
+    // enclosing lambda then claimed it as its inferred return:
+    //     func() { var n = callIt(func() { return 1 }) if (n == 1) { log("y") } }
+    // was typed `func(): int` - a non-void body with no `return` anywhere, which
+    // MIR lowered to an `unreachable` exit block and the VM then ran as an
+    // endless loop over the body.
+    const std::vector<ZlType> previousParamTypes = lastFunctionParamTypes_;
+    const ZlType previousInferredReturnType = lastFunctionReturnType_;
+    const std::string previousInferredReturnClassName = lastFunctionReturnClassName_;
+    const bool previousHadReturn = lastFunctionHadReturn_;
     lastFunctionParamTypes_.clear();
     lastFunctionReturnType_ = ZlType::UNKNOWN;
     const auto enclosingSymbols = symbols_.snapshot();
@@ -5658,6 +5812,10 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
     currentReturnClassName_ = previousReturnClassName;
     currentFunctionName_ = previousFunctionName;
     currentFunctionIsAsync_ = previousFunctionIsAsync;
+    lastFunctionParamTypes_ = previousParamTypes;
+    lastFunctionReturnType_ = previousInferredReturnType;
+    lastFunctionReturnClassName_ = previousInferredReturnClassName;
+    lastFunctionHadReturn_ = previousHadReturn;
     symbols_.restore(enclosingSymbols);
     movedVariables_ = previousMovedVariables;
     borrowSources_ = previousBorrowSources;

@@ -5,6 +5,7 @@ Reference for the language surface. For the standard library see
 
 - [File and class rule](#file-and-class-rule)
 - [Values and declarations](#values-and-declarations)
+- [String methods](#string-methods)
 - [Lambda expressions](#lambda-expressions)
 - [Generic collections](#generic-collections)
 - [Static methods](#static-methods)
@@ -16,12 +17,20 @@ Reference for the language surface. For the standard library see
 
 ## File and class rule
 
-Each `.zl` file must contain a class whose name matches the file stem exactly:
+Each `.zl` file must declare one *primary type* whose name matches the file stem exactly:
 
 ```text
 TestProgram.zl   -> class TestProgram
 type_mismatch.zl -> class type_mismatch
+Point.zl         -> data Point
+Shape.zl         -> interface Shape
 ```
+
+A `class`, `data`, `interface`, or `enum` declaration satisfies the rule, and other
+declarations may share the file with the primary type - they simply are not importable
+by their own name, since an import resolves to a path. The reason for the rule, and
+what it costs, is written up in
+[docs/packages.md](packages.md#one-primary-type-per-file).
 
 This is enforced by the compiler pipeline. Errors are reported in three categories:
 `syntax error`, `compile error`, and `runtime error`.
@@ -102,6 +111,58 @@ backing storage. Access modifiers are enforced against the declaring owner: prot
 inherited access works from subclasses, private inherited access is rejected, and
 interface-qualified static-field access is rejected because interfaces own no static
 storage.
+
+## String methods
+
+A `string` has methods, and every one of them is an existing `String.*` native
+primitive: the receiver binds the native's first parameter and the call's arguments
+bind the rest, so `s.length()` and `String.length(s)` are the same call and produce
+the same bytecode. There is no class behind `string` and no second implementation
+behind the method spelling — the compiler resolves the method to the catalog entry
+(`src/compiler/type_checker.cpp`, table `kStringMethods`), and both backends emit that
+native call.
+
+```zl
+var s = "Hello, World"
+log(s.length())                     // 12      (bytes, like String.length)
+log(s.upper())                      // HELLO, WORLD
+log(s.startsWith("Hello"))          // true
+log(s.substring(0, 5))              // Hello
+log(s.replace("World", "ZL"))       // Hello, ZL
+log("42".toInt() + 1)               // 43
+log(Collection.get(s.split(", "), 1))   // World
+```
+
+The surface, in the order the "no such method" diagnostic lists it:
+
+| Method | Native | Notes |
+| --- | --- | --- |
+| `length()` | `String.length` | bytes, not characters |
+| `charAt(i)`, `substring(start, end)`, `codePointAt(i)` | `String.charAt`, `String.substring`, `String.codePointAt` | byte indexing |
+| `upper()`, `lower()`, `trim()`, `trimStart()`, `trimEnd()` | `String.upper`, `String.lower`, `String.trim`, `String.trimStart`, `String.trimEnd` | `upper`/`lower` case ASCII only |
+| `contains(s)`, `startsWith(p)`, `endsWith(s)`, `indexOf(s)`, `lastIndexOf(s)`, `indexOfFrom(s, i)`, `compare(o)`, `compareIgnoreCase(o)` | `String.contains`, `String.startsWith`, `String.endsWith`, `String.indexOf`, `String.lastIndexOf`, `String.indexOfFrom`, `String.compare`, `String.compareIgnoreCase` | byte positions; a miss is `-1` |
+| `replace(from, to)`, `split(sep)`, `repeatText(n)` | `String.replace`, `String.split`, `String.repeatText` | `split` returns the native `list<string>` storage, exactly as `String.split` does — read it with `Collection.*`, or use `Text.split` for a `List<string>` |
+| `utf8Length()`, `utf8CharAt(i)`, `utf8Substring(start, end)`, `utf8Reverse()`, `utf8CodePointAt(i)`, `utf8ByteIndex(i)`, `utf8IndexFromByte(i)` | the matching `String.utf8*` natives | scalar indexing, the boundary `Text.*` wraps |
+| `toInt()`, `toFloat()` | `String.toInt`, `String.toFloat` | throw on unparsable input; `Text.toIntOr` and friends are the total forms |
+
+Indexing follows the primitive: `"héllo".length()` is `6` bytes, `"héllo".utf8Length()`
+is `5` scalars, and `"héllo".length()` and `String.length("héllo")` never disagree — see
+[stdlib.md](stdlib.md#zltext) for where `String.*` ends and `Text.*` begins.
+
+A name outside the surface is a compile-time type error that lists the surface:
+
+```text
+type error: type 'string' has no method 'trimLeft' (string methods: charAt, ...)
+```
+
+Arity and argument types are checked against the catalog entry, so `s.length(1)` and
+`s.contains(3)` are compile errors rather than native contract throws at run time.
+`repeat` is a loop keyword, which is why the repeat method keeps the native spelling
+`repeatText` (the same reason `Text.repeatText` exists).
+
+An **untyped** lambda parameter (`func(name) => name.length()`) is `UNKNOWN` until a
+type is written, so a string method on it is still rejected — annotate the parameter
+(`func(string name) => name.length()`).
 
 ## Lambda expressions
 
@@ -286,6 +347,11 @@ machinery that user-defined generics (`class Box<T>`) already use. A mismatched 
 caught by ordinary overload resolution, with the same error-message quality as any other
 method call.
 
+Printing a collection prints its data, not its wrapper: `log(nums)` on the list above
+prints `[1, 2]`, a `Map` prints `{"ada": 36}`, and strings inside a collection are quoted
+(`["a", "b"]`). The same spelling comes out of concatenation (`"" + nums`) and
+`Serialize.encode`, so a value has one form through every door.
+
 ### Generic methods
 
 A method may declare its own type parameters, independently of any class-level ones:
@@ -356,6 +422,40 @@ Set<int> genericSet = [1, 2, 2]
 Every element, key, and value is checked against the expected generic type. Typed
 `List`/`Map`/`Set` literals construct normal generic ZL collection objects; lowercase
 `list`/`map`/`set` annotations keep their native representation.
+
+#### Empty literals
+
+An empty literal holds nothing that could contradict a declaration, so the declaration
+decides the container - including for maps, which have no entries to spell:
+
+```zl
+map<string, int> ages = {}          // an empty native map
+Map<string, int> genericAges = {}   // an empty generic Map
+set<int> tags = {}
+List<int> values = []
+```
+
+The literal still needs something to declare it. In *argument* position there is
+nothing yet — `countEntries({})` against `static func countEntries(map<string,int> m)`
+is a compile error ("no overload … matches"), because argument types are inferred
+before overload resolution picks the parameter. Bind it first and pass the variable:
+
+```zl
+map<string, int> empty = {}
+log(countEntries(empty))            // 0
+```
+
+With no declaration to go by, the spelling decides: `[]` infers an empty `list` and
+`{}` an empty `set`, so `var tags = {}` followed by `set<int> declared = tags` type
+checks (and `Collection.setAdd(tags, x)` twice holds one element).
+
+A **non-empty** `{...}` literal with no declared type is still a `list`, not a set:
+that spelling is also how a variadic argument list is written, where deduplication
+would be wrong.
+
+```zl
+log(Text.format("{0} + {1} = {2}", {"1", "1", "2"}))   // 1 + 1 = 2, duplicates kept
+```
 
 ## Static methods
 
