@@ -2,6 +2,401 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-18 - `string` has methods, and they are the `String.*` natives (P1-3)
+
+```zl
+var s = "Hello, World"
+log(s.length())           // 12  - the same call as String.length(s)
+log(s.startsWith("He"))   // true
+log("42".toInt() + 1)     // 43
+```
+
+`string` was the last builtin type with no method surface: `s.length()` failed with
+`cannot call method 'length' on value of type string` while `List`, `Map`, `Set`,
+`Option` and `Result` were all method-based, and the only way to reach the primitives
+was the `String.length(s)` free-function form. The fix adds no class and no second
+implementation - a method call resolves to the native catalog entry, with the receiver
+bound as the native's first parameter:
+
+- `TypeChecker::inferMethodCall` looks the method up in `kStringMethods`
+  (`src/compiler/type_checker.cpp`), validates arity and argument types against the
+  catalog signature, and records the resolved name and id on the node
+  (`MethodCallExpr::isStringMethod` / `nativeMethodName` / `nativeMethodId`).
+- The reference AST compiler emits `CallNative` for that entry; MIR lowering emits the
+  same `emitCallNative` with the receiver first. `s.length()` and `String.length(s)`
+  are the same instruction, and `tests/pipeline_tests.cpp` asserts exactly that.
+- The surface is the 29 `String.*` primitives that take a string first: `length`,
+  `charAt`, `substring`, `contains`, `startsWith`, `endsWith`, `indexOf`,
+  `lastIndexOf`, `indexOfFrom`, `replace`, `split`, `trim`/`trimStart`/`trimEnd`,
+  `upper`/`lower`, `compare`/`compareIgnoreCase`, `codePointAt`, `repeatText`,
+  `toInt`, `toFloat`, and the seven `utf8*` scalar-indexed methods. Semantics are the
+  primitives' own: indexing stays the byte boundary
+  (`"héllo".length()` is 6) and `split` returns the native `list<string>` storage, so
+  `Collection.*` reads it back or `Text.split` wraps it into a `List<string>`.
+- `startsWith`/`endsWith` had no native to map onto, so they became primitives in
+  `src/vm/native.cpp` (a byte prefix/suffix compare) and `Text.startsWith`/`endsWith`
+  now delegate to them instead of carrying a second ZL copy.
+- A miss is a compile-time error that teaches the surface - "type 'string' has no
+  method 'trimLeft' (string methods: charAt, …)" - and `s.length(1)` /
+  `s.contains(3)` are type errors rather than native contract throws at run time.
+
+`repeat` is a lexer keyword, so the repeat method keeps the native spelling
+`repeatText` (the same reason `Text.repeatText` exists). An untyped lambda parameter is
+still `UNKNOWN` until annotated - that is P1-2's bare `func` signature, not this
+surface - so `func(name) => name.length()` needs `func(string name)`.
+
+Gates: `tests/zl/valid/language_hardening_tests/StringMethods.zl` checks every method
+against its qualified spelling under MIR, `ZL_COMPILER=ast`, `ZL_MIR_OPT=0` and
+`--backend native`; `tests/zl/invalid/type_errors/StringMethodUnknown.zl` pins the
+diagnostic; `testStringMethodsAreTheStringNatives` in `tests/pipeline_tests.cpp`
+compiles both spellings of one program, requires identical output, and asserts in the
+emitted bytecode that the method spelling is a `CallNative` of the mapped native with
+no method dispatch in the body. See
+[docs/language-guide.md](language-guide.md#string-methods).
+
+## 2026-09-18 - A lambda inside a lambda body no longer donates its return type (P0-3)
+
+```zl
+static func callIt(func f): int { return f() }
+
+var body = func() {
+    var n = callIt(func() { return 1 })
+    if (n == 1) { log("yes") }
+}
+body()          // was: printed "yes" forever; now: prints it once and returns
+```
+
+The default (MIR) pipeline ran that body as an endless loop, and the reference AST
+compiler reported `type assertion failed for return: expected int, got void`. The
+cause was in the checker, and it stayed hidden unless one lambda appeared inside
+another's body: `inferLambdaExpr` infers a block body's return type from an
+accumulator (`lastFunctionReturnType_`, `lastFunctionReturnClassName_`,
+`lastFunctionHadReturn_`) that every `return` statement writes into, and a *nested*
+lambda left its own result in that accumulator on its way out. The enclosing lambda
+then read `int` as its inferred return - a non-void signature for a body containing
+no `return` at all. MIR lowered the body's exit block to `unreachable`, since nothing
+may legally reach the end of a non-void function, and the VM looped on it.
+
+`currentReturnType_`, `currentFunctionName_` and friends were already saved and
+restored around the body check for precisely this reason; the four accumulator fields
+now join them, so a lambda's return inference is private in both directions - it
+neither inherits the enclosing function's returns nor hands its own back.
+`--emit-mir` on the reproducer shows `func ...$lambda0(): void` with a `return` in its
+exit block where it previously showed `: int` with `unreachable`.
+
+Pinned by `tests/zl/valid/language_hardening_tests/NestedLambdaReturn.zl` - nesting
+three deep with a different return type at each level, a lambda built inside a loop,
+the enclosing lambda's own `return` winning over the nested one's, and the same nest
+inside a worker thread. It passes under MIR, `ZL_COMPILER=ast`, `ZL_MIR_OPT=0` and
+`--backend native`, and it did not terminate at all before the fix. That is also how
+the bug was found: the `Condition` fixture below hung on a waiter closure whose
+predicate was a lambda.
+
+## 2026-09-18 - `Condition` is exercised from a worker thread (P2-4)
+
+`tests/zl/valid/concurrency_regressions/ConditionWorkerSignal.zl` closes the last
+untested claim in that directory: a `Condition` waited on inside a spawned thread and
+signalled from a different one. Three shapes, all with the waiting done by a worker:
+
+- twenty rounds of the documented safe pattern (`Condition.waitUntil` over an `Atomic`
+  flag, signalled from a second thread), each round asserting that the waiter woke on
+  the published state - a hand-off that works only on the first attempt is a race, not
+  a feature;
+- the bare primitive: a worker blocks in `Condition.wait` and another thread's
+  `notifyAll` wakes it. A notification delivered before the waiter blocks is lost by
+  design (`stdlib/zl/lang/Condition.zl` says so), so the signaller keeps notifying
+  until the waiter reports itself awake, bounded at 500 attempts - which turns a broken
+  wait into a failed check rather than a hung fixture;
+- `Condition.waitFor(gate, 0.2)` with nobody notifying, asserting it returns `false`:
+  the bounded wait has to be bounded from a worker too.
+
+`examples/basics/Conditions.zl` turned out to be about `elif`, and
+`tests/runtime_sync_tests.cpp` pokes the primitive's C++ state directly, so neither
+covered this.
+
+## 2026-09-18 - The one-type-per-file rule, and the reason for it (P2-6)
+
+[`docs/packages.md`](packages.md) gains a section stating the rule and why it holds.
+The short version: an import names a *type* and is resolved by a path computation
+alone (`io.github.test.Helpers` -> `io/github/test/Helpers.zl`) - no file is opened and
+there is no index of which type lives where - so the stem match is what lets one name
+be both the file to load and the type it delivers. The dotted name is also the module's
+identity: diamond imports, circular-import detection and the `class 'X' is defined in
+both ... and ...` provenance error all key on it, so one file is one node in that graph.
+
+The rule is also narrower than every document claimed. It is one *primary type* per
+file, and a `data`, `interface` or `enum` declaration satisfies it just as a `class`
+does; helper declarations may share the file, in any order, and travel with the primary
+import (`import app.Lib` makes `Lib`'s helpers visible too) - they simply cannot be
+imported by their own name, because there is no file of that name to resolve to.
+[README.md](../README.md) and [`docs/language-guide.md`](language-guide.md) said "a
+class" and "one class per file"; both now say what the loader
+(`src/compiler/module_loader.cpp`) actually enforces, and point at the rationale.
+
+## 2026-09-18 - The native-resource stress suite's flake was its own assertions (P2-8)
+
+The suite failed 7 runs in 40 solo (and 12 in 40 on a busier box), which TASKS.md
+recorded as "~7% of runs ... prints `all native resource stress regressions passed` and
+then exits non-zero ... a static-destruction or thread-teardown race". It never printed
+the pass line on a failing run, and nothing happened after `main`: three assertions in
+`tests/native_resource_stress_tests.cpp` were wrong about what a correct race looks
+like.
+
+- **A borrow that goes invalid is the lifetime tracking working.** `borrow()` can hand
+  back a view that is already invalid, because the owner was consumed and destroyed in
+  the window between the registry lookup and the check - that is exactly what
+  `NativeResourceBorrow`'s `weak_ptr` lifetime is for. The test counted it as `sawDangling`
+  ("a valid borrow with the wrong handle is a lie") and incremented no counter, so both
+  of its assertions failed together. Invalidated borrows are now their own outcome, and
+  the dangling check still means what it says.
+- **The hammer ran before the pool was drained.** Leaving the claim loop only means
+  every token has been *claimed*; another worker can still be between its claim and its
+  consume. A worker that ran ahead consumed that token itself - uncounted, since the
+  hammer only tallies rejections - so "every token was consumed exactly once" lost one
+  and the rejection count gained one. The hammer now waits for the drain it assumes
+  (with a deadline, so a genuinely lost token still fails loudly instead of hanging).
+- **Two 5 ms sleeps assumed the invokers would be scheduled inside them.** On a loaded
+  two-core box they were not, `ran` was still 0 when `close()` landed, and the suite
+  reported "invocations ran before close()" - a complaint about the runtime that was
+  really a complaint about the scheduler. Both phases now wait for the fact they assert
+  on: close after the first successful invocation, stop after the first refusal.
+
+Gates: 500 consecutive solo runs and 50 `ctest -j2` runs clean, plus 300 runs with two
+cores pinned busy (before the fix: 3 failures in 6 loaded runs). A red line in this
+suite is evidence about your change again.
+
+## 2026-09-18 - An empty `{}` is a set, and a map-typed slot accepts one (A9)
+
+Two symptoms, one cause - an empty literal was forced through the same shape checks as
+a populated one:
+
+```zl
+map<string, int> ages = {}    // was: type error: map literal requires key:value entries
+Map<string, int> generic = {} // was: type error: Map literal requires key:value entries
+
+var tags = {}                 // inferred list<unknown>, so:
+set<int> declared = tags      // was: [mir.type-flow] store of list<unknown> into set<int>
+```
+
+An empty literal holds nothing that could contradict a declaration, so in
+`inferCollectionLiteralExpected` the declaration now decides the container for all
+three native spellings and all three generic ones. With no declaration to go by, the
+spelling decides: `[]` infers an empty `list` and `{}` an empty `set`, matching
+[`docs/language-guide.md`](language-guide.md)'s own rule that lists use `[...]` and
+sets and maps use `{...}`. The reference compiler needed one line to agree - an empty
+literal recorded as `"map"` fell through to `Collection.newList` and tripped the
+declaration's runtime assertion.
+
+A **non-empty** `{1, 2}` with no declared type stays a `list`. That spelling is also how
+a variadic argument list is written (`Text.format("{0} + {1}", {"1", "1"})`), where set
+de-duplication would silently eat arguments; the fixture asserts exactly that.
+
+One case stays open and is now written down rather than discovered twice: an empty
+literal in *argument* position has no declaration to lean on, so `countEntries({})`
+against a `map<string,int>` parameter is still a compile error - arguments are inferred
+before overload resolution. Bind it first (`map<string,int> empty = {}`), which the
+fixture does; propagating the expectation into call arguments is tracked as P2-9 and
+belongs with P1-1/A1.
+
+Gates: `tests/zl/valid/core_tests/EmptyCollectionLiterals.zl` (both native and generic
+slots, both spellings, the inferred-then-declared flow, a call boundary, and the
+duplicate-keeping variadic case) under MIR, `ZL_COMPILER=ast`, `ZL_MIR_OPT=0` and
+`--backend native`; [`docs/language-guide.md`](language-guide.md#empty-literals).
+
+## 2026-09-18 - `String.split(s, "")` splits characters, not bytes (A10)
+
+`String.split("héllo", "")` returned six fragments - `h`, then the two halves of `é` as
+mojibake, then `l`, `l`, `o` - because the empty-separator path iterated `char`s. An
+empty separator means "every character", and a character in this codebase is a UTF-8
+scalar, so it now walks the same boundaries as `String.utf8CharAt` (the scalar helpers
+moved above the `String.*` block in `src/vm/native.cpp` so one implementation serves
+both). `Text.split` forwards to it and inherits the behaviour; ill-formed bytes still
+come back one at a time rather than hanging the walk.
+
+Gates: the split cases in `tests/zl/valid/language_hardening_tests/Utf8Text.zl` (a
+two-byte scalar, a four-byte one, and split-then-join round-tripping the original
+string) under MIR, `ZL_COMPILER=ast` and `ZL_MIR_OPT=0`;
+[`docs/stdlib.md`](stdlib.md#zltext).
+
+## 2026-09-18 - The reference compiler stops emitting returns nothing can reach (A6)
+
+Every function body and every block-body lambda was followed by an implicit
+`push nil; return`, including a body that already ended in `return expr` or `throw` - a
+`Return` does not fall through, so those bytes were unreachable, on every function in
+the program and the whole standard library. `Compiler::compile` and
+`compileLambdaExpr` now emit the tail only where control flow can actually reach the end
+of the body, decided by a deliberately conservative `canFallThrough`: a `return`, a
+`throw`, a block whose last statement cannot fall through, or an `if`/`else` whose arms
+all cannot. Anything else - a loop a `break` might escape, a `finally` that might
+swallow a throw, any statement kind not listed - keeps its tail, because dropping one
+the VM needs is worse than a few dead bytes.
+
+Gates: `testUnreachableReturnTailIsNotEmitted` in `tests/pipeline_tests.cpp` counts
+returns per function over the code the compiler emitted for it (a named function's body
+runs to the next entry address, a lambda's to its `MakeClosure`), pins the conservative
+direction too - an `if` with no `else` and a body with no return keep the implicit one -
+and checks the fixture still prints the same six values. Against the old behaviour it
+fails 4 of its checks, so it is not vacuous.
+
+## 2026-09-18 - `boundary-lint-regressions` stopped failing on its own output
+
+`ctest -j2` went red on this suite twice in two runs, each time announcing
+
+```text
+FAIL: new-expression construction: diagnostic does not name src/main.cpp:3
+    boundary-lint: rule 3: ... src/main.cpp:3: heap construction of the front end: ...
+```
+
+that is, a missing diagnostic, printed underneath the complaint. The check was
+`printf '%s\n' "$output" | grep -q "$file:$line:"` under `set -o pipefail`: `grep -q`
+exits at the first match, `printf` then dies of SIGPIPE, and pipefail reports the
+*pipeline* as failed. Measured in isolation: 4 false negatives in 200 trials with two
+cores busy, 0 in 200 idle - which is why it looked like a flake of the thing under test
+rather than of the test.
+
+Both sites in `tests/boundary_lint_tests.sh` now use a `case` substring match with no
+subprocess to race with, and the same shape in `tools/boundary_lint.sh`'s ignore-pattern
+check - where a false negative means an ignore silently not ignoring, i.e. a phantom
+violation - is a here-string. Gates: 15 runs of the suite with two cores pinned busy,
+0 failures; `ctest -j2` green 3 of 3 (was red 2 of 2).
+
+## 2026-09-18 - `zl-runtime-sync-tests` failed whenever the machine was quiet
+
+`ctest -C Release` - the gate [TASKS.md](../TASKS.md) documents, with no `-j` - failed
+this suite 199 runs in 200 on an idle two-core box, and passed 30 in 30 with both cores
+busy. `testReadWriteLockState` starts two writers and four readers and then asserts
+`reads > 0` ("readers actually ran"), but nothing ever made the readers run: on two cores
+the writers own both from start to finish, the readers are not scheduled until
+`writersDone` is already set, and they leave on their first check. Under load the writers
+are preempted, the readers get a core, and the suite passes - so the only person who saw
+this failure was a developer running the documented gate on a small machine, and CI,
+which runs the suite in parallel, never did.
+
+The writers now wait until every reader has taken the lock at least once before their
+first write, which makes "readers actually ran" a fact the test establishes rather than
+one it hopes for; the wait cannot deadlock, because a reader never waits on a writer.
+Readers also yield between reads: without that, four spinning readers starve the writers'
+exclusive lock and the same test takes four seconds instead of a tenth of one. Measured
+after the fix: 0 failures in 100 solo runs and 0 in 25 with both cores pinned busy, at
+0.095 s per run.
+
+## 2026-09-17 - A block-body lambda with an untyped parameter compiles on both pipelines (P0-1)
+
+```zl
+static func twice(func f): int { return f(3) }
+log(twice(func(x) { return x * 2 }))    // was: refused outright, now: 6
+```
+
+The default (MIR) pipeline rejected the whole program with
+`[mir.return]: block b1 returns a value from a void function`, and the
+reference AST compiler died at runtime with an argument-count mismatch - while
+the arrow form `func(x) => x * 2` worked. The cause was return-type inference
+for the block body: a lambda's inferred return stayed UNKNOWN when every
+`return` in the block had an UNKNOWN type, and UNKNOWN then collapsed to
+nil/void. The checker now tracks that a return was *seen* even when its type is
+UNKNOWN (`lastFunctionHadReturn_` in `src/compiler/type_checker.cpp`), so a bare-`func` block body keeps the UNKNOWN return the arrow form already
+gets, instead of dropping to void while the body still emits `return x * 2`.
+
+Both spellings are pinned side by side - block and arrow, bare `func` callee
+and `func(int): int` callee - by
+`tests/zl/valid/language_hardening_tests/LambdaBlockBody.zl`, which prints `6`
+from every form and is exercised by `scripts/run_regressions.sh`; the
+reproducer above prints `6` under MIR, the reference AST compiler, unoptimized
+MIR, and `--backend native`.
+
+## 2026-09-17 - `log` prints a collection's data, not its storage (P2-1)
+
+`log(l)` on a `List<double>` printed `List{__native: [3.14, 1]}` - the wrapper's
+plumbing rather than the payload. `Serialize.encode` had already learned to
+look through the `List`/`Map`/`Set` wrappers (REVIEW.md O11); the printer now
+does the same: `formatValueInner` (`src/vm/value.cpp`) unwraps the `__native`
+field of the three generic collections and formats the payload directly, so
+`log(l)` prints `[3.14, 1]`, `log(m)` prints `{"pi": 3.14}`, and a value keeps
+one spelling through `log`, concatenation, `Text.format`, and the JSON
+encoder. The look-through preserves the existing totality guards: a collection
+that (indirectly) contains itself still prints a `<cyclic>` marker instead of
+overflowing the stack.
+
+No example printed a bare collection, so no expected output changed. The
+behaviour is pinned by `tests/zl/valid/core_tests/CollectionPrinting.zl`
+(payloads, empty collections, nesting, string quoting, cycles), documented in
+`docs/language-guide.md` (Generic collections), and REVIEW.md O11 records the
+printer half next to the encoder half.
+
+## 2026-09-17 - `Time.format` rejects a token it does not recognise (P2-2)
+
+`Time.format(0, "%Y-%m-%d")` returned the pattern unchanged - the tokens are
+ZL's own (`YYYY`, `MM`, `DD`, `HH`, `mm`, `ss`), and an unrecognised one was
+left in place silently, which was the easiest way to print a wrong date
+confidently. `formatCivilTime` (`src/vm/native.cpp`, shared by `Time.format`
+and `Time.utcFormat`) now raises on any unknown `%`-token, naming the expected
+token set.
+
+`docs/stdlib.md` documents the raise, `examples/advanced/TimeLib.zl`
+demonstrates the rejection next to the correct tokens (expected output
+updated), REVIEW.md O10 is closed, and
+`tests/zl/valid/language_hardening_tests/TimeFormatTokens.zl` pins the token
+set - every token through the deterministic `Time.utcFormat`, a full pattern on
+the epoch and a leap day, and the raise on strftime-shaped patterns for both
+entry points.
+
+## 2026-09-17 - One voice for the empty list (P2-3)
+
+`List.first()` on an empty list threw `List.first called on empty list` (ZL,
+naming the declared type), while `List.pop()` delegated to the storage
+primitive and surfaced `Collection.pop: cannot pop from an empty list` (native,
+naming the primitive). `List.pop` (`src/compiler/builtin_library.cpp`) now
+guards emptiness in ZL exactly like `first()`/`last()` already did, so every
+wrapper method names the type the user declared and the operation they asked
+for. The raw `Collection.pop` primitive keeps its own name when called
+directly - which is then what the user asked for.
+
+`tests/zl/valid/core_tests/EmptyListErrors.zl` pins both messages (and
+`List.last`, and the direct primitive call, and the `firstOr`/`lastOr`
+fallbacks, and that a successful pop still round-trips). REVIEW.md's note
+under O18 is updated.
+
+## 2026-09-17 - The legacy IR folder spells a folded double exactly (P0-2)
+
+`rewriteInstructionConstants` wrote a folded double back into the instruction's
+`symbol` with `std::to_string` - six fixed decimals - and `parseConst` read it
+back with `stod`, so any constant needing more precision was silently rounded
+on its way through the optimizer. Latent (the only consumer is the legacy
+`--emit-native` tier, which refuses double-returning `@native` functions), but
+one feature away from a miscompile. All double-writing sites in
+`src/compiler/ir_optimizer.cpp` now use the runtime's
+`zl::doubleToShortestString` - the language's one spelling for a double - and
+the integer-only identity folds keep `std::to_string` on `std::int64_t`, which
+is exact.
+
+`tests/ir_tests.cpp` gained `testOptimizerFoldsDoublesExactly`: `0.1 + 0.2`
+folds to a `Const` whose symbol is the full 17-digit `0.30000000000000004`,
+unary minus keeps every digit (`-0.30000000000000004`), and both spellings
+parse back to bit-identical doubles.
+
+## 2026-09-17 - Stale claims deleted, and the fixed-array gap re-verified (P1-5, S1-S3)
+
+Four write-ups recorded failures that no longer reproduce, and each one cost
+the next reader a full reproduction:
+
+- REVIEW.md O19 (`INT64_MIN` cannot be written as a literal) now records the
+  fix instead of teaching the `(0 - INT64_MAX) - 1` workaround.
+- The block-bodied-lambda claim in `research/report.md` §2.7 now points at the
+  real remaining gap (the untyped block-body parameter, P0-1) instead of the
+  already-working typed form.
+- `research/corpus/limitations/FixedArrayNative.zl` and
+  `docs/status/mir-safety-evaluation.md` recorded that passing a fixed array
+  through `Collection.*` lost the element type (`array[5]<int>` downgraded to
+  `list<unknown>`) and the verifier rejected it. It does not:
+  `isCollectionType` (`src/mir/type.cpp`) classifies `TypeKind::Array` as a
+  collection, the fixture verifies clean and runs on both pipelines (re-run
+  today: `len=5`, `last=5`), and the status document marks the two affected
+  workflows as fixed rather than deleting them - the baseline's other findings
+  stand.
+
+All four TASKS.md entries are deleted; nothing here changed behaviour, so the
+gates that cover the underlying fixes are the ones named above.
+
 ## 2026-09-17 - Doubles print as the shortest decimal that reads back (F9)
 
 `log(3.14)` printed `3.1400000000000001`. The arithmetic was never wrong - the

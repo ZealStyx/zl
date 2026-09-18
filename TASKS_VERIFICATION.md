@@ -1,5 +1,12 @@
 # TASKS.md Verification — Second Pass — 2026-09-17 (static analysis, no build)
 
+> **Superseded (2026-09-17, later the same day):** this pass ran without a
+> build. A later pass with a working build re-verified against the real binary
+> and closed P0-1, P0-2, P1-5, P2-1, P2-2, P2-3 and S1-S3 — several verdicts
+> below (e.g. P2-2 "documented as intentional") are since fixed. See
+> `docs/changelog.md` (2026-09-17) and the Done section of `TASKS.md`. Kept as
+> the record of the static pass only.
+
 Build environment still blocked: `cmake` missing, `build/` missing, `apt-get` network isolated (`deb.debian.org Connection failed`). Cannot run `zl_language`. This pass is static code reading plus grep, cross-referenced against first verification `TASKS_VERIFICATION.md` (which remains valid). Focus: re-check each TASKS.md entry, plus deeper stdlib/runtime edge cases mentioned in session memory (Time.addMonths negative era, FileSystem path traversal, Text split O(n²), Serialize vs printer cycle divergence, empty {} literal).
 
 Legend: **REAL** = reproduces via static path, **STALE** = fixed, **DOC** = doc/measurement task still open, **PLAUSIBLE** = needs runtime but code path exists, **NEW** = additional issue not in TASKS.md.
@@ -222,6 +229,19 @@ Verdict: **STALE**.
 ---
 
 ## Additional issues found (not in TASKS.md)
+
+> **Since fixed (2026-09-18):** A6 (the unreachable `return nil` tail), A9 (empty
+> collection literals) and A10 (`String.split` with an empty separator splitting
+> bytes) are closed - see [docs/changelog.md](docs/changelog.md) and the Done
+> section of [TASKS.md](TASKS.md). Two more items below were checked against a
+> working build and are not what they look like: A17's untested `Condition` claim
+> now has a fixture
+> (`tests/zl/valid/concurrency_regressions/ConditionWorkerSignal.zl`), and writing
+> that fixture exposed a lambda-inference bug which made any lambda containing a
+> nested lambda plus a branch run its body forever (pinned by
+> `tests/zl/valid/language_hardening_tests/NestedLambdaReturn.zl`). The findings
+> themselves are left exactly as written - this file is the record of the static
+> pass.
 
 ### A1 · Lambda param types not inferred from expected `func(T):R` in argument position — NEW REAL
 

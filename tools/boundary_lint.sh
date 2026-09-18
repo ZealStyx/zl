@@ -60,7 +60,11 @@ scan() {
         checked=$((checked + 1))
         while IFS= read -r match; do
             [ -n "$match" ] || continue
-            if [ -n "$ignore" ] && printf '%s' "$match" | grep -Eq "$ignore"; then
+            # A here-string, not `printf | grep -Eq`: with pipefail set, grep
+            # exiting at the first match can SIGPIPE the printf and the pipeline
+            # then reports failure - which here would mean an ignore pattern
+            # silently not ignoring, i.e. a phantom violation under load.
+            if [ -n "$ignore" ] && grep -Eq "$ignore" <<< "$match"; then
                 continue
             fi
             report "$rule" "$file" "${match%%:*}" "${match#*:}"

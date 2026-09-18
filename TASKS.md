@@ -25,7 +25,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release           # once
 cmake --build build --config Release --target zl-tests   # core + every regression target
 (cd build && ctest -C Release)                           # 41 tests, includes both parity scripts
 examples/run_all.sh build/zl_language                    # 51 examples, byte-compared to their expected output
-bash scripts/run_regressions.sh build/zl_language all    # 50 fixtures under tests/zl
+bash scripts/run_regressions.sh build/zl_language all    # 59 fixtures under tests/zl
 bash scripts/native_gate.sh build/zl_language            # native tier gate
 ```
 
@@ -35,55 +35,23 @@ Priorities: **P0** produces a wrong result or refuses a valid program ·
 
 ## Start here
 
-The five with the best value-to-risk ratio right now:
+The three with the best value-to-risk ratio right now:
 
 | # | Task | Why first |
 | --- | --- | --- |
-| [P0-1](#p0-1--a-block-body-lambda-with-an-untyped-parameter-is-broken-on-both-pipelines) | Block-body lambda, untyped parameter | A valid program is refused outright on the default pipeline |
-| [P2-1](#p2-1--generic-collections-print-their-internal-storage) | `List{__native: …}` printing | One function, and the JSON encoder already has the fix to copy |
-| [P1-5](#p1-5--fixed-arrays-through-collection-the-recorded-gap-no-longer-reproduces) | Close or re-prove the fixed-array MIR gap | The corpus claims a failure that no longer happens |
-| [P2-2](#p2-2--timeformat-unknown-tokens-fail-silently) | `Time.format("%Y")` fails silently | A wrong answer that looks like a right one |
-| [S1-S3](#stale-claims-verified-2026-09-17) | Delete the three stale write-ups | They cost every reader a reproduction |
+| [P1-1](#p1-1--match-cannot-pattern-match-option--result-reviewmd-o21) | `match` on `Option`/`Result` | The exhaustiveness rules already exist as dead code - scope `isAssignable` before starting |
+| [P1-4](#p1-4--list--map--set-cannot-be-variable-names) | `list`/`map`/`set` as names | Either the lexer learns context, or the restriction gets documented where it is hit |
+| [P2-9](#p2-9--an-empty-literal-in-argument-position-still-has-nothing-to-declare-it) | `countEntries({})` | The last empty-literal hole, and it is the same expected-type plumbing P1-1 needs |
 
 ---
 
 ## P0 - wrong results, or a valid program refused
 
-### P0-1 · A block-body lambda with an untyped parameter is broken on both pipelines
-
-```zl
-class Lam3 {
-    static func twice(func f): int { return f(3) }
-    func main(): void { log(Lam3.twice(func(x) { return x * 2 })) }
-}
-```
-
-- MIR pipeline (the default): `MIR verification error … [mir.return]: in
-  Lam3.$lambda0: block b1 returns a value from a void function` - the whole
-  program is refused, not just the lambda.
-- `ZL_COMPILER=ast`: compiles, then dies at runtime (`argument count mismatch`).
-- `func(x) => x * 2` works, and `func(int x) { return x * 2 }` works.
-
-**Done when** both pipelines infer the lambda's signature from the `func`-typed
-callee the way the arrow form already does, the reproducer prints `6`, and a
-`tests/zl/valid` fixture pins the block and arrow forms side by side.
-
-### P0-2 · The legacy IR folder round-trips a folded double through six decimals
-
-`rewriteInstructionConstants` writes a folded double into the instruction's
-`symbol` with `std::to_string` (`src/compiler/ir_optimizer.cpp:301`, also 375,
-427, 715) - fixed, six decimals - and `parseConst` reads it back with `stod`
-(`src/compiler/ir_optimizer.cpp:76`). Any constant that needs more precision is
-silently rounded.
-
-Latent rather than live: the only consumer is the legacy `--emit-native` tier
-(`src/compiler/native_compiler.cpp:840`), which currently refuses
-double-returning `@native` functions, so no wrong constant has been produced yet.
-That is one feature away from being a miscompile.
-
-**Done when** those sites use the runtime's `zl::doubleToShortestString` (exact,
-and already the language's one spelling), or the dead path is deleted under
-boundary-lint rule 4 - plus a regression that folds a double needing 17 digits.
+Nothing open right now. The last three - the block-body lambda with an untyped
+parameter and the legacy IR folder's six-decimal double round-trip (both closed
+2026-09-17), and the lambda-inside-a-lambda that ran its body forever (found and
+closed 2026-09-18 while writing the `Condition` fixture below) - are in
+[Done](#done) and [docs/changelog.md](docs/changelog.md).
 
 ---
 
@@ -113,16 +81,6 @@ records the parameter as `unknown`.
 compile time, bare `func` keeps working for compatibility, and the README
 limitation is deleted.
 
-### P1-3 · `string` has no methods
-
-`s.length()` → `type error: cannot call method 'length' on value of type string`;
-everything goes through `Text.length(s)` / `String.*`.
-
-**Done when** a small intrinsic surface (`length`, `substring`, `contains`,
-`startsWith`, `indexOf`, …) maps onto the existing native `String.*` primitives -
-no second implementation - with a fixture and an updated
-[docs/language-guide.md](docs/language-guide.md).
-
 ### P1-4 · `list` / `map` / `set` cannot be variable names
 
 `var list = new List<int>()` → `syntax error: Expected variable name -- got "list"`.
@@ -132,20 +90,6 @@ Reserved as type spellings, with no escaping hatch.
 (context-sensitive lexering, with a fixture for each ambiguity), or the
 restriction is stated in [docs/language-guide.md](docs/language-guide.md) next to
 the reserved-word list instead of being discovered at the keyboard.
-
-### P1-5 · Fixed arrays through `Collection.*`: the recorded gap no longer reproduces
-
-`research/corpus/limitations/FixedArrayNative.zl` says the element type is lost
-(`array[5]<int>` → `list<unknown>`) and the verifier rejects it. It does not:
-that fixture verifies clean and runs on the MIR pipeline today, as do a native
-`list` stored into an `array[2]<int>` slot and `Collection.get` results pushed
-into a `List<int>` - the two shapes
-[docs/status/mir-safety-evaluation.md](docs/status/mir-safety-evaluation.md)
-records as failures (`heap-contract-workflow`).
-
-**Done when** either a reproducer that still fails is committed in its place, or
-the corpus file and the status document are corrected. An unverified "known gap"
-is worse than none: it stops people using fixed arrays with the primitives.
 
 ### P1-6 · Native backend: not an execution driver, and a small subset
 
@@ -213,67 +157,15 @@ written argument that the behaviour is correct as it stands.
 
 ## P2 - polish, measurement, ecosystem
 
-### P2-1 · Generic collections print their internal storage
-
-```zl
-var l = new List<double>()
-l.push(3.14); l.push(1.0)
-log(l)          // List{__native: [3.14, 1]}
-```
-
-[REVIEW.md O11](examples/REVIEW.md) fixed exactly this for `Serialize.encode` -
-which now looks through the `List`/`Map`/`Set` wrappers - but the printer
-(`formatValueInner`, `src/vm/value.cpp`) still walks the wrapper object's fields.
-
-**Done when** `log(l)` prints `[3.14, 1]` and `log(m)` prints `{"pi": 3.14}`,
-reusing the wrapper look-through the encoder already has, with the affected
-example and fixture expectations updated.
-
-### P2-2 · `Time.format` unknown tokens fail silently
-
-`Time.format(0, "%Y-%m-%d")` prints `%Y-%m-%d`; the tokens are ZL's own
-(`YYYY-MM-DD`, [docs/stdlib.md:237-250](docs/stdlib.md),
-[REVIEW.md O10](examples/REVIEW.md)). Documented, and still the easiest way to
-print a wrong date confidently.
-
-**Done when** an unknown `%`-token raises, or is passed through with a warning the
-caller can see; a fixture covers both a valid pattern and a strftime-shaped one.
-
-### P2-3 · `List.pop()` and `List.first()` disagree about an empty list
-
-`List.pop` delegates to the native `Collection.pop: cannot pop from an empty
-list` (`src/vm/native.cpp:302`), while `List.first` throws from ZL with
-`List.first called on empty list` (`src/compiler/builtin_library.cpp:101`). Two
-voices for one condition - and `List.first` names the collection, `Collection.pop`
-names the primitive.
-
-**Done when** both name the type the user declared and the operation they asked
-for, and a fixture pins the two messages.
-
-### P2-4 · `Condition` is never exercised from a worker thread
-
-`examples/basics/Conditions.zl` waits and signals on the main thread;
-`tests/runtime_sync_tests.cpp` covers the primitive, and
-`tests/zl/valid/concurrency_regressions/` has no `Condition` case at all.
-
-**Done when** a concurrency regression waits on a `Condition` inside a spawned
-thread, is signalled from another, and passes repeatedly (not once).
-
 ### P2-5 · `zlpkg` has no registry
 
 Git URL or local `path` only; exact versions, no ranges, no workspaces, no
-dev-dependencies ([docs/packages.md:71-101](docs/packages.md)).
+dev-dependencies ([docs/packages.md](docs/packages.md#external-dependencies-zlpkg) -
+the pointer is an anchor, not a line range, because this file's own edits keep
+moving the lines).
 
 **Done when** the intended scope is decided and written down - a registry is a
 service, not a feature, and "no registry yet" should say what replaces it.
-
-### P2-6 · One class per file, stem must match the class name
-
-Enforced by the compiler - the file rule in [README](README.md#run-a-program). Fine as a rule; it is
-listed here because nothing states the reason, and every newcomer asks.
-
-**Done when** the rule and its rationale (module identity, import resolution) are
-in [docs/packages.md](docs/packages.md), or relaxed for helper types.
 
 ### P2-7 · Typed field-by-field C struct schemas
 
@@ -283,16 +175,27 @@ FFI passes opaque buffers; a typed schema per C struct is a later ABI extension
 **Done when** `zl-bind` emits a typed schema for a struct with mixed field types
 and a test reads and writes each field by name.
 
-### P2-8 · `zl-native-resource-stress-tests` is flaky
+### P2-9 · An empty literal in argument position still has nothing to declare it
 
-~7% of runs on a 2-core box (4 of 60 solo, and intermittently under `ctest -j2`):
-it prints `all native resource stress regressions passed` and then exits non-zero,
-which points after `main` returns - a static-destruction or thread-teardown race.
-Pre-existing, and unrelated to formatting or the VM's value path.
+Found 2026-09-18 while closing A9. The empty-literal fix reads the container kind
+from the *declaration*, and in argument position there is no declaration yet:
+arguments are inferred before overload resolution runs. So `map<string,int> empty = {}`
+followed by `countEntries(empty)` compiles, while `countEntries({})` against
+`static func countEntries(map<string,int> m)` is still
+`no overload of 'countEntries' matches the given argument types` - on every backend.
+[docs/language-guide.md](docs/language-guide.md#empty-literals) tells users to bind
+first; that is a workaround, not an answer.
 
-**Done when** 500 consecutive solo runs and 50 `ctest -j2` runs are clean, or the
-teardown race is named and fixed. Until then a red suite here is not evidence
-about your change.
+The real fix is expected-type propagation into call arguments, which is exactly the
+plumbing already scoped as P1-1 and as A1 in
+[TASKS_VERIFICATION.md](TASKS_VERIFICATION.md) - it should not be attempted as a
+one-off, and it must not disturb the non-empty `{1, 2}` case (TextLib.zl:61 relies on
+it being a variadic list).
+
+**Done when** `countEntries({})` compiles against a `map<K,V>` parameter on all four
+configs, `Text.format("{0}", {1})` still passes a list, and
+`tests/zl/valid/core_tests/EmptyCollectionLiterals.zl` covers the argument-position
+form directly instead of only the bound one.
 
 ---
 
@@ -330,26 +233,11 @@ Follows from [P1-6](#p1-6--native-backend-not-an-execution-driver-and-a-small-su
 Findings that are written up as open and no longer reproduce. Delete or correct
 the write-up - each one costs the next reader a full reproduction.
 
-### S1 · "`INT64_MIN` cannot be written as a literal" ([REVIEW.md O19](examples/REVIEW.md))
-
-Fixed: the parser folds the exact spelling `-9223372036854775808` into one
-negative literal (`src/parser/expression_parser.cpp:102`), and one past it in
-either direction is still rejected. Pinned by
-`tests/zl/valid/language_hardening_tests/Int64Min.zl` and
-`tests/zl/invalid/type_errors/IntLiteralOutOfRange.zl`. O19 still says
-"Deliberately **not** fixed" and teaches the `(0 - INT64_MAX) - 1` workaround.
-
-### S2 · "Block-bodied lambdas cannot declare typed parameters"
-
-`func(int x) { return x * 2 }` and `func(int x): int { return x * 2 }` both
-compile and run. The real remaining gap is the *untyped* block-body parameter -
-[P0-1](#p0-1--a-block-body-lambda-with-an-untyped-parameter-is-broken-on-both-pipelines).
-
-### S3 · "Fixed arrays through `Collection.*` lose the element type; the verifier rejects"
-
-See [P1-5](#p1-5--fixed-arrays-through-collection-the-recorded-gap-no-longer-reproduces):
-the corpus file and the status document both still record a verifier rejection
-that does not happen.
+None recorded right now. S1 (REVIEW.md O19, `INT64_MIN` literal), S2 (the
+block-bodied-lambda claim in `research/report.md` §2.7) and S3 (the fixed-array
+`Collection.*` gap in the corpus and the status document) were corrected or
+confirmed already fixed on 2026-09-17; see [Done](#done) and
+[docs/changelog.md](docs/changelog.md).
 
 ---
 
@@ -358,6 +246,134 @@ that does not happen.
 Most recent first. Kept briefly so the gates that cover each fix are findable,
 then deleted - [docs/changelog.md](docs/changelog.md) is the permanent record.
 
+- [x] **P1-3 · `string` has no methods** - `s.length()` was
+  `cannot call method 'length' on value of type string` while every collection
+  type was method-based. A method on a `string` now resolves to the `String.*`
+  native catalog entry with the receiver bound as its first argument
+  (`TypeChecker::inferMethodCall` looks it up in the `kStringMethods` table), so
+  the method spelling and the qualified call are the same instruction on both
+  backends - no second implementation, no class behind the primitive. The
+  surface is the 29 `String.*` primitives that take a string first
+  (`length`, `substring`, `contains`, `indexOf`, `startsWith`, `endsWith`,
+  `trim`/`upper`/`lower`, `split`, `replace`, `toInt`/`toFloat`, the seven
+  `utf8*` methods, …); indexing stays the byte boundary and `split` returns the
+  native `list<string>` storage exactly as `String.split` does. `startsWith` and
+  `endsWith` had no native primitive, so they became ones (a byte prefix/suffix
+  compare) and `Text.startsWith`/`endsWith` now delegate to them instead of
+  keeping a second ZL copy. A name outside the surface is a compile error that
+  lists the surface; arity and argument types are checked against the catalog
+  entry at compile time. Gates:
+  `tests/zl/valid/language_hardening_tests/StringMethods.zl` (every method
+  checked against its qualified spelling) under MIR, `ZL_COMPILER=ast`,
+  `ZL_MIR_OPT=0` and `--backend native`;
+  `tests/zl/invalid/type_errors/StringMethodUnknown.zl`;
+  `testStringMethodsAreTheStringNatives` in `tests/pipeline_tests.cpp`, which
+  compiles both spellings of one program, requires identical output, and asserts
+  in bytecode that a method call is a `CallNative` of the mapped native.
+- [x] **P0-3 · A lambda created inside a lambda body handed the outer lambda its
+  return type** (found 2026-09-18 while writing the P2-4 fixture) - the checker
+  infers a block body's return from an accumulator every `return` writes into, and
+  a nested lambda left its own result in it, so
+  `func() { var n = callIt(func() { return 1 }) if (n == 1) { log("y") } }` was
+  typed `func(): int`: a non-void body with no return, which MIR lowered to an
+  `unreachable` exit block and the VM ran as an endless loop (the reference
+  compiler died with `type assertion failed for return: expected int, got void`).
+  The accumulator is now saved and restored around each lambda. Gates:
+  `tests/zl/valid/language_hardening_tests/NestedLambdaReturn.zl` under MIR,
+  `ZL_COMPILER=ast`, `ZL_MIR_OPT=0` and `--backend native`; the fixture did not
+  terminate at all before the fix.
+- [x] **P2-4 · `Condition` was never exercised from a worker thread** - Gates:
+  `tests/zl/valid/concurrency_regressions/ConditionWorkerSignal.zl`: twenty rounds
+  of wait-until-signalled across two threads, the bare `Condition.wait` /
+  `notifyAll` primitive blocking and waking a worker, and `Condition.waitFor`
+  reporting its timeout from a worker. Writing it is what surfaced P0-3.
+- [x] **P2-6 · One primary type per file - the rule and its reason are written
+  down** - [docs/packages.md](docs/packages.md#one-primary-type-per-file): an
+  import names a type and resolves by path alone, so the stem match is what lets
+  one name be both the file and the type; the dotted name is also the module
+  identity that diamond, cycle and duplicate-declaration detection key on. The
+  rule is narrower than it was documented to be: a `data`, `interface` or `enum`
+  satisfies it, and helper declarations may share the file (they travel with the
+  primary import, they just are not importable by name). README and
+  [docs/language-guide.md](docs/language-guide.md) corrected to match.
+- [x] **P2-8 · `zl-native-resource-stress-tests` was flaky - three assertions in
+  the test, not a teardown race after `main`** - (1) a borrow that goes invalid
+  because the owner was consumed between the lookup and the check is the lifetime
+  tracking *working*, and was counted as a dangling handle; (2) the "hammer the
+  drained pool" phase ran before the pool was drained - leaving the claim loop
+  only means every token was claimed, not consumed - so it stole tokens its
+  claimer had not reached; (3) two 5 ms sleeps assumed the invoker threads would
+  be scheduled inside them, which on a loaded 2-core box they were not. All three
+  now wait for the fact they assert on. Gates: 500 solo runs and 50 `ctest -j2`
+  runs clean, plus 300 runs with two cores busy (before: 3 failures in 6 loaded
+  runs, 7 in 40 solo).
+- [x] **An empty `{}` was refused by a map-typed slot and inferred `list` with no
+  declaration** (TASKS_VERIFICATION.md A9) - `map<string,int> m = {}` and
+  `Map<string,int> m = {}` failed with "map literal requires key:value entries",
+  and `var s = {}` inferred `list<unknown>`, so `set<int> t = s` was refused with
+  a MIR type-flow violation. An empty literal now takes its container from the
+  declaration, or from its spelling when there is none (`[]` list, `{}` set); a
+  *non-empty* `{1, 2}` stays a list, because that spelling is also how a variadic
+  argument list is written. Gates:
+  `tests/zl/valid/core_tests/EmptyCollectionLiterals.zl` under MIR, ast, unopt and
+  native; [docs/language-guide.md](docs/language-guide.md#empty-literals).
+- [x] **`String.split(s, "")` split bytes, not characters**
+  (TASKS_VERIFICATION.md A10) - `String.split("héllo", "")` returned six
+  fragments with `é` cut in half; it now walks the same UTF-8 scalars as
+  `String.utf8CharAt`, and `Text.split` inherits it. Gates: the split cases in
+  `tests/zl/valid/language_hardening_tests/Utf8Text.zl`;
+  [docs/stdlib.md](docs/stdlib.md#zltext).
+- [x] **Every function body carried an implicit `return nil` the VM could not
+  reach** (TASKS_VERIFICATION.md A6) - a `return` does not fall through, so the
+  tail after a body that ends in one (or in an if/else whose arms both return) was
+  dead bytes on the reference pipeline. Now emitted only where control flow can
+  actually reach the end of the body. Gates:
+  `testUnreachableReturnTailIsNotEmitted` in `tests/pipeline_tests.cpp`, which
+  counts returns per function and also pins the conservative direction (an `if`
+  with no `else` keeps its tail); it fails 4 checks against the old behaviour.
+- [x] **`zl-runtime-sync-tests` failed whenever the machine was quiet** - the
+  documented gate (`ctest -C Release`, no `-j`) failed it 199 runs in 200 on an idle
+  2-core box and passed 30 in 30 with both cores busy: `testReadWriteLockState`
+  asserts "readers actually ran" while two writers own both cores and the four
+  readers are never scheduled until `writersDone` is set. Writers now wait for every
+  reader's first read (a fact the test establishes instead of hoping for), and
+  readers yield between reads so four spinners do not starve the writers' exclusive
+  lock. Gates: 100 solo runs and 25 loaded runs clean, 0.095 s per run - 4.0 s with
+  the handshake but without the yield.
+- [x] **The boundary lint's own suite reported phantom failures under load** -
+  `printf '%s\n' "$output" | grep -q` with `set -o pipefail`: grep exits at the
+  first match, printf dies of SIGPIPE, and the pipeline reports failure - so
+  `boundary-lint-regressions` announced "diagnostic does not name src/main.cpp:3"
+  while printing that line underneath, and `ctest -j2` went red for reasons that
+  had nothing to do with the change under test (2 of 2 runs before, 0 of 3 after;
+  4 false negatives in 200 loaded trials of the old shape, 0 in 200 of the new).
+  The same shape in `tools/boundary_lint.sh`'s ignore-pattern check would have
+  meant an ignore silently not ignoring. Both are pipe-free now.
+- [x] **P0-1 · A block-body lambda with an untyped parameter was refused on both
+  pipelines** - the checker keeps an UNKNOWN return for a bare-`func` block body
+  the way the arrow form always did. Gates: reproducer prints `6` under MIR,
+  `ZL_COMPILER=ast`, `ZL_MIR_OPT=0` and `--backend native`;
+  `tests/zl/valid/language_hardening_tests/LambdaBlockBody.zl` in
+  `scripts/run_regressions.sh`.
+- [x] **P0-2 · The legacy IR folder round-tripped a folded double through six
+  decimals** - every double-writing site in `src/compiler/ir_optimizer.cpp` now
+  uses `zl::doubleToShortestString`. Gates: `testOptimizerFoldsDoublesExactly`
+  in `tests/ir_tests.cpp` (17-digit fold, negation, bit-exact round-trip).
+- [x] **P2-1 · Generic collections printed their internal storage** - the
+  printer reuses the encoder's `List`/`Map`/`Set` look-through, so `log(l)` is
+  `[3.14, 1]`. Gates: `tests/zl/valid/core_tests/CollectionPrinting.zl`;
+  `docs/language-guide.md` and REVIEW.md O11 updated.
+- [x] **P2-2 · `Time.format` unknown tokens failed silently** - an unrecognised
+  `%`-token raises, naming the token set. Gates:
+  `tests/zl/valid/language_hardening_tests/TimeFormatTokens.zl`;
+  `docs/stdlib.md`, `examples/advanced/TimeLib.zl` and REVIEW.md O10 updated.
+- [x] **P2-3 · `List.pop()` and `List.first()` disagreed about an empty list** -
+  `List.pop` guards emptiness in ZL; the raw `Collection.pop` keeps its own name
+  when called directly. Gates:
+  `tests/zl/valid/core_tests/EmptyListErrors.zl`; REVIEW.md O18 note updated.
+- [x] **P1-5 / S1-S3 · Stale write-ups corrected** - the fixed-array
+  `Collection.*` "gap" re-verified as fixed (`FixedArrayNative.zl` runs clean on
+  both pipelines), O19/research report/status document now record reality.
 - [x] **F9 · `log(3.14)` printed `3.1400000000000001`** - a double now prints as
   the shortest decimal that reads back as the same bits, in one formatter shared
   by `log`, concatenation, `Text.format` and `Serialize.encode`. Gates:

@@ -1,0 +1,66 @@
+// ============================================================================
+// Regression fixture - valid/core_tests - EmptyListErrors
+//
+// P2-3: the empty-list condition had two voices. List.first() threw
+// `List.first called on empty list` (ZL, names the declared type), while
+// List.pop() delegated to the storage primitive and surfaced
+// `Collection.pop: cannot pop from an empty list` (native, names the
+// primitive). One condition, one voice: the wrapper methods name the type the
+// user declared and the operation they asked for. List.pop now guards
+// emptiness in ZL like first()/last() already did.
+//
+// Pinned here:
+//   * List.first / List.pop / List.last on an empty list all throw, each
+//     naming `List.<op>` - caught and compared by message text
+//   * the raw storage primitive keeps its own name: a direct
+//     Collection.pop on an empty native list still reports `Collection.pop`
+//   * the safe fallbacks (firstOr/lastOr) do not throw at all
+// ============================================================================
+
+class EmptyListErrors {
+    func check(bool cond, string what): void {
+        if (!cond) {
+            throw new Exception("EmptyListErrors failed: " + what)
+        }
+    }
+
+    // Runs `action` and returns the exception text, or "" if it did not throw.
+    func messageOf(func action): string {
+        try {
+            action()
+        } catch e {
+            return "" + e
+        }
+        return ""
+    }
+
+    func main(): void {
+        var self = new EmptyListErrors()
+
+        var empty = new List<int>()
+        self.check(self.messageOf(func() => empty.first()) == "List.first called on empty list",
+                   "List.first names List.first")
+        self.check(self.messageOf(func() => empty.last()) == "List.last called on empty list",
+                   "List.last names List.last")
+        self.check(self.messageOf(func() => empty.pop()) == "List.pop called on empty list",
+                   "List.pop names List.pop, not Collection.pop")
+
+        // The primitive keeps its own voice when called directly: the user
+        // asked for Collection.pop, so the error names Collection.pop.
+        var raw = Collection.newList()
+        self.check(self.messageOf(func() => Collection.pop(raw)) == "Collection.pop: cannot pop from an empty list",
+                   "direct Collection.pop still names the primitive")
+
+        // The safe fallbacks return instead of throwing.
+        self.check(empty.firstOr(-1) == -1, "firstOr falls back")
+        self.check(empty.lastOr(-1) == -1, "lastOr falls back")
+
+        // A pop that succeeds still round-trips through the primitive.
+        var one = new List<int>()
+        one.push(42)
+        self.check(one.pop() == 42, "pop on a non-empty list still returns the back element")
+        self.check(one.length() == 0, "pop removed the element")
+
+        log("ok")
+    }
+}

@@ -25,6 +25,40 @@ std::size_t typeArgNameOperand(Chunk& chunk, const std::vector<std::string>& nam
     return chunk.addName(joined) + 1;
 }
 
+// Can control flow leave `node` the ordinary way - by running off its end?
+// Every function body gets an implicit `return nil` for the case where it can,
+// so a body that provably cannot needs no tail: emitting one anyway appends
+// instructions the VM can never reach (a `return` or `throw` does not fall
+// through). Deliberately conservative - only shapes whose every exit is
+// visible in the AST are recognised, so a `break` that escapes a loop, a
+// `finally` that swallows a throw, or any statement kind not listed here all
+// keep the implicit tail. Getting this wrong in the other direction would drop
+// a return the VM needs; this way it costs at most a few dead bytes.
+bool canFallThrough(const AstNode* node) {
+    if (node == nullptr) return true;
+    switch (node->kind) {
+        case NodeKind::ReturnStmt:
+        case NodeKind::ThrowStmt:
+            return false;
+        case NodeKind::BlockStmt: {
+            const auto* block = static_cast<const BlockStmt*>(node);
+            return block->statements.empty() ||
+                   canFallThrough(block->statements.back().get());
+        }
+        case NodeKind::IfStmt: {
+            const auto* ifStmt = static_cast<const IfStmt*>(node);
+            // An `if` without an `else` always has a path that skips it.
+            if (!ifStmt->elseBody) return true;
+            for (const auto& branch : ifStmt->branches) {
+                if (canFallThrough(branch.body.get())) return true;
+            }
+            return canFallThrough(ifStmt->elseBody.get());
+        }
+        default:
+            return true;
+    }
+}
+
 } // namespace
 
 std::size_t Compiler::emit(OpCode op, std::size_t operand, std::size_t line, std::size_t operand2, std::size_t operand3) {
@@ -259,10 +293,15 @@ Chunk Compiler::compile(const Program& program) {
         chunk_.functions[i].ownedLocalNames = activeOwnedLocalNames_;
 
         // Implicit `return` (as nil) if the func falls off the end of its body.
-        std::size_t nilIdx = chunk_.addConstant(Value{});
-        emit(OpCode::PushConst, nilIdx, fn->line);
-        emitOwnedLocalCleanup(fn->line);
-        emit(OpCode::Return, 0, fn->line);
+        // A body that cannot fall through already returned (or threw), and that
+        // return emitted the same owned local cleanup, so the tail would be
+        // unreachable bytes.
+        if (canFallThrough(fn->body.get())) {
+            std::size_t nilIdx = chunk_.addConstant(Value{});
+            emit(OpCode::PushConst, nilIdx, fn->line);
+            emitOwnedLocalCleanup(fn->line);
+            emit(OpCode::Return, 0, fn->line);
+        }
     }
 
     // Compile static initializers after ordinary functions so they may call any
@@ -1295,11 +1334,17 @@ void Compiler::compileLambdaExpr(const LambdaExpr* node) {
         compileStatement(node->blockBody.get());
         // Implicit `return nil` if the block falls off the end without an
         // explicit `return` - same fallback named functions get (see
-        // Compiler::compile's pass 2).
-        std::size_t nilIdx = chunk_.addConstant(Value{});
-        emit(OpCode::PushConst, nilIdx, node->line);
-        emitOwnedLocalCleanup(node->line);
-        emit(OpCode::Return, 0, node->line);
+        // Compiler::compile's pass 2). A block that cannot fall through
+        // (it ends in `return`/`throw`, or in an if/else whose arms all do)
+        // already left the function, and its own `return` ran the same owned
+        // local cleanup this tail would, so the tail is skipped rather than
+        // emitted as bytes the VM can never reach.
+        if (canFallThrough(node->blockBody.get())) {
+            std::size_t nilIdx = chunk_.addConstant(Value{});
+            emit(OpCode::PushConst, nilIdx, node->line);
+            emitOwnedLocalCleanup(node->line);
+            emit(OpCode::Return, 0, node->line);
+        }
     }
 
     chunk_.functions[funcIndex].ownedLocalNames = activeOwnedLocalNames_;
@@ -1474,7 +1519,13 @@ void Compiler::compileCollectionLiteral(const CollectionLiteral* node) {
         return;
     }
 
-    if (node->isMap) {
+    // An empty literal has no entries to reveal its shape, so the container the
+    // checker recorded from the declaration decides: `map<string,int> m = {}`
+    // is a map even though `node->isMap` (which means "the literal itself had
+    // key:value entries") is false. Without this the empty map literal fell
+    // through to the list branch and tripped the declaration's runtime type
+    // assertion on the reference pipeline.
+    if (node->isMap || node->targetCollectionKind == "map") {
         std::size_t newMapIdx = requireNative("Collection.newMap");
         std::size_t mapSetIdx = requireNative("Collection.mapSet");
         emit(OpCode::CallNative, newMapIdx, node->line);
@@ -1608,6 +1659,22 @@ void Compiler::compileFieldAssign(const FieldAssignExpr* node) {
 }
 
 void Compiler::compileMethodCall(const MethodCallExpr* node) {
+    if (node->isStringMethod) {
+        // A method on a `string` is the resolved `String.*` native with the
+        // receiver as its first argument (TypeChecker::inferMethodCall). The
+        // native's own arity tells the VM how many values to pop, so the
+        // receiver and the arguments are simply pushed in order.
+        const auto idx = findNativeFunction(node->nativeMethodName);
+        if (!idx) {
+            throw std::runtime_error("Compiler: unknown string method native '" +
+                                     node->nativeMethodName + "'");
+        }
+        compileExpression(node->object.get());
+        for (const auto& arg : node->arguments) compileExpression(arg.get());
+        emit(OpCode::CallNative, *idx, node->line);
+        return;
+    }
+
     if (node->isTaskMethod) {
         compileExpression(node->object.get());
         if (node->methodName == "block") {

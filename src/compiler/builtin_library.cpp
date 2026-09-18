@@ -15,6 +15,12 @@ class List<T> {
     }
 
     public func pop(): T {
+        // Name the wrapper the user declared, not the storage primitive the
+        // delegate would name (P2-3): List.pop and List.first/last share one
+        // voice for the empty-list condition.
+        if (this.isEmpty()) {
+            throw new Exception("List.pop called on empty list")
+        }
         return Collection.pop(this.__native)
     }
 
