@@ -366,13 +366,13 @@ bool TypeChecker::isAssignable(ZlType from, ZlType to, const std::string& fromCl
     }
     // int -> double widening (numeric promotion).
     if (from == ZlType::INT && to == ZlType::DOUBLE) return true;
-    // There's no dedicated array-literal syntax - a `{...}` collection
-    // literal always infers as LIST (see inferCollectionLiteral), and that
-    // same literal is the supported construction form for array-typed
-    // variables (array[N]<T>). Both share the same underlying runtime list
-    // representation, but an explicitly-typed element mismatch must still
-    // be rejected.
-    if (from == ZlType::LIST && to == ZlType::ARRAY) {
+    // There's no dedicated array-literal syntax - a `[...]` collection
+    // literal infers as LIST (and an empty `{...}` as SET; see
+    // inferCollectionLiteral), and that same literal is the supported
+    // construction form for array-typed variables (array[N]<T>). Both share
+    // the same underlying runtime list representation, but an
+    // explicitly-typed element mismatch must still be rejected.
+    if ((from == ZlType::LIST || from == ZlType::SET) && to == ZlType::ARRAY) {
         if (!fromClassName.empty() && !toClassName.empty()) return genericCollectionCompatible(fromClassName, toClassName);
         return true;
     }
@@ -4549,6 +4549,14 @@ ZlType TypeChecker::inferCollectionLiteralExpected(const CollectionLiteral* node
                                                     ZlType expectedType,
                                                     const std::string& expectedClassName,
                                                     const TypeAnnotation& expectedAnnotation) {
+    // An empty literal (`{}` or `[]`) holds nothing that could contradict the
+    // declared type, so the declaration alone decides the container: it is a
+    // map where a map is expected and a list/set where one of those is. The
+    // shape checks below are about *entries*, and an empty literal has none -
+    // `map<string,int> m = {}` is an empty map, not a literal that "requires
+    // key:value entries".
+    const bool literalIsEmpty = node->entries.empty() && node->elements.empty();
+
     // Arrays use the same compact runtime list representation, but their
     // compile-time contract is stricter: element type must match and a fixed
     // size must be satisfied exactly.
@@ -4575,7 +4583,7 @@ ZlType TypeChecker::inferCollectionLiteralExpected(const CollectionLiteral* node
 
     // Primitive collection annotations: list<T>, set<T>, map<K,V>.
     if (expectedType == ZlType::LIST || expectedType == ZlType::SET || expectedType == ZlType::MAP) {
-        if (expectedType == ZlType::MAP && !node->isMap) {
+        if (expectedType == ZlType::MAP && !node->isMap && !literalIsEmpty) {
             typeError("map literal requires key:value entries", node->line);
         }
         if (expectedType != ZlType::MAP && node->isMap) {
@@ -4639,7 +4647,7 @@ ZlType TypeChecker::inferCollectionLiteralExpected(const CollectionLiteral* node
         const std::size_t lt = className.find('<');
         std::string base = lt == std::string::npos ? className : className.substr(0, lt);
         if (base == "List" || base == "Map" || base == "Set") {
-            if ((base == "Map") != node->isMap) {
+            if ((base == "Map") != node->isMap && !literalIsEmpty) {
                 typeError(base == "Map"
                     ? "Map literal requires key:value entries"
                     : "List/Set literal cannot contain map entries", node->line);
@@ -4704,8 +4712,20 @@ TypeChecker::InferredType TypeChecker::inferCollectionLiteral(const CollectionLi
         }
         return result;
     }
+    // An empty literal has no elements to infer from, so its spelling is the
+    // only evidence there is: `[]` is the list spelling and `{}` the set one
+    // (docs/language-guide.md, "Typed collection literals"). Inferring `{}` as
+    // a list made `var s = {}` a `list<unknown>`, which a later `set<int> t = s`
+    // then refused with a MIR type-flow violation. A *non-empty* `{1, 2}` stays
+    // a list: that spelling is also how a variadic argument list is written
+    // (`Text.format(pattern, {"a", "b"})`), where set deduplication would be
+    // wrong.
+    if (node->elements.empty()) {
+        if (node->bracketSyntax) return InferredType(ZlType::LIST);
+        node->targetCollectionKind = "set";
+        return InferredType(ZlType::SET);
+    }
     InferredType result(ZlType::LIST);
-    if (node->elements.empty()) return result;
     const InferredType first = inferExpr(node->elements.front().get());
     bool same = true;
     for (std::size_t i = 1; i < node->elements.size(); ++i) {
@@ -5510,6 +5530,21 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
                       " variable '" + captured + "' by value", node->line);
         }
     }
+    // A lambda's return inference is its own. These four fields are the scratch
+    // accumulator that the `return` statements of a body write into, and until
+    // this lambda's body is checked they belong to whatever function encloses
+    // it, so they are saved here and restored on the way out - exactly like
+    // currentReturnType_ below. Without that, a lambda *created inside* a
+    // lambda body left its own return type behind in the accumulator, and the
+    // enclosing lambda then claimed it as its inferred return:
+    //     func() { var n = callIt(func() { return 1 }) if (n == 1) { log("y") } }
+    // was typed `func(): int` - a non-void body with no `return` anywhere, which
+    // MIR lowered to an `unreachable` exit block and the VM then ran as an
+    // endless loop over the body.
+    const std::vector<ZlType> previousParamTypes = lastFunctionParamTypes_;
+    const ZlType previousInferredReturnType = lastFunctionReturnType_;
+    const std::string previousInferredReturnClassName = lastFunctionReturnClassName_;
+    const bool previousHadReturn = lastFunctionHadReturn_;
     lastFunctionParamTypes_.clear();
     lastFunctionReturnType_ = ZlType::UNKNOWN;
     const auto enclosingSymbols = symbols_.snapshot();
@@ -5658,6 +5693,10 @@ TypeChecker::InferredType TypeChecker::inferLambdaExpr(const LambdaExpr* node) {
     currentReturnClassName_ = previousReturnClassName;
     currentFunctionName_ = previousFunctionName;
     currentFunctionIsAsync_ = previousFunctionIsAsync;
+    lastFunctionParamTypes_ = previousParamTypes;
+    lastFunctionReturnType_ = previousInferredReturnType;
+    lastFunctionReturnClassName_ = previousInferredReturnClassName;
+    lastFunctionHadReturn_ = previousHadReturn;
     symbols_.restore(enclosingSymbols);
     movedVariables_ = previousMovedVariables;
     borrowSources_ = previousBorrowSources;

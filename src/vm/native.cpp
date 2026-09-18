@@ -529,6 +529,77 @@ Value collSetItems(const std::vector<Value>& args) {
 
 // --- String ---
 
+// UTF-8 scalar helpers used by String.utf8* / Text.*. Ill-formed sequences
+// are treated as a single-byte character so indexing never hangs or splits a
+// well-formed multi-byte scalar. String.length/charAt remain byte operations.
+struct Utf8Char {
+    std::string bytes;
+    std::uint32_t cp;
+    std::size_t next;
+};
+
+Utf8Char utf8Next(const std::string& s, std::size_t i) {
+    const auto u = static_cast<unsigned char>(s[i]);
+    auto one = [&]() { return Utf8Char{s.substr(i, 1), u, i + 1}; };
+    if (u < 0x80) return {s.substr(i, 1), u, i + 1};
+    int need = 0;
+    std::uint32_t cp = 0;
+    if ((u & 0xE0) == 0xC0) { need = 2; cp = u & 0x1F; }
+    else if ((u & 0xF0) == 0xE0) { need = 3; cp = u & 0x0F; }
+    else if ((u & 0xF8) == 0xF0) { need = 4; cp = u & 0x07; }
+    else return one();
+    if (i + static_cast<std::size_t>(need) > s.size()) return one();
+    for (int k = 1; k < need; ++k) {
+        const auto c = static_cast<unsigned char>(s[i + static_cast<std::size_t>(k)]);
+        if ((c & 0xC0) != 0x80) return one();
+        cp = (cp << 6) | (c & 0x3F);
+    }
+    const std::uint32_t minCp = need == 2 ? 0x80u : need == 3 ? 0x800u : 0x10000u;
+    if (cp < minCp || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) return one();
+    return {s.substr(i, static_cast<std::size_t>(need)), cp, i + static_cast<std::size_t>(need)};
+}
+
+std::size_t utf8LengthOf(const std::string& s) {
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < s.size(); i = utf8Next(s, i).next) ++n;
+    return n;
+}
+
+Utf8Char utf8At(const std::string& s, std::int64_t index, const char* fnName) {
+    if (index < 0) {
+        throwIndexError(std::string(fnName) + ": index " + std::to_string(index) + " out of bounds");
+    }
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < s.size(); ) {
+        auto ch = utf8Next(s, i);
+        if (static_cast<std::int64_t>(n) == index) return ch;
+        i = ch.next;
+        ++n;
+    }
+    throwIndexError(std::string(fnName) + ": index " + std::to_string(index) +
+                    " out of bounds (size " + std::to_string(n) + ")");
+}
+
+std::string utf8Encode(std::uint32_t cp) {
+    std::string out;
+    if (cp <= 0x7Fu) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp <= 0x7FFu) {
+        out.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else if (cp <= 0xFFFFu) {
+        out.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else {
+        out.push_back(static_cast<char>(0xF0u | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    }
+    return out;
+}
+
 const std::string& requireString(const Value& v, const char* fnName) {
     if (auto p = std::get_if<std::string>(&v)) return *p;
     throwTypeError(std::string(fnName) + " expects a string argument");
@@ -611,7 +682,15 @@ Value strSplit(const std::vector<Value>& args) {
     Value result = makeEmptyList();
     auto& items = std::get<ListRef>(result)->items;
     if (delim.empty()) {
-        for (char c : s) items.emplace_back(std::string(1, c));
+        // An empty separator means "every character", and a character is a UTF-8
+        // scalar, not a byte: splitting "héllo" on bytes returned six fragments
+        // with two mojibake halves of 'é' in them. Same scalar walk as
+        // String.utf8CharAt, so the two agree on what a character is.
+        for (std::size_t i = 0; i < s.size(); ) {
+            const Utf8Char ch = utf8Next(s, i);
+            items.emplace_back(ch.bytes);
+            i = ch.next;
+        }
         return result;
     }
     std::size_t pos = 0;
@@ -737,77 +816,6 @@ Value strRepeat(const std::vector<Value>& args) {
     std::string out;
     out.reserve(static_cast<std::size_t>(total));
     for (std::int64_t i = 0; i < count; ++i) out.append(s);
-    return out;
-}
-
-// UTF-8 scalar helpers used by String.utf8* / Text.*. Ill-formed sequences
-// are treated as a single-byte character so indexing never hangs or splits a
-// well-formed multi-byte scalar. String.length/charAt remain byte operations.
-struct Utf8Char {
-    std::string bytes;
-    std::uint32_t cp;
-    std::size_t next;
-};
-
-Utf8Char utf8Next(const std::string& s, std::size_t i) {
-    const auto u = static_cast<unsigned char>(s[i]);
-    auto one = [&]() { return Utf8Char{s.substr(i, 1), u, i + 1}; };
-    if (u < 0x80) return {s.substr(i, 1), u, i + 1};
-    int need = 0;
-    std::uint32_t cp = 0;
-    if ((u & 0xE0) == 0xC0) { need = 2; cp = u & 0x1F; }
-    else if ((u & 0xF0) == 0xE0) { need = 3; cp = u & 0x0F; }
-    else if ((u & 0xF8) == 0xF0) { need = 4; cp = u & 0x07; }
-    else return one();
-    if (i + static_cast<std::size_t>(need) > s.size()) return one();
-    for (int k = 1; k < need; ++k) {
-        const auto c = static_cast<unsigned char>(s[i + static_cast<std::size_t>(k)]);
-        if ((c & 0xC0) != 0x80) return one();
-        cp = (cp << 6) | (c & 0x3F);
-    }
-    const std::uint32_t minCp = need == 2 ? 0x80u : need == 3 ? 0x800u : 0x10000u;
-    if (cp < minCp || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) return one();
-    return {s.substr(i, static_cast<std::size_t>(need)), cp, i + static_cast<std::size_t>(need)};
-}
-
-std::size_t utf8LengthOf(const std::string& s) {
-    std::size_t n = 0;
-    for (std::size_t i = 0; i < s.size(); i = utf8Next(s, i).next) ++n;
-    return n;
-}
-
-Utf8Char utf8At(const std::string& s, std::int64_t index, const char* fnName) {
-    if (index < 0) {
-        throwIndexError(std::string(fnName) + ": index " + std::to_string(index) + " out of bounds");
-    }
-    std::size_t n = 0;
-    for (std::size_t i = 0; i < s.size(); ) {
-        auto ch = utf8Next(s, i);
-        if (static_cast<std::int64_t>(n) == index) return ch;
-        i = ch.next;
-        ++n;
-    }
-    throwIndexError(std::string(fnName) + ": index " + std::to_string(index) +
-                    " out of bounds (size " + std::to_string(n) + ")");
-}
-
-std::string utf8Encode(std::uint32_t cp) {
-    std::string out;
-    if (cp <= 0x7Fu) {
-        out.push_back(static_cast<char>(cp));
-    } else if (cp <= 0x7FFu) {
-        out.push_back(static_cast<char>(0xC0u | (cp >> 6)));
-        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
-    } else if (cp <= 0xFFFFu) {
-        out.push_back(static_cast<char>(0xE0u | (cp >> 12)));
-        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
-        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
-    } else {
-        out.push_back(static_cast<char>(0xF0u | (cp >> 18)));
-        out.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
-        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
-        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
-    }
     return out;
 }
 
