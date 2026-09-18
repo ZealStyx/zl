@@ -147,6 +147,11 @@ std::vector<NativeSignature> buildSignatureTable() {
     sigs.push_back({NativeId::STRING_LOWER, "String.lower",     {ZlType::STRING},                           ZlType::STRING});
     sigs.push_back({NativeId::STRING_TRIM, "String.trim",      {ZlType::STRING},                           ZlType::STRING});
     sigs.push_back({NativeId::STRING_CONTAINS, "String.contains",  {ZlType::STRING, ZlType::STRING},           ZlType::BOOL});
+    // startsWith/endsWith are the same byte-prefix/suffix test the string
+    // method surface exposes as `s.startsWith(p)`; Text.startsWith and
+    // Text.endsWith delegate here rather than carrying a second ZL copy.
+    sigs.push_back({NativeId::STRING_STARTSWITH, "String.startsWith", {ZlType::STRING, ZlType::STRING},        ZlType::BOOL});
+    sigs.push_back({NativeId::STRING_ENDSWITH, "String.endsWith",  {ZlType::STRING, ZlType::STRING},           ZlType::BOOL});
     sigs.push_back({NativeId::STRING_INDEXOF, "String.indexOf",   {ZlType::STRING, ZlType::STRING},           ZlType::INT});
     sigs.push_back({NativeId::STRING_CHARAT, "String.charAt",    {ZlType::STRING, ZlType::INT},              ZlType::STRING});
     sigs.push_back({NativeId::STRING_SUBSTRING, "String.substring", {ZlType::STRING, ZlType::INT, ZlType::INT}, ZlType::STRING});

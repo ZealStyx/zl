@@ -170,8 +170,15 @@ them as a `List<string>`. A non-empty separator is an ordinary byte-string
 search, and an ill-formed byte still comes back on its own rather than hanging
 the walk.
 
-`string` has no methods of its own: `s.length()` is a compile error, so use the
-`Text.length(s)` free-function form.
+`string` also has methods, and they *are* the `String.*` primitives with the
+receiver bound as the first argument: `s.length()` is `String.length(s)`,
+`s.startsWith(p)` is `String.startsWith(s, p)`, and so on for the whole surface.
+The method spelling therefore stays the byte boundary — `s.length()` counts bytes
+and `s.substring` indexes bytes, while the `utf8*` methods are the scalar-indexed
+ones listed above. `Text.*` remains the ZL-owned convenience layer on top (it is
+where `toIntOr`, `padLeft`, `join`, the regex helpers and the `List<string>` return
+of `split` live). See
+[language-guide.md](language-guide.md#string-methods) for the full method table.
 
 ## Regular expressions
 

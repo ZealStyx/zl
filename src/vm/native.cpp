@@ -635,6 +635,18 @@ Value strContains(const std::vector<Value>& args) {
     return s.find(needle) != std::string::npos;
 }
 
+Value strStartsWith(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.startsWith");
+    const std::string& prefix = requireString(args[1], "String.startsWith");
+    return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
+}
+
+Value strEndsWith(const std::vector<Value>& args) {
+    const std::string& s = requireString(args[0], "String.endsWith");
+    const std::string& suffix = requireString(args[1], "String.endsWith");
+    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 Value strIndexOf(const std::vector<Value>& args) {
     const std::string& s = requireString(args[0], "String.indexOf");
     const std::string& needle = requireString(args[1], "String.indexOf");
@@ -3236,6 +3248,8 @@ std::vector<NativeFunction> buildTable() {
         std::pair{NativeId::STRING_LOWER, strLower},
         std::pair{NativeId::STRING_TRIM, strTrim},
         std::pair{NativeId::STRING_CONTAINS, strContains},
+        std::pair{NativeId::STRING_STARTSWITH, strStartsWith},
+        std::pair{NativeId::STRING_ENDSWITH, strEndsWith},
         std::pair{NativeId::STRING_INDEXOF, strIndexOf},
         std::pair{NativeId::STRING_CHARAT, strCharAt},
         std::pair{NativeId::STRING_SUBSTRING, strSubstring},

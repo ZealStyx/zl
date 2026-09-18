@@ -2,6 +2,58 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-18 - `string` has methods, and they are the `String.*` natives (P1-3)
+
+```zl
+var s = "Hello, World"
+log(s.length())           // 12  - the same call as String.length(s)
+log(s.startsWith("He"))   // true
+log("42".toInt() + 1)     // 43
+```
+
+`string` was the last builtin type with no method surface: `s.length()` failed with
+`cannot call method 'length' on value of type string` while `List`, `Map`, `Set`,
+`Option` and `Result` were all method-based, and the only way to reach the primitives
+was the `String.length(s)` free-function form. The fix adds no class and no second
+implementation - a method call resolves to the native catalog entry, with the receiver
+bound as the native's first parameter:
+
+- `TypeChecker::inferMethodCall` looks the method up in `kStringMethods`
+  (`src/compiler/type_checker.cpp`), validates arity and argument types against the
+  catalog signature, and records the resolved name and id on the node
+  (`MethodCallExpr::isStringMethod` / `nativeMethodName` / `nativeMethodId`).
+- The reference AST compiler emits `CallNative` for that entry; MIR lowering emits the
+  same `emitCallNative` with the receiver first. `s.length()` and `String.length(s)`
+  are the same instruction, and `tests/pipeline_tests.cpp` asserts exactly that.
+- The surface is the 29 `String.*` primitives that take a string first: `length`,
+  `charAt`, `substring`, `contains`, `startsWith`, `endsWith`, `indexOf`,
+  `lastIndexOf`, `indexOfFrom`, `replace`, `split`, `trim`/`trimStart`/`trimEnd`,
+  `upper`/`lower`, `compare`/`compareIgnoreCase`, `codePointAt`, `repeatText`,
+  `toInt`, `toFloat`, and the seven `utf8*` scalar-indexed methods. Semantics are the
+  primitives' own: indexing stays the byte boundary
+  (`"héllo".length()` is 6) and `split` returns the native `list<string>` storage, so
+  `Collection.*` reads it back or `Text.split` wraps it into a `List<string>`.
+- `startsWith`/`endsWith` had no native to map onto, so they became primitives in
+  `src/vm/native.cpp` (a byte prefix/suffix compare) and `Text.startsWith`/`endsWith`
+  now delegate to them instead of carrying a second ZL copy.
+- A miss is a compile-time error that teaches the surface - "type 'string' has no
+  method 'trimLeft' (string methods: charAt, …)" - and `s.length(1)` /
+  `s.contains(3)` are type errors rather than native contract throws at run time.
+
+`repeat` is a lexer keyword, so the repeat method keeps the native spelling
+`repeatText` (the same reason `Text.repeatText` exists). An untyped lambda parameter is
+still `UNKNOWN` until annotated - that is P1-2's bare `func` signature, not this
+surface - so `func(name) => name.length()` needs `func(string name)`.
+
+Gates: `tests/zl/valid/language_hardening_tests/StringMethods.zl` checks every method
+against its qualified spelling under MIR, `ZL_COMPILER=ast`, `ZL_MIR_OPT=0` and
+`--backend native`; `tests/zl/invalid/type_errors/StringMethodUnknown.zl` pins the
+diagnostic; `testStringMethodsAreTheStringNatives` in `tests/pipeline_tests.cpp`
+compiles both spellings of one program, requires identical output, and asserts in the
+emitted bytecode that the method spelling is a `CallNative` of the mapped native with
+no method dispatch in the body. See
+[docs/language-guide.md](language-guide.md#string-methods).
+
 ## 2026-09-18 - A lambda inside a lambda body no longer donates its return type (P0-3)
 
 ```zl

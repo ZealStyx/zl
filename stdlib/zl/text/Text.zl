@@ -38,15 +38,14 @@ class Text {
     public static func toFloatOr(string value, double fallback): double { try { return String.toFloat(value) } catch e { return fallback } }
     public static func toBoolOr(string value, bool fallback): bool { try { return Bool.parse(value) } catch e { return fallback } }
 
+    // The prefix/suffix primitives live in the native layer so the string
+    // method surface (`s.startsWith(p)`, docs/language-guide.md#string-methods)
+    // and this convenience wrapper are one implementation, not two.
     public static func startsWith(string value, string prefix): bool {
-        if (String.length(prefix) > String.length(value)) { return false }
-        return String.substring(value, 0, String.length(prefix)) == prefix
+        return String.startsWith(value, prefix)
     }
     public static func endsWith(string value, string suffix): bool {
-        var suffixLength = String.length(suffix)
-        var valueLength = String.length(value)
-        if (suffixLength > valueLength) { return false }
-        return String.substring(value, valueLength - suffixLength, valueLength) == suffix
+        return String.endsWith(value, suffix)
     }
     public static func count(string value, string needle): int {
         if (String.length(needle) == 0) { return 0 }
