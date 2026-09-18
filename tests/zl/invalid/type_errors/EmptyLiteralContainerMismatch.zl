@@ -1,0 +1,30 @@
+// Regression fixture - invalid/type_errors - EmptyLiteralContainerMismatch
+//
+// An empty `{}` with no parameter to declare it is a `set<unknown>`, and a set
+// is not a list. Two overloads that disagree about the container therefore give
+// the literal nothing to be, and resolution says so:
+//
+//   no overload of 'take' matches the given argument types; candidates are:
+//     - EmptyLiteralContainerMismatch.take(map)
+//     - EmptyLiteralContainerMismatch.take(list)
+//
+// It used to resolve anyway - an *unparameterized* collection was treated as a
+// bare untyped slot, which is more permissive than the parameterized
+// `set<int>` spelling of the same value - and the MIR verifier then rejected
+// the module with `[mir.type-flow] invoke_static of '…take(list)' argument 0
+// passes set<unknown> but the parameter is list<int>`: a message about a block
+// and an instruction, where the caller needed the candidate list (P2-10).
+//
+// The bound spelling fails the same way (`set<int> s = {}` then `take(s)`),
+// which is what made the inline form look like a different bug. Where the
+// candidates *agree*, the parameter type declares the literal and the call
+// compiles - see tests/zl/valid/core_tests/EmptyCollectionLiterals.zl.
+
+class EmptyLiteralContainerMismatch {
+    static func take(map<string, int> m): int { return Collection.length(m) }
+    static func take(list<int> l): int { return Collection.length(l) }
+
+    func main(): void {
+        log("x=" + EmptyLiteralContainerMismatch.take({}))
+    }
+}

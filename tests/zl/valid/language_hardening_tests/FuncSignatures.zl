@@ -1,0 +1,67 @@
+// ============================================================================
+// Regression fixture - valid/language_hardening_tests - FuncSignatures
+//
+// A `func`-typed slot can carry its signature: `func(int, string): bool`. The
+// signature is a compile-time contract, checked where the callable is handed
+// over and where it is called:
+//
+//   * a parameter declared `func(int, string): bool` rejects a callable with
+//     the wrong arity or the wrong parameter/return types at the call site,
+//     instead of failing in the VM with "argument count mismatch" the moment
+//     the closure runs (P1-2);
+//   * a slot declared with a signature is callable directly, and its arity is
+//     checked against the argument list;
+//   * a `func(...): T` return type carries its signature out of the call, so a
+//     factory that hands back a callable produces something the next call site
+//     can check.
+//
+// Bare `func` keeps working exactly as before: it carries no signature, so
+// nothing is checked statically and an arity mistake stays a runtime error.
+// That escape hatch is deliberate - `FuncSignatures.bare` below is the pinned
+// spelling - and tests/zl/invalid/type_errors/FuncSignature*.zl pin the
+// rejections.
+// ============================================================================
+
+class FuncSignatures {
+    // The signed parameter: `predicate` can only be handed a bool-valued
+    // callable of exactly (int, string).
+    static func predicate(func(int, string): bool f, int n, string s): bool { return f(n, s) }
+
+    // The compatibility spelling: no signature, no static check.
+    static func bare(func f, int n): int { return f(n) }
+
+    // A signature on the way out as well as on the way in.
+    static func makeAdder(int delta): func(int): int { return func(int x): int => x + delta }
+
+    func instanceApply(func(int): int f, int n): int { return f(n) }
+
+    func main(): void {
+        var self = new FuncSignatures()
+
+        // A lambda written at the call site, with its parameters typed.
+        log("a=" + FuncSignatures.predicate(func(int n, string s): bool => n > 0 && s.length() > 0, 3, "abc"))
+
+        // The same through a slot that declares the signature.
+        func(int, string): bool sameLength = func(int n, string s): bool => n == s.length()
+        log("b=" + FuncSignatures.predicate(sameLength, 3, "abc"))
+
+        // Bare `func` accepts any callable - the compatibility escape hatch.
+        log("c=" + FuncSignatures.bare(func(int x): int => x * 2, 21))
+
+        // A signed slot is callable directly, and its arity is checked
+        // statically (tests/zl/invalid/type_errors/FuncSignatureArity.zl pins
+        // the call-site rejection).
+        func(int): int twice = func(int x): int => x * 2
+        log("d=" + twice(21))
+
+        // An instance method parameter carries the same contract.
+        log("e=" + self.instanceApply(twice, 2))
+
+        // A `func(int): int` return keeps its signature out of the call, so
+        // the value a factory hands back is itself a checked callable.
+        var adder = FuncSignatures.makeAdder(1)
+        log("f=" + adder(41))
+
+        log("ok")
+    }
+}

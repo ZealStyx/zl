@@ -308,8 +308,60 @@ private:
         std::vector<std::vector<std::string>> functionParamClassNames;
         std::vector<ZlType> functionReturnTypes;
         std::vector<std::string> functionReturnClassNames;
+        // True when the argument carries a callable signature of its own: a
+        // `func(int): bool` annotation, or a lambda whose parameters are typed.
+        // A bare `func` value reports false and stays exempt from the call-site
+        // signature check - that is the compatibility escape hatch bare `func`
+        // relies on.
+        std::vector<bool> functionHasSignature;
     };
+
+    // Expected-type propagation into call arguments.
+    //
+    // An empty collection literal takes its container kind from its
+    // declaration - `map<string,int> m = {}` - but in argument position there
+    // is no declaration to read, and arguments are inferred *before* overload
+    // resolution picks a parameter to offer. So `countEntries({})` against
+    // `countEntries(map<string,int>)` had nothing to declare it and failed
+    // with "no overload matches".
+    //
+    // This is the missing half of that plumbing: the call's own candidates say
+    // what each position wants. Where every arity-matching candidate agrees on
+    // a container type, the literal is inferred against it; where they
+    // disagree there is no single answer, the position is left alone, and the
+    // literal keeps today's spelling-based inference. Non-empty literals never
+    // participate - `{1, 2}` is how a variadic argument list is written, and
+    // re-reading it as a set would be wrong.
+    struct ArgumentExpectation {
+        ZlType type{ZlType::UNKNOWN};
+        std::string className;
+        TypeAnnotation annotation;
+        bool seen{false};    // at least one candidate described this position
+        bool usable{false};  // every candidate described it, as the same container
+    };
+
+    // One expectation per argument position, from the candidates' parameter
+    // types. `candidates` are the already-substituted overloads of the call.
+    [[nodiscard]] std::vector<ArgumentExpectation> argumentExpectations(
+        const std::vector<std::pair<std::string, ClassMethodInfo>>& candidates,
+        std::size_t argumentCount) const;
+    // The same, for a single known parameter type - the func-value call path
+    // has one signature rather than a candidate set.
+    [[nodiscard]] ArgumentExpectation argumentExpectation(ZlType type, const std::string& className) const;
+
     [[nodiscard]] InferredArguments inferArguments(const std::vector<NodePtr>& arguments);
+    [[nodiscard]] InferredArguments inferArguments(const std::vector<NodePtr>& arguments,
+                                                   const std::vector<ArgumentExpectation>& expectations);
+
+    // Call-site half of the same contract. A parameter declared
+    // `func(int, string): bool` is checked against the callable actually
+    // passed - arity, parameter types, return type - at compile time, on every
+    // call path, instead of surfacing as a VM argument-count mismatch or a
+    // runtime type assertion. Parameters declared bare `func`, and arguments
+    // that carry no signature of their own (a bare `func` value forwarded
+    // through), are skipped: that is the compatibility escape hatch.
+    void validateFunctionArguments(const std::string& calleeName, const ClassMethodInfo& method,
+                                   const InferredArguments& args, std::size_t line);
 
     // --- helpers ---
 

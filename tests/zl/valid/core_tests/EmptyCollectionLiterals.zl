@@ -14,6 +14,11 @@
 //
 // An empty literal now takes its container from the declaration where there is
 // one, and from its spelling where there is not: `[]` is a list, `{}` is a set.
+// In *argument* position there is no declaration, so the parameter type is the
+// expectation instead: `countEntries({})` against `countEntries(map<string,int>)`
+// is an empty map (it used to be `no overload of 'countEntries' matches`,
+// because arguments were inferred before overload resolution could offer the
+// parameter type - P2-9).
 // A *non-empty* `{1, 2}` is untouched and stays a list - that spelling is also
 // how a variadic argument list is written, where set deduplication would be
 // wrong (the Text.format check at the bottom pins exactly that).
@@ -30,6 +35,9 @@ class EmptyCollectionLiterals {
 
     static func countEntries(map<string, int> m): int { return Collection.length(m) }
     static func countGeneric(Map<string, int> m): int { return m.length() }
+    static func countList(list<int> l): int { return Collection.length(l) }
+    static func countSet(set<int> s): int { return Collection.length(s) }
+    func countInstanceEntries(map<string, int> m): int { return Collection.length(m) }
 
     func main(): void {
         var self = new EmptyCollectionLiterals()
@@ -72,17 +80,36 @@ class EmptyCollectionLiterals {
         self.check(Collection.length(declared) == 1, "an inferred empty set is assignable to set<int>")
 
         // ---- and through a call boundary ----------------------------------
-        // Bound first, not written inline: `countEntries({})` is still a compile
-        // error, because argument types are inferred before overload resolution
-        // can offer the parameter's `map<string,int>` as an expectation (P2-9).
+        // In argument position there is no declaration to take the container
+        // from, so the parameter type supplies it: the call's candidates say
+        // what the position wants, and an empty literal - which holds nothing
+        // that could contradict them - is inferred against it. Bound first or
+        // written inline, the answer is the same.
         map<string, int> emptyForCall = {}
         self.check(EmptyCollectionLiterals.countEntries(emptyForCall) == 0, "an empty map literal reaches a map parameter")
+        self.check(EmptyCollectionLiterals.countEntries({}) == 0, "written inline, with no declaration in between")
         Map<string, int> emptyGenericForCall = {}
         self.check(EmptyCollectionLiterals.countGeneric(emptyGenericForCall) == 0, "and a generic one")
+        self.check(EmptyCollectionLiterals.countGeneric({}) == 0, "inline against a generic Map parameter")
+
+        // The spelling no longer decides the container when a parameter does:
+        // `{}` is a set on its own, but a list where a list is wanted.
+        self.check(EmptyCollectionLiterals.countList([]) == 0, "an empty [] reaches a list parameter")
+        self.check(EmptyCollectionLiterals.countList({}) == 0, "and so does an empty {}, which is a list here")
+        self.check(EmptyCollectionLiterals.countSet({}) == 0, "an empty {} reaches a set parameter")
+        self.check(self.countInstanceEntries({}) == 0, "the same holds on an instance method")
+
+        // A literal that is not empty is untouched: it keeps its own inferred
+        // element type, and the parameter type only has to accept it.
+        self.check(EmptyCollectionLiterals.countList({1, 2, 3}) == 3, "a non-empty {} is still a list of its elements")
 
         // ---- a non-empty brace literal is still a list --------------------
+        // Text.format's second parameter is a list, and a non-empty `{...}` in
+        // argument position must stay one: set deduplication here would drop
+        // the repeated "1" and print "1 + 2 = ".
         self.check(Text.format("{0} + {1} = {2}", {"1", "1", "2"}) == "1 + 1 = 2",
                    "a non-empty {} literal keeps its duplicates (it is a list, not a set)")
+        self.check(Text.format("{0}", {1}) == "1", "and a single-element argument list is still a list")
 
         log("ok")
     }
