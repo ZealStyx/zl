@@ -108,6 +108,10 @@ program, and `zlpkg run` verifies that the adjacent runtime reports a matching v
   boundary. Backends consume only MIR; the lowerer is the only place that knows
   the AST exists. See [`mir.md`](mir.md) for its invariants and design decisions,
   and [`mir-optimizer.md`](mir-optimizer.md) for stage 5.
+- A new language construct that changes *when memory returns* - a memory domain -
+  is specified in [`memory-domains.md`](memory-domains.md). It lists the nine files
+  one new MIR opcode touches and the gates that must stay green, so a design change
+  at that boundary can be costed before it is started.
 - `src/compiler/compiler.cpp` is the reference AST → bytecode compiler, kept
   unchanged so the MIR pipeline can be differentially tested against it
   (`ZL_COMPILER=ast`, `tools/mir_backend_diff.sh`). It is no longer the default

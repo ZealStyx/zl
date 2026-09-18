@@ -130,6 +130,26 @@ FFI passes opaque buffers; a typed schema per C struct is a later ABI extension
 **Done when** `zl-bind` emits a typed schema for a struct with mixed field types
 and a test reads and writes each field by name.
 
+### P2-8 · `owned` ends rootedness but frees nothing
+
+`Drop` and frame teardown erase the local from the frame
+(`ExecutionState::dropLocal` / `dropOwnedLocals`), so a program that carefully
+declares `owned Token a` still waits for a collection to return the box. The
+lifetime contract is checked end to end; the reclamation behind it is the
+collector's schedule, which is what makes `owned` read like a promise it does
+not yet keep ([docs/mir.md](docs/mir.md#ownership)).
+
+Two ways out, in order: recycle boxes through the collector's own deferred
+`Collection` vector (no language change, measurable on its own), or give
+allocation a selectable *memory domain* so `release` can hand storage back
+eagerly - the latter is the design in
+[docs/memory-domains.md](docs/memory-domains.md), whose Phase 0 is the former and
+whose benchmark gate decides whether the language surface is worth adding.
+
+**Done when** a benchmark in `benchmarks/` records `new`-throughput and peak RSS
+before and after box recycling, and either the recycling lands with numbers or
+the doc says why domains are the only way to get them.
+
 ---
 
 ## Performance ([research/report.md](research/report.md))

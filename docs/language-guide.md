@@ -769,6 +769,17 @@ The planned memory model combines ownership with tracing GC. Unannotated managed
 reference values default to GC-managed, thread-confined semantics. `shared` is explicit
 rather than the default.
 
+Two pieces of that model exist today, and neither is a memory-management lever yet.
+A typed declaration may name its storage contract in place of a bare type —
+`owned Token a = new Token("alpha")`, `borrow Token view = b`, and the same modifier on
+a parameter (`func consume(owned Token t)`), on reference-like types only. `move` transfers
+an `owned` binding; the contract is checked in the type checker and again over the MIR
+control-flow graph. What an `owned` binding gives up at `Drop` is its ability to *keep a
+box alive* — the frame forgets it — and not its memory, which the collector returns on its
+own schedule. The direction for closing that gap, including user-written automatic memory
+strategies, is [memory-domains.md](memory-domains.md); the checked contract itself is
+specified in [mir.md](mir.md#ownership).
+
 Thread confinement is enforced at compile time: a closure passed to `Thread.start` or
 `Task.spawn` may only capture values that are safe to carry across the boundary. The
 accepted set is `Shared<T>` plus the runtime's own synchronisation primitives —
