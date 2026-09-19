@@ -548,6 +548,7 @@ private:
             runtimeType.fields = meta.fields;
             runtimeType.methods = meta.methods;
             runtimeType.constructors = meta.constructors;
+            buildRuntimeFieldIndex(runtimeType);
             meta.runtimeType = std::make_shared<RuntimeTypeInfo>(std::move(runtimeType));
             chunk_.classReflection[cls.name] = std::move(meta);
         }

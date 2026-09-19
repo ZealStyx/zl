@@ -1,0 +1,25 @@
+// Regression fixture - invalid/ownership_tests - UseAfterMove
+//
+// The invalid half of the first ownership fixture pair. A `move` ends the
+// binding's ownership, so any later read of `t` is a dataflow error at
+// compile time (the ownership state join in the type checker / MIR verifier),
+// not a runtime check. Expected: a compile error naming the moved variable,
+// exit 1.
+//
+// Valid counterpart: tests/zl/valid/ownership_tests/OwnedBorrowShared.zl.
+
+class Ticket {
+    public func label(): string {
+        return "ticket"
+    }
+}
+
+class UseAfterMove {
+    static func consume(owned Ticket t): void {}
+
+    func main(): void {
+        owned Ticket t = new Ticket()
+        UseAfterMove.consume(move t)
+        log(t.label())
+    }
+}

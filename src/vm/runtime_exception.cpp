@@ -23,8 +23,8 @@ StoredException::StoredException(const std::exception_ptr& error, Retention rete
             root_ = std::make_shared<ProtectedGCRoot>(managed_.get());
         message_ = managed_ ? managed_->className : "ZL exception";
         if (managed_) {
-            const auto message = managed_->fields.find("message");
-            if (message != managed_->fields.end()) message_ = valueToString(message->second);
+            const Value* message = objectFieldLookup(*managed_, "message");
+            if (message != nullptr) message_ = valueToString(*message);
         }
     } catch (const std::exception& exception) {
         native_ = error;
