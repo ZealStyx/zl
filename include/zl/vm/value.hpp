@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -244,9 +245,30 @@ private:
 };
 
 // An instance of a user-defined class. `className` identifies the class for
-// error messages and type checking; `fields` holds the instance's field values,
-// keyed by field name. Methods are NOT stored per-instance (they live in the
-// Chunk's func table, same as free functions) - only data fields go here.
+// error messages and type checking. Methods are NOT stored per-instance (they
+// live in the Chunk's func table, same as free functions) - only data fields
+// go here.
+//
+// Field storage is FLAT, not a per-object name map (Phase 0, memory-domains.md
+// §9): the old `std::unordered_map<std::string, Value>` paid a 32-byte string
+// key plus a map node for every field of every object. Instead, declared
+// instance fields live in `fields` at a position fixed by the class layout -
+// `RuntimeTypeInfo::fieldIndex` maps name -> slot, built once per class and
+// shared by every instance of it. Storage order is the first occurrence of
+// each non-static field name in `RuntimeTypeInfo::fields` (base classes
+// first), which both compiler pipelines agree on.
+//
+// `extraFields` is the fallback for names the layout does not declare:
+// synthetic reflection wrappers (Field/Method/Constructor/Function cells),
+// native-created boxes that never received a `runtimeType`, and test
+// fixtures. Those paths are cold; declared fields - the hot path
+// (GetField/SetField, printing, tracing, structural equality) - never touch
+// the map. A name resolves one way for the life of the box: declared fields
+// via the flat vector, everything else via the map. The one invariant this
+// forces is ordering: a box's `runtimeType` must be assigned before its
+// declared fields are first written (the VM's NewObject path and
+// initializeObjectType do this; the runtime exception builders were fixed to
+// match).
 struct ObjectBox {
     // Concrete generic identity for reflection/type validation. The dispatch
     // className remains the erased runtime class (e.g. Box).
@@ -295,8 +317,76 @@ struct ObjectBox {
     std::shared_ptr<ChannelState> channelState;
     std::string className;
     RuntimeTypeRef runtimeType;
-    std::unordered_map<std::string, Value> fields;
+    // Declared instance fields, one slot per layout field (see above). May be
+    // shorter than the layout for a box that has not been fully initialised;
+    // objectFieldAccess grows it on demand.
+    std::vector<Value> fields;
+    // Out-of-layout field names (see the struct comment).
+    std::unordered_map<std::string, Value> extraFields;
 };
+
+// ---------------------------------------------------------------------------
+// Field access on the flat layout. Every read/write of an object's declared
+// fields goes through these so the storage rule has exactly one statement:
+// a name resolves through the box's own runtimeType when the layout declares
+// it, and through extraFields otherwise.
+// ---------------------------------------------------------------------------
+
+// Layout slot for `name`, or nullopt when the name is not a declared
+// instance field of this box's runtime class (including boxes without one).
+[[nodiscard]] inline std::optional<std::size_t> objectFieldSlot(const ObjectBox& box,
+                                                                const std::string& name) {
+    if (!box.runtimeType) return std::nullopt;
+    const auto it = box.runtimeType->fieldIndex.find(name);
+    if (it == box.runtimeType->fieldIndex.end()) return std::nullopt;
+    return it->second;
+}
+
+// Read. Returns nullptr when the name carries no value: a declared field of a
+// box that was never materialised, or an out-of-layout name that was never
+// written. Callers translate that to their historical "absent" behaviour
+// (the VM's GetField pushes nil, the natives throw or default).
+[[nodiscard]] inline const Value* objectFieldLookup(const ObjectBox& box, const std::string& name) {
+    if (const auto slot = objectFieldSlot(box, name)) {
+        if (*slot < box.fields.size()) return &box.fields[*slot];
+        return nullptr;
+    }
+    const auto it = box.extraFields.find(name);
+    return it == box.extraFields.end() ? nullptr : &it->second;
+}
+
+// Read with the historical `map::at` contract: throws std::out_of_range for a
+// name that carries no value, which the VM surfaces as a catchable
+// RuntimeError exactly like the old `fields.at(name)` did.
+[[nodiscard]] inline const Value& objectFieldRequire(const ObjectBox& box, const std::string& name) {
+    if (const Value* found = objectFieldLookup(box, name)) return *found;
+    throw std::out_of_range("object field not found: " + name);
+}
+
+// Write. Declared names land in the flat vector (growing it when needed);
+// everything else lands in extraFields. See the ObjectBox comment for the
+// runtimeType-before-first-write invariant.
+inline Value& objectFieldAccess(ObjectBox& box, const std::string& name) {
+    if (const auto slot = objectFieldSlot(box, name)) {
+        if (box.fields.size() <= *slot) box.fields.resize(*slot + 1);
+        return box.fields[*slot];
+    }
+    return box.extraFields[name];
+}
+
+// Visit every value the box holds, declared fields first in layout order
+// (the deterministic printing/tracing order), then out-of-layout names.
+template <typename Visitor>
+inline void objectFieldForEach(const ObjectBox& box, Visitor&& visit) {
+    const std::size_t count = box.runtimeType
+        ? std::min(box.fields.size(), box.runtimeType->instanceFieldCount)
+        : 0;
+    if (box.runtimeType) {
+        for (std::size_t i = 0; i < count; ++i)
+            visit(box.runtimeType->instanceFieldNames[i], box.fields[i]);
+    }
+    for (const auto& [name, value] : box.extraFields) visit(name, value);
+}
 
 struct AtomicRefState {
     std::mutex mutex;

@@ -44,7 +44,7 @@ void programGraph() {
         program.staticStorage->fields["Example.items"] = slot;
         auto failure = std::make_shared<StaticFieldState>();
         auto exception = makeGCObject();
-        exception->fields["message"] = std::string("cached initializer failure");
+        objectFieldAccess(*exception, "message") = std::string("cached initializer failure");
         failure->failure = StoredException(std::make_exception_ptr(ZlThrownException(exception)));
         program.staticStorage->fields["Example.bad"] = failure;
         GCRoots parked;
@@ -76,7 +76,7 @@ void programGraph() {
         auto callback = std::make_shared<StaticFieldState>();
         callback->value = closure;
         program.staticStorage->fields["Example.callback"] = callback;
-        exception->fields["callback"] = closure; // failure -> closure -> program -> failure
+        objectFieldAccess(*exception, "callback") = closure; // failure -> closure -> program -> failure
     }
     auto deadProgram = gc.collect({});
     require(deadProgram.stats.reclaimed == 4 && deadProgram.stats.tracked == 0,
@@ -104,14 +104,14 @@ void pendingOperation() {
 void inFlightFailure() {
     auto& gc = TracingGC::instance();
     auto object = makeGCObject();
-    object->fields["message"] = std::string("unwinding");
+    objectFieldAccess(*object, "message") = std::string("unwinding");
     try {
         throw ZlThrownException(object);
     } catch (const ZlThrownException& error) {
         auto collection = gc.collect({});
         require(collection.stats.reachable == 1, "in-flight exception was not a root");
         collection.reclaim();
-        require(std::get<std::string>(error.value()->fields.at("message")) == "unwinding", "unwinding lost its payload");
+        require(std::get<std::string>(objectFieldRequire(*error.value(), "message")) == "unwinding", "unwinding lost its payload");
     }
     auto released = gc.collect({});
     require(released.stats.reclaimed == 1, "in-flight exception pin outlived its exception");
@@ -121,7 +121,7 @@ void inFlightFailure() {
 void taskDiagnostic() {
     auto& gc = TracingGC::instance();
     auto exception = makeGCObject(); // deliberately retired before its task owner
-    exception->fields["message"] = std::string("original task failure");
+    objectFieldAccess(*exception, "message") = std::string("original task failure");
     auto task = std::make_shared<RuntimeTaskState>("int");
     task->start();
     task->fail(std::make_exception_ptr(ZlThrownException(exception)));

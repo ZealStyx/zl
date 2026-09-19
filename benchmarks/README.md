@@ -10,3 +10,21 @@ Typical flow from a built checkout:
 4. Run `tests/zl/valid/native/benchmarks/Benchmark.zl` through the VM and record its wall time separately.
 
 Performance thresholds are intentionally not hard-coded because they are host-dependent. A regression is semantic failure or an unexpected optimizer result, not a fixed machine-time number.
+
+## Allocation benchmark (memory-domains Phase 0)
+
+`AllocationBenchmark.zl` + `run_allocation_benchmark.sh` measure what the
+Phase 0 gate of `docs/memory-domains.md` §10 asks for: `new` throughput,
+collect share, and per-process peak RSS for object workloads (1- and
+8-field classes, keep-1e5/1e6 and churn-1e6), one process per workload so
+`wait4`'s `ru_maxrss` is the memory cost of exactly that workload.
+
+```text
+benchmarks/run_allocation_benchmark.sh build/zl_language <tag>
+# -> table + benchmarks/results/allocation_<tag>.json
+```
+
+The "before" rows in the §10.1 table came from a worktree of the pre-Phase-0
+commit with only the measurement counters and `GC.stats` back-ported; the
+raw rows for both sides are kept in `results/allocation_{before,after}{,2}.json`.
+Same convention as above: no hard-coded thresholds, host-dependent numbers.

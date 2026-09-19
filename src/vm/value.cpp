@@ -117,9 +117,9 @@ std::string formatValueInner(const Value& v, bool quoteStrings,
             // than the data – so print the payload directly, mirroring Serialize.encode's
             // look-through (P2-1 fix).
             if (held->className == "List" || held->className == "Map" || held->className == "Set") {
-                auto it = held->fields.find("__native");
-                if (it != held->fields.end()) {
-                    std::string inner = formatValueInner(it->second, true, active, depth + 1);
+                const Value* nativeField = objectFieldLookup(*held, "__native");
+                if (nativeField != nullptr) {
+                    std::string inner = formatValueInner(*nativeField, true, active, depth + 1);
                     active.erase(held.get());
                     return inner;
                 }
@@ -127,25 +127,33 @@ std::string formatValueInner(const Value& v, bool quoteStrings,
             std::string s = held->className + " { ";
             bool first = true;
             if (held->runtimeType && held->runtimeType->isDataType) {
-                for (const auto& field : held->runtimeType->fields) {
-                    auto it = held->fields.find(field.name);
-                    if (it == held->fields.end()) continue;
+                // Layout order (the flat slot order), which is also the
+                // declaration order both pipelines record. Static fields have
+                // no instance slot and are skipped, as before.
+                const auto& layout = *held->runtimeType;
+                for (const auto& field : layout.fields) {
+                    if (field.isStatic) continue;
+                    const Value* value = objectFieldLookup(*held, field.name);
+                    if (value == nullptr) continue;
                     if (!first) s += ", ";
                     s += field.name + ": ";
-                    if (std::holds_alternative<std::string>(it->second)) {
-                        s += "\"" + escapeRecordString(std::get<std::string>(it->second)) + "\"";
+                    if (std::holds_alternative<std::string>(*value)) {
+                        s += "\"" + escapeRecordString(std::get<std::string>(*value)) + "\"";
                     } else {
-                        s += formatValueInner(it->second, true, active, depth + 1);
+                        s += formatValueInner(*value, true, active, depth + 1);
                     }
                     first = false;
                 }
             } else {
                 s = held->className + "{";
-                for (const auto& [k, fieldValue] : held->fields) {
+                // Declared fields print in layout order (deterministic; the
+                // old per-object map had no guaranteed order), then any
+                // out-of-layout names the box carries.
+                objectFieldForEach(*held, [&](const std::string& k, const Value& fieldValue) {
                     if (!first) s += ", ";
                     s += k + ": " + formatValueInner(fieldValue, true, active, depth + 1);
                     first = false;
-                }
+                });
             }
             active.erase(held.get());
             return s + "}";
@@ -427,19 +435,33 @@ bool recordValuesEqual(const ObjectRef& a, const ObjectRef& b,
     const auto key = std::make_pair(a.get(), b.get());
     if (!seen.insert(key).second) return true;
 
-    if (a->fields.size() != b->fields.size()) return false;
-    for (const auto& [name, av] : a->fields) {
-        auto it = b->fields.find(name);
-        if (it == b->fields.end()) return false;
-        if (isNumericValue(av) && isNumericValue(it->second)) {
+    const std::size_t aCount = a->fields.size() + a->extraFields.size();
+    const std::size_t bCount = b->fields.size() + b->extraFields.size();
+    if (aCount != bCount) return false;
+    // Name-based, like the old map scan: two same-named records from
+    // different modules can carry different layouts, so the pair is compared
+    // by field name and each side is resolved through its own layout.
+    auto compareField = [&](const std::string& name, const Value& av) {
+        const Value* bv = objectFieldLookup(*b, name);
+        if (bv == nullptr) return false;
+        if (isNumericValue(av) && isNumericValue(*bv)) {
             // Use the public numeric equality rule here too, so nested record
             // fields preserve special-value semantics such as NaN != NaN.
-            if (!valuesEqual(av, it->second)) return false;
-        } else if (std::holds_alternative<ObjectRef>(av) && std::holds_alternative<ObjectRef>(it->second)) {
-            if (!recordValuesEqual(std::get<ObjectRef>(av), std::get<ObjectRef>(it->second), seen, depth + 1)) return false;
-        } else if (!valuesEqual(av, it->second)) {
-            return false;
+            return valuesEqual(av, *bv);
         }
+        if (std::holds_alternative<ObjectRef>(av) && std::holds_alternative<ObjectRef>(*bv)) {
+            return recordValuesEqual(std::get<ObjectRef>(av), std::get<ObjectRef>(*bv), seen, depth + 1);
+        }
+        return valuesEqual(av, *bv);
+    };
+    if (a->runtimeType) {
+        const std::size_t count = std::min(a->fields.size(), a->runtimeType->instanceFieldCount);
+        for (std::size_t i = 0; i < count; ++i) {
+            if (!compareField(a->runtimeType->instanceFieldNames[i], a->fields[i])) return false;
+        }
+    }
+    for (const auto& [name, av] : a->extraFields) {
+        if (!compareField(name, av)) return false;
     }
     return true;
 }
@@ -463,11 +485,13 @@ std::size_t recordHash(const ObjectRef& obj, std::unordered_set<const ObjectBox*
     }
     std::size_t seed = std::hash<std::string>{}(obj->className);
     if (obj->runtimeType && obj->runtimeType->isDataType) {
+        // Layout order, as before - static fields have no instance slot.
         for (const auto& field : obj->runtimeType->fields) {
-            auto it = obj->fields.find(field.name);
-            if (it == obj->fields.end()) continue;
+            if (field.isStatic) continue;
+            const Value* value = objectFieldLookup(*obj, field.name);
+            if (value == nullptr) continue;
             seed = hashCombineValue(seed, std::hash<std::string>{}(field.name));
-            seed = hashCombineValue(seed, valueHashImpl(it->second, seen, depth + 1));
+            seed = hashCombineValue(seed, valueHashImpl(*value, seen, depth + 1));
         }
     }
     return seed;

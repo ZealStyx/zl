@@ -199,6 +199,7 @@ CompilationPlan buildCompilationPlan(const Program& program) {
         runtimeType->fields = merged.fields;
         runtimeType->methods = merged.methods;
         runtimeType->constructors = merged.constructors;
+        buildRuntimeFieldIndex(*runtimeType);
         merged.runtimeType = std::move(runtimeType);
 
         plan.classReflection[className] = std::move(merged);

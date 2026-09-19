@@ -410,6 +410,75 @@ The point is not that a pool beats a collector; it is that the *language*
 feature has to beat the *implementation* improvements from Phase 0, because
 otherwise the complexity belongs in the runtime, not in the source language.
 
+### 10.1 Phase 0 baseline, measured 2026-09-19
+
+Workload: `benchmarks/AllocationBenchmark.zl`, driven one process per
+configuration by `benchmarks/run_allocation_benchmark.sh` (per-child peak RSS
+via `wait4`). Two runs per configuration, averaged. Machine: 2-core x86-64,
+3.9 GB RAM, Linux, g++ 12, `-O2` (`Release`), single-threaded VM.
+
+- *keep*: allocate N objects (N ∈ {1e5, 1e6}) and retain them all in a `List`;
+  the live heap grows to N, so peak RSS is the memory cost of N kept objects.
+- *churn*: allocate 1e6 objects in 1024-object batches and drop each batch;
+  the live heap stays ~1 KB, so the whole allocate→trace→sweep→recycle cycle
+  is what is timed.
+
+"Before" is `3f1a737` (pre-Phase 0) plus the measurement counters and
+`GC.stats` only — no flat fields, no free list. "After" is this branch:
+(a) flat `ObjectBox::fields` + per-class `name → index`, (b) recycled-box free
+lists in `Collection::reclaim()`, (c) the existing `allocationThreshold_`
+growth policy (present in the baseline; verified, not added).
+
+| workload | alloc/s before → after | Δ | collect share before → after | peak RSS before → after | Δ |
+| --- | --- | --- | --- | --- | --- |
+| one-field, keep 1e5 | 133.4k → 135.4k | +2% | 1.1% → 1.1% | 80.9 MB → 66.5 MB | −16% |
+| one-field, keep 1e6 | 129.5k → 120.8k | −7% | 4.3% → 4.2% | 682.3 MB → 559.3 MB | −18% |
+| one-field, churn 1e6 | 146.8k → 141.5k | −4% | 1.4% → 1.8% | 18.4 MB → 18.3 MB | −3% |
+| eight-field, keep 1e5 | 53.6k → 55.3k | +3% | 1.1% → 0.7% | 153.8 MB → 98.0 MB | −36% |
+| eight-field, keep 1e6 | 53.8k → 55.2k | +2% | 4.2% → 2.8% | 1410.5 MB → 874.4 MB | −38% |
+| eight-field, churn 1e6 | 56.8k → 55.2k | −3% | 0.9% → 0.9% | 19.0 MB → 17.8 MB | −6% |
+
+Collections per run are unchanged on both sides (4 / 7 for keep, 920 for
+churn); the threshold grows to ~2× the live heap, which is why keep 1e6 costs
+only 7 collections. Peak RSS per kept object (Δ between keep 1e5 and keep
+1e6): **one-field 703 B → 574 B (−18%), eight-field 1464 B → 905 B (−38%)**.
+In churn, the free list sees 1,001,377 of 999,424 measured-phase hits
+(`reused` from `GC.stats()`); the small surplus is the 16,384-box warm-up
+pool drained during the first measured batches. Raw rows:
+`benchmarks/results/allocation_{before,after}{,2}.json`.
+
+Reading the table:
+
+- **The memory win is (a), the flat fields.** The per-object
+  `std::unordered_map<std::string, Value>` and its string keys are the
+  130–560 B that keep-RSS loses per object, and it is the same walk that makes
+  the eight-field keep collect share drop 4.2% → 2.8% (tracing a vector, not
+  a hash table).
+- **Throughput is neutral.** Every Δ is inside this machine's two-run
+  variance (keep 1e5 swings ±25% wall time between runs); the one −7%
+  (one-field keep 1e6) does not repeat run-over-run. Nothing here buys
+  allocation *speed*.
+- **Recycling (b) is not a throughput win on this corpus either.** Churn
+  throughput is flat (−4% / −3%) even though the pool hit rate is ~100%:
+  the per-allocation cost is the registry `push_back`, the refcount and the
+  safepoint budget, not the `make_unique`/destructor of the box. What (b)
+  does is remove the per-box heap traffic, which shows up only as the −0.4 pp
+  extra collect share churn pays for pool maintenance.
+- **(c) was already there.** The growth policy ships in the baseline; the
+  table measures with it on both sides, which is what makes the "before"
+  row fair.
+
+**Gate verdict.** (a)+(b)+(c) buys −16…−38% memory per kept object and a
+cheaper sweep of wide objects, at neutral throughput. What the numbers do
+not touch is exactly what domains exist for: `owned` still frees nothing
+until the collector's schedule notices (P2-8's original complaint), and the
+4–7% collect share of keep 1e6 is the price of 1e6 live objects — a
+region-scoped graph pays that on every exit, eager or not, until a domain
+reclaims at scope exit. A Phase 5 `pool` must beat a 100%-hit free list plus
+a growth threshold on *this* corpus; this table is the bar, and on the
+corpus as written, recycling alone cannot claim the throughput win — the
+arena's eager release, not the pool, is the part with a number to chase.
+
 ## 11. What this deliberately does not do
 
 - No raw bytes, pointer arithmetic, or `unsafe`. A domain that cannot see an
@@ -458,6 +527,11 @@ The draft's categories were right; here is where they live.
   `research/corpus/Ownership.zl`, is referenced by no build, test or script. So
   Phase 0 adds that fixture pair first: everything downstream is checked with
   the language's own tests, and today there are none to extend.
+  (Done 2026-09-19: `tests/zl/valid/ownership_tests/OwnedBorrowShared.zl`
+  covers `gc`/`owned`/`borrow`/`shared` in one verified program; the rejects
+  `tests/zl/invalid/ownership_tests/UseAfterMove.zl` and
+  `MoveWhileBorrowed.zl` pin the two dataflow diagnostics; the example is
+  `examples/advanced/OwnershipBasics.zl` in the byte-compared gate.)
 - MIR: `tests/mir_region_tests.cpp` (new `zl-mir-region-tests` target, declared
   explicitly in `CMakeLists.txt` beside `zl-mir-ownership-tests`), asserting
   `Alloc{domain}`/`EnterRegion`/`ExitRegion`/`Promote` ordering, and that no

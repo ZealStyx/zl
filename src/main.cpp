@@ -458,13 +458,13 @@ int reportRunException(std::exception_ptr ptr) {
     } catch (const zl::ZlThrownException& e) {
         std::string message = e.what();
         if (e.value()) {
-            auto it = e.value()->fields.find("message");
-            if (it != e.value()->fields.end() && std::holds_alternative<std::string>(it->second)) {
-                message = std::get<std::string>(it->second);
+            const auto* it = zl::objectFieldLookup(*e.value(), "message");
+            if (it != nullptr && std::holds_alternative<std::string>(*it)) {
+                message = std::get<std::string>(*it);
             }
-            auto traceIt = e.value()->fields.find("stackTrace");
-            if (traceIt != e.value()->fields.end() && std::holds_alternative<std::string>(traceIt->second)) {
-                const auto& trace = std::get<std::string>(traceIt->second);
+            const auto* traceIt = zl::objectFieldLookup(*e.value(), "stackTrace");
+            if (traceIt != nullptr && std::holds_alternative<std::string>(*traceIt)) {
+                const auto& trace = std::get<std::string>(*traceIt);
                 if (!trace.empty()) {
                     std::cerr << "runtime error: " << message << "\n" << trace << "\n";
                     return 1;

@@ -1,0 +1,183 @@
+// Phase 0 allocation benchmark (docs/memory-domains.md §9/§10).
+//
+// Measures what the memory-domains Phase 0 gate asks for: `new` throughput,
+// GC pressure (collection count and cumulative collect time), and the live
+// heap high-water mark, for object workloads with 1 and 8 fields. Peak RSS
+// is measured per process by the driver (benchmarks/run_allocation_benchmark.sh),
+// which also selects the workload through ZL_BENCH_CONFIG so one process
+// measures exactly one workload:
+//
+//   ZL_BENCH_CONFIG=one_keep_100000    one-field class, 1e5 kept alive
+//   ZL_BENCH_CONFIG=one_keep_1000000   one-field class, 1e6 kept alive
+//   ZL_BENCH_CONFIG=one_churn_1000000  one-field class, 1e6 allocated and dropped
+//   ZL_BENCH_CONFIG=eight_keep_100000  eight-field class, 1e5 kept alive
+//   ZL_BENCH_CONFIG=eight_keep_1000000 eight-field class, 1e6 kept alive
+//   ZL_BENCH_CONFIG=eight_churn_1000000 eight-field class, 1e6 allocated and dropped
+//   ZL_BENCH_CONFIG=all                keep@1e5 and churn@1e6 for both classes
+//
+// Output is one parseable line per measured phase:
+//
+//   bench config=<one|eight> phase=<keep|churn> n=<count> wall_ms=<ms>
+//         alloc=<new boxes> collections=<collect runs> collect_ms=<total trace+sweep ms>
+//         reused=<boxes from the free list> tracked=<live at phase end> peak=<lifetime high water>
+//
+// `alloc`/`collections`/`collect_ms`/`reused` are deltas over the phase; a
+// short unmeasured warm-up churn precedes every run so the allocator, the
+// collection threshold and the recycled-box free list are in steady state
+// before the first measured line.
+
+import zl.time.Time
+
+class BenchOne {
+    private int a
+    func BenchOne(): void {
+        this.a = 1
+    }
+    public func probe(): int {
+        return this.a
+    }
+}
+
+class BenchEight {
+    private int a
+    private int b
+    private int c
+    private int d
+    private int e
+    private int f
+    private int g
+    private int h
+    func BenchEight(): void {
+        this.a = 1
+        this.b = 2
+        this.c = 3
+        this.d = 4
+        this.e = 5
+        this.f = 6
+        this.g = 7
+        this.h = 8
+    }
+    public func probe(): int {
+        return this.a + this.b + this.c + this.d + this.e + this.f + this.g + this.h
+    }
+}
+
+class AllocationBenchmark {
+    // Set after the unmeasured warm-up so warm-up allocations do not emit
+    // their own `bench` lines.
+    static bool measuring = false
+
+    // --- measurement helpers ------------------------------------------------
+
+    static func stats(): map<string, int> {
+        return GC.stats()
+    }
+
+    static func counter(map<string, int> m, string key): int {
+        return Collection.mapGet(m, key)
+    }
+
+    static func report(string config, string phase, int n, int wallMs, map<string, int> before, map<string, int> after): void {
+        if (!AllocationBenchmark.measuring) { return }
+        log("bench config=" + config +
+            " phase=" + phase +
+            " n=" + n +
+            " wall_ms=" + wallMs +
+            " alloc=" + (AllocationBenchmark.counter(after, "allocations") - AllocationBenchmark.counter(before, "allocations")) +
+            " collections=" + (AllocationBenchmark.counter(after, "collections") - AllocationBenchmark.counter(before, "collections")) +
+            " collect_ms=" + (AllocationBenchmark.counter(after, "collectMs") - AllocationBenchmark.counter(before, "collectMs")) +
+            " reused=" + (AllocationBenchmark.counter(after, "reused") - AllocationBenchmark.counter(before, "reused")) +
+            " tracked=" + AllocationBenchmark.counter(after, "tracked") +
+            " peak=" + AllocationBenchmark.counter(after, "peakTracked"))
+    }
+
+    // --- workloads ----------------------------------------------------------
+
+    // Keep every object alive: a growing live heap. `wall` covers the whole
+    // allocation loop; the phase ends with `tracked` objects live, so the
+    // driver's per-process peak RSS is the memory cost of that many objects.
+    static func keepOne(int n): void {
+        var before = AllocationBenchmark.stats()
+        var start = Time.monotonicMillis()
+        var keep = new List<BenchOne>()
+        for i in 0..n {
+            keep.push(new BenchOne())
+        }
+        var wall = Time.elapsedMillisSince(start)
+        AllocationBenchmark.report("one", "keep", n, wall, before, AllocationBenchmark.stats())
+    }
+
+    static func keepEight(int n): void {
+        var before = AllocationBenchmark.stats()
+        var start = Time.monotonicMillis()
+        var keep = new List<BenchEight>()
+        for i in 0..n {
+            keep.push(new BenchEight())
+        }
+        var wall = Time.elapsedMillisSince(start)
+        AllocationBenchmark.report("eight", "keep", n, wall, before, AllocationBenchmark.stats())
+    }
+
+    // Allocate and drop in 1024-object batches: a steady churn that triggers
+    // a collection every few batches (the threshold is 2x the small live
+    // heap), so the whole allocate-destroy-allocate cycle is what is timed.
+    static func churnOne(int n): void {
+        var before = AllocationBenchmark.stats()
+        var start = Time.monotonicMillis()
+        for i in 0..(n / 1024) {
+            var batch = new List<BenchOne>()
+            for j in 0..1024 {
+                batch.push(new BenchOne())
+            }
+        }
+        var wall = Time.elapsedMillisSince(start)
+        AllocationBenchmark.report("one", "churn", n, wall, before, AllocationBenchmark.stats())
+    }
+
+    static func churnEight(int n): void {
+        var before = AllocationBenchmark.stats()
+        var start = Time.monotonicMillis()
+        for i in 0..(n / 1024) {
+            var batch = new List<BenchEight>()
+            for j in 0..1024 {
+                batch.push(new BenchEight())
+            }
+        }
+        var wall = Time.elapsedMillisSince(start)
+        AllocationBenchmark.report("eight", "churn", n, wall, before, AllocationBenchmark.stats())
+    }
+
+    // --- driver -------------------------------------------------------------
+
+    static func warmUp(): void {
+        // Unmeasured: steady-state the allocator, the collection threshold
+        // and the free list before the first measured phase.
+        AllocationBenchmark.churnOne(8192)
+        AllocationBenchmark.churnEight(8192)
+    }
+
+    func main(): void {
+        var cfg = System.envOr("ZL_BENCH_CONFIG", "all")
+        AllocationBenchmark.warmUp()
+        AllocationBenchmark.measuring = true
+        if cfg == "all" || cfg == "one_keep_100000" {
+            AllocationBenchmark.keepOne(100000)
+        }
+        if cfg == "all" || cfg == "eight_keep_100000" {
+            AllocationBenchmark.keepEight(100000)
+        }
+        if cfg == "one_keep_1000000" {
+            AllocationBenchmark.keepOne(1000000)
+        }
+        if cfg == "eight_keep_1000000" {
+            AllocationBenchmark.keepEight(1000000)
+        }
+        if cfg == "all" || cfg == "one_churn_1000000" {
+            AllocationBenchmark.churnOne(1000000)
+        }
+        if cfg == "all" || cfg == "eight_churn_1000000" {
+            AllocationBenchmark.churnEight(1000000)
+        }
+        log("bench done")
+    }
+}
