@@ -1,5 +1,92 @@
 # Development Checkpoints
 
+## 2026-09-20 - PF-2 closed: the optimiser now pays for itself, measured
+
+The research report's finding that the default optimiser "costs ~44 ms and buys
+nothing" inverted with P1-9, and the re-measurement is written into
+[research/report.md](../research/report.md) sections 2.9 (new), 3 and 5. On the
+same 16 positive programs: the `ms_opt` stage drops from a 43.9 ms median per
+program to a 1.9 ms median (76 ms total across the corpus) because
+`eliminate-dead-functions` runs first and the eight remaining passes, the
+verifier and the emitter all process an ~80% smaller module; end-to-end
+`ms_wall` medians are 21.5 ms default against 77.9 ms with the pass removed and
+9.6 ms for the reference path, so the pipeline/reference compile-time ratio
+falls from the reported 8.2x to 2.2x. PF-2's done-when asked for a time budget
+or a transform that pays for itself on the corpus; the second branch is met
+with margin, and the budget branch is explicitly left un-built - the corpus
+numbers argue a pass that deletes most of the module *is* the time budget.
+Bytecode execution speed (section 2.4's finding) is unchanged by this and stays
+open with the native line (P1-6, PF-3).
+
+## 2026-09-20 - P1-10: the stabilization gate closes - two fixtures, two written arguments
+
+The four leftovers named by the 2026-09-08 stabilization update each get a
+verdict in [examples/REVIEW.md](../examples/REVIEW.md), and two of them finally
+get the fixture the original reports lacked. **Channels**: the cancel path
+removes a waiter from its queue, every rendezvous pops past terminal tasks, and
+a blocking sync operation whose only possible partner is gone raises the
+deadlock error instead of spinning - re-evaluated every pump round. That
+contract is now pinned by
+`tests/zl/valid/concurrency_regressions/ChannelCancelledWaiters.zl`: a
+cancelled `receiveAsync` must not swallow the next send; a cancelled queued
+`sendAsync` must not deliver later, and the receive chasing it must terminate
+in the error, never a hang. **Exceptions/Shared**: `Shared<T>.withLock` guards
+the cell with an RAII lock, so a throwing body unwinds through the unlock -
+but only the `Mutex` variant had a fixture for that since O5, while the cell
+variant is the one the backend's materialised dispatch runs.
+`tests/zl/valid/concurrency_regressions/SharedLockThrowRelease.zl` pins
+propagation-once, re-lockability after one throw, and the same for two. **FFI
+callbacks** and **native-resource finalizers** needed arguments, not code:
+callback quiescence is structural (process-local tokens, drain-on-close
+lifetimes coupled to registry entries, token validation before dispatch), the
+six `zl-native-ffi-lifetime-tests` cases already pin the lifetime algebra, and
+re-entry participates in the GC stop protocol; native resources have *no* GC
+path at all - release happens only as explicit boundary consumption - so the
+blocking-finalizer family is absent by construction, with the resulting leak
+stated as the accepted trade. Both write-ups live in
+[docs/native.md](native.md). Regression corpus 91 -> 93 fixtures, `all` modes
+green; no runtime or compiler code changed.
+
+## 2026-09-20 - P2-5: the `zlpkg` registry question gets an answer, not a backlog line
+
+`docs/packages.md` said "no registry or index exists yet", which invites every
+reader to price a registry as the next feature. The decision is now written
+down as a section ("No registry - what it would replace, and what does
+instead"): a registry is a hosted service - a name index plus curation - and
+stays outside this repository. The toolchain scope ends at deterministic fetch,
+and the parts a registry usually carries are re-pointed at what `zlpkg` already
+does: the manifest states the location and the dependency key must match the
+package's own `[package] name`, so a wrong URL is a loud conflict rather than
+a wrong package; `zlpkg.lock` pins commits, so git's object graph is the
+immutable store; the declared exact `version` is verified, so versions stay
+identity and not selection - no ranges, because range resolution is precisely
+the part that needs a hosted index to be trustworthy. The format keeps the
+smallest possible future door open: a registry would add one key resolving a
+name to the same `{ git, ref, version }` triple the resolver already consumes;
+nothing commits to building it. Dev-dependencies and workspaces stay out for
+the same stated-scope reason. Documentation-only; no resolver code changed.
+
+## 2026-09-20 - PF-1 closed: measured bytecode size, -86.6% against the reference
+
+The bytecode-size finding from the research report (section 2.3: MIR output
+~42% larger than the reference compiler after optimisation) is retired by
+[research/report.md section 2.9](../research/report.md), measured on the same
+16 positive programs with the same `--artifact-stats` ledger after P1-9
+shipped: total 3,246,480 bytes of reference output against 433,480 through the
+pipeline (-86.6%); the median program goes from a 201 KB reference floor to
+7 KB. Two effects compose, one old and one new: the reference compiler emits
+every stdlib function for every program and the MIR backend emits only what the
+module keeps - and P1-9 made that keep set provable, so the dead remainder is
+now deleted from the chunk instead of shipped. The single program still larger
+than reference (+56.7%, `Closures.zl`) is the documented refusal case: an
+unpinned function-value call leaves the graph incomplete, and a refusal keeps
+the whole module - correctness before size, as
+[docs/mir-optimizer.md](mir-optimizer.md#function-removal) argues. The
+wall-time half of the PF-1 write-up is untouched by this - that is the native
+performance line of work (P1-6, PF-3), and section 2.4's numbers stand until
+that work remeasures them. No code changed in the compiler for this entry; the
+deliverable is the measurement and the report section.
+
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
 ## 2026-09-20 - the dead-function boundary: a module pass, its proof, and an 81% smaller bytecode (P1-9)

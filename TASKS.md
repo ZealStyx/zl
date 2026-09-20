@@ -35,11 +35,12 @@ Priorities: **P0** produces a wrong result or refuses a valid program ·
 
 ## Start here
 
-Nothing leads on value-to-risk right now; what remains is the two P1 items
-(native execution driver P1-6, stabilization fixtures P1-10) and PF-3, which
-follows it. P2-5 closed 2026-09-20 with the registry scope decision now written
-into [docs/packages.md](docs/packages.md); PF-1 closed the same day at the
-measured numbers in [research/report.md §2.9](research/report.md).
+Only the native line remains: P1-6 (execution driver + one value class in the
+subset) and PF-3, which follows it. Closed 2026-09-20: P1-10 (stabilization
+gate - two fixtures, two written arguments, verdict in the
+[examples review](examples/REVIEW.md)), P2-5 (registry scope in
+[docs/packages.md](docs/packages.md)), and PF-1 + PF-2 at the re-measured
+numbers in [research/report.md §2.9](research/report.md).
 
 ---
 
@@ -55,28 +56,11 @@ closed 2026-09-18 while writing the `Condition` fixture below) - are in
 
 ## P1 - promised capability, or a daily gap
 
-### P1-10 · Stabilization leftovers ([REVIEW.md:83-86](examples/REVIEW.md))
-
-FFI callback quiescence and ownership; channel cancellation and progress
-guarantees; blocking native-resource finalizers; the remaining exception and
-`Shared` audit.
-
-**Done when** each has a fixture that would have caught the original report, or a
-written argument that the behaviour is correct as it stands.
-
 ---
 
 ## Performance ([research/report.md](research/report.md))
 
 Measured, not estimated. Highest-value gap if you care about speed.
-
-### PF-2 · The optimiser costs ~44 ms and buys nothing at runtime
-
-No loop transforms; the default compile is ~8× the reference path, and for small
-programs the fixed ~44 ms dominates (§2.2, §2.4, §5.2).
-
-**Done when** there is either a time budget (scale passes to program size) or a
-transform that measurably pays for itself on the corpus.
 
 ### PF-3 · Native is not a performance path yet
 
@@ -119,6 +103,30 @@ then deleted - [docs/changelog.md](docs/changelog.md) is the permanent record.
   `zlpkg.lock`'s pinned commits play the artifact-store role; exact versions stay
   identity-not-selection, so ranges stay out; the future-registry-shaped hole is
   one key in the inline-table grammar. No code changed.
+
+- [x] **PF-2 · The optimiser costs ~44 ms and buys nothing at runtime** (2026-09-20) -
+  the second done-when branch is met with margin: `eliminate-dead-functions` is a
+  transform that pays for itself on the corpus, measured - it turns the optimiser
+  from the dominant compile stage (43.9 ms median) into the cheapest (~5 ms median,
+  76 ms across 16 programs), the default pipeline from 8.2x to 2.2x the reference
+  wall time, and pays 87% of artifact size on top; compile *and* size now favor the
+  optimized path. No time budget was needed, so the first branch (size- or
+  time-bounded default) is explicitly not taken. Update written into
+  [research/report.md](research/report.md) sections 2.9, 3 and 5.
+
+- [x] **P1-10 · Stabilization leftovers** (2026-09-20) - all four closed, each at a
+  fixture or a written argument, verdict recorded in
+  [examples/REVIEW.md](examples/REVIEW.md). Channels: `ChannelCancelledWaiters.zl`
+  pins both cancellation/progress directions on one thread (a cancelled receiver must
+  not swallow the next send; an unmatchable receive must end in the deadlock error,
+  not a hang). Exceptions/Shared: `SharedLockThrowRelease.zl` pins release-on-throw,
+  single propagation and cell reuse for the `Shared<T>.withLock` variant, the
+  cell-side counterpart of the O5 `MutexLocks.zl` pin. FFI callbacks: quiescence is
+  structural (registry-coupled drain-on-close lifetimes, token lookup before
+  dispatch) and was already fixture-pinned six-ways by `zl-native-ffi-lifetime-tests`.
+  Native-resource finalizers: none exist on the GC path - release is explicit
+  boundary consumption only - and the accepted leak-instead-of-block trade is now
+  argued in [docs/native.md](docs/native.md). No runtime code changed.
 
 - [x] **P1-9 · Reachability is a report; nothing deletes dead code** (2026-09-20) -
   `eliminate-dead-functions` ships as the framework's first module pass. It deletes
