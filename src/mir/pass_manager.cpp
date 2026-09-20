@@ -450,12 +450,38 @@ OptimizationReport PassManager::run(Module& module, const OptimizationOptions& o
             // A module pass runs once per iteration, over the whole module.
             if (pass->isModulePass()) {
                 auto* modulePass = static_cast<ModulePass*>(pass.get());
+                // The module-wide shape before and after, so a module pass
+                // appears in the report with real numbers rather than zeros -
+                // `instructionsRemoved()` and the `--mir-opt-check` trace both
+                // read these fields, and a whole-module rewrite that shows up
+                // as "0 -> 0" would hide exactly the change it should be
+                // accountable for.
+                std::size_t instructionsBefore = 0;
+                std::size_t blocksBefore = 0;
+                for (const Function& function : module.functions) {
+                    instructionsBefore += countInstructions(function);
+                    blocksBefore += countBlocks(function);
+                }
                 const bool changed = modulePass->runOnModule(module, analyses);
+                std::size_t instructionsAfter = instructionsBefore;
+                std::size_t blocksAfter = blocksBefore;
+                if (changed) {
+                    instructionsAfter = 0;
+                    blocksAfter = 0;
+                    for (const Function& function : module.functions) {
+                        instructionsAfter += countInstructions(function);
+                        blocksAfter += countBlocks(function);
+                    }
+                }
                 PassRunRecord record;
                 record.pass = pass->name();
                 record.function = "<module>";
                 record.iteration = iteration;
                 record.changed = changed;
+                record.instructionsBefore = instructionsBefore;
+                record.instructionsAfter = instructionsAfter;
+                record.blocksBefore = blocksBefore;
+                record.blocksAfter = blocksAfter;
                 record.note = pass->lastNote();
                 report.runs.push_back(record);
                 if (changed) {

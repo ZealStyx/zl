@@ -3,9 +3,10 @@
 // This is the only place in the optimiser that removes functions, and it does
 // so under exactly one condition: the reachability report for the module is
 // *complete*. `ReachabilityReport::complete()` is true when the module has an
-// entry point, no reachable function invokes code by name through a reflection
-// native, and every reachable call through a function value is pinned to a
-// single closure body. Those three facts are what turn "nothing calls this"
+// entry point, no reachable function touches a native of the reflection family
+// (natives that enter code by name, or read the function table as data), and
+// every reachable call through a function value is pinned to a single closure
+// body. Those three facts are what turn "nothing calls this"
 // from an absence of evidence into evidence of absence: with the call graph
 // closed, a function outside the reachable set has no way in, and removing it
 // is a size win, not a miscompile. When the report is incomplete the pass is
@@ -49,7 +50,7 @@ public:
     [[nodiscard]] std::string name() const override { return "eliminate-dead-functions"; }
     [[nodiscard]] std::string description() const override {
         return "deletes functions the reachability report proves unreachable; a no-op "
-               "unless the report is complete (entry point, no reflection invoke, every "
+               "unless the report is complete (entry point, no reachable reflection native, every "
                "function-value call pinned to one closure)";
     }
 

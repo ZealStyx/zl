@@ -191,12 +191,18 @@ answer usable for anything that would *remove* code. There are two cases where i
 refuses to be exact, and in both `ReachabilityReport::complete()` is false,
 because the reachable set is then a *lower bound* and not removal-safe:
 
-- **Reflection**: `Reflection.methodInvoke` (and the constructor and function
-  forms) calls whatever a `Method`/`Function`/`Constructor` value describes, so a
-  program that reaches one has no closed call graph. `dynamicEntryReason` names
-  the native that opened the graph. Which natives can enter code by name is
-  `nativeEntersCodeByName` in the catalog - the catalog owns what a native does,
-  so a caller cannot drift from it with a hand-written list.
+- **Reflection**: the whole reflection family, not just its invoke forms.
+  `Reflection.methodInvoke` (and the constructor and function forms) calls
+  whatever a `Method`/`Function`/`Constructor` value describes, so a program
+  that reaches one has no closed call graph; and `Type.methods()` and the
+  other enumeration natives *read the function table itself*, which the
+  emitted chunk renders into runtime type metadata - so their output is built
+  from the very list a removal would edit, and metadata a program prints is
+  program output. A module that reaches any reflection native keeps every
+  function it has. `dynamicEntryReason` names the native that opened the
+  graph. Which natives those are is `nativeIsReflective` in the catalog -
+  the catalog owns what a native does, so a caller cannot drift from it with
+  a hand-written list.
 - **Unresolved function values**: `call_indirect` (and `Task.spawn`,
   `Thread.start`, the `withLock` family) executes a value, not a named target.
   The analysis proves the edge to a single body only from SSA structure - a
@@ -210,9 +216,12 @@ because the reachable set is then a *lower bound* and not removal-safe:
   cannot change what `complete()` means - it is true only when every possible
   execution edge relevant to the module has been statically accounted for.
 
-It is a question, not a transform: nothing in this phase deletes a function, and
-`--backend native` reports the answer rather than acting on it - the numbers
-below are a one-line hello-world, which really does enter exactly one function:
+The analysis is a question, not a transform; the transform is
+`eliminate-dead-functions` in the MIR optimiser, which deletes only under the
+report's completeness proof (docs/mir-optimizer.md, "Function removal").
+`--backend native` still reports the answer rather than acting on it - the
+numbers below are a one-line hello-world, which really does enter exactly one
+function:
 
 ```text
 native: 5 function(s) compiled, 283 left to the VM

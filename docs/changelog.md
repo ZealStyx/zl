@@ -2,6 +2,81 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-20 - the dead-function boundary: a module pass, its proof, and an 81% smaller bytecode (P1-9)
+
+The reachability report had existed since its first landing with one hand
+tied: it answered "which functions can run" soundly, but nothing was allowed
+to *remove* on the strength of the answer, because reflection reaches
+functions by name. That sentence is now a theorem with a named boundary, and
+the boundary has a consumer.
+
+**The license.** `eliminate-dead-functions` (a new `ModulePass`, first of its
+kind to ship in this framework) deletes a function only when
+`ReachabilityReport::complete()` holds: the module has an entry point, no
+reachable function touches a native of the reflection family, and every
+reachable call through a function value is pinned to a single closure body.
+With the graph that closed, "outside the reachable set" is not absence of
+evidence but evidence of absence. The keep set is deliberately *wider* than
+the report licenses: every static field's initializer stays whether or not
+anything reads the field (reflection can read `Class.field` by name, and
+reading a lazy static runs its initializer), and the keep set is closed over
+every callee reference found in any kept body - not just the opcodes the
+analysis enumerates as edges. A rewrite the keep set cannot explain is a
+refusal of the whole removal, never a partial commit, and the pass states its
+reason - "reflection opens the call graph", "N unpinned function-value
+call(s)", "no entry point (library module)" - in its note rather than
+silently doing nothing.
+
+**The reflection rule got the precise edge.** It used to be that only the
+invoke forms opened the graph. But `Type.methods()` and friends read the
+function table itself, and the bytecode chunk's runtime-type metadata is
+built by iterating that very table - metadata a program prints *is* program
+output. A module that reaches any reflection native now keeps all of its
+functions. The catalog owns the predicate: `nativeEntersCodeByName` became
+`nativeIsReflective` over the contiguous family, so the analysis cannot
+drift from what a native does.
+
+**Two holes the corpus caught, and how they stay caught.** The dispatch
+matching in the analysis compared a call site's bare method name against
+functions' class-qualified declared names - never equal for a method - and
+the fallback name lookup missed the same way, so a `Shared.get()` reachable
+only through a shared-cell opcode vanished and stubbed `main`. And the
+bytecode backend *materialises* calls that no MIR instruction names:
+shared-cell access dispatches `Shared.get`/`setValue`/`withLock`, a list
+literal grows through `push`/`add`/`put`, and `new_collection` finds the
+class's empty constructor. Both sides now read one table,
+`include/zl/mir/backend_edges.hpp`, and a dispatch site that resolves to no
+candidate at all - hierarchy, supertypes, name fallback all empty - makes the
+report incomplete instead of "resolved to nothing". Fail-closed, by the
+framework's own rule 4.
+
+**What removal costs the checks.** The differential compared functions by
+index, which any removal breaks - it read renumbering as "every later
+function was renamed". `compareModules` pairs survivors by name instead: the
+optimised module must be a name-ordered subsequence of the original with
+identical signatures, the entry point is compared by name, and growth, moves,
+renames and additions stay mismatches; licensed removals land in the
+result's notes. The pass manager's module-pass records gained real
+instruction and block counts, so a whole-module rewrite shows up in
+`--mir-opt-check` traces as a number instead of `0 -> 0`.
+
+**Measured** with `--artifact-stats`, default pipeline vs the same pipeline
+minus this pass, on every loadable example plus the benchmark programs (54):
+bytecode instruction bytes 17,518,680 → 3,281,120 (**−81.3%**), chunk function
+entries 16,399 → 2,996, MIR-opt stage 3,070 ms → 616 ms. The benchmark
+corpus alone (`AllocationBenchmark.zl` + the native `Benchmark.zl`): 785,760 →
+55,680 bytes, −92.9%, functions 790 → 27. Unchanged where the boundary says
+unchanged: `Reflection.zl` at the reflection gate, `Generics.zl` and
+`Lambdas.zl` with everything live.
+
+Gates: `zl-mir-opt-tests` 196 checks including removal-and-renumber, all
+three refusal reasons, dispatch keeps (a subtype override stays, an
+un-dispatched method goes), the shared-cell and static-initializer keeps, the
+differential accepting removal but rejecting growth/addition/rename/reorder,
+and the nine-pass default ordering; 42/42 ctest; 52/52 examples
+byte-compared; 91/91 regression fixtures; native gate; the static
+`tools/mir_opt_check_all.sh` sweep over examples and stdlib.
+
 ## 2026-09-20 - `zl-bind` binds C structs field by field against a typed schema (P2-7)
 
 `docs/native.md` said "Typed field-by-field C struct schemas remain a later

@@ -35,11 +35,10 @@ Priorities: **P0** produces a wrong result or refuses a valid program ·
 
 ## Start here
 
-The open task with the best value-to-risk ratio right now:
-
-| # | Task | Why first |
-| --- | --- | --- |
-| [P1-9](#p1-9--reachability-is-a-report-nothing-deletes-dead-code) | Reachability is a report; nothing deletes dead code | The report and the deleter both exist and are tested - the missing piece is the argument for where the boundary sits, plus a measured bytecode delta |
+Nothing leads on value-to-risk right now; the remaining P1 work (native
+execution driver P1-6, stabilization fixtures P1-10) and the P2 items are all
+in the sections below, and PF-1 got closer to an answer today - see
+[docs/changelog.md](docs/changelog.md) for the dead-function size table.
 
 ---
 
@@ -74,17 +73,6 @@ closed 2026-09-18 while writing the `Condition` fixture below) - are in
 the useful next step - and a named program (start with
 `tests/zl/valid/native/NumericKernel.zl` plus collections) runs natively end to
 end with a measured wall time against the VM.
-
-### P1-9 · Reachability is a report; nothing deletes dead code
-
-`src/mir/reachability.cpp` produces a complete, over-approximated report and
-`src/mir/opt_dead.cpp` deletes dead blocks and values - but never a function,
-deliberately, because reflection reaches functions by name. Dead functions are
-still lowered, verified, optimised and emitted.
-
-**Done when** the boundary is made precise: whatever the report can prove
-unreachable *given* reflection and unpinned function values is removed, with the
-argument written down and a measured bytecode-size delta on the benchmark corpus.
 
 ### P1-10 · Stabilization leftovers ([REVIEW.md:83-86](examples/REVIEW.md))
 
@@ -162,6 +150,30 @@ confirmed already fixed on 2026-09-17; see [Done](#done) and
 Most recent first. Kept briefly so the gates that cover each fix are findable,
 then deleted - [docs/changelog.md](docs/changelog.md) is the permanent record.
 
+- [x] **P1-9 · Reachability is a report; nothing deletes dead code** (2026-09-20) -
+  `eliminate-dead-functions` ships as the framework's first module pass. It deletes
+  functions only when `ReachabilityReport::complete()` proves the graph closed - entry
+  point present, no reachable native of the *whole* reflection family (`Type.methods()`
+  renders the function table into program output, so enumeration gates removal too,
+  not just invoke), every function-value call pinned to a single closure body - and it
+  keeps, beyond the report, every static initializer (reflection can trigger it) and
+  every hidden dispatch the bytecode backend materialises: shared-cell access,
+  collection literal growth and construction. `include/zl/mir/backend_edges.hpp` owns
+  that edge list for the emitter and the analysis together; a dispatch site that
+  resolves to no candidate now flips the report incomplete instead of resolving to
+  nothing. Survivors compact, renumber, and drag their references with them; any
+  reference the keep set cannot explain is a total refusal, never a partial commit.
+  The differential's structure check pairs functions by name now: removal is a note,
+  while additions, moves and renames stay mismatches. The argument is written down in
+  `docs/mir-optimizer.md` ("Function removal"). Measured on the corpus with
+  `--artifact-stats` (54 programs: every example + the allocation benchmark): bytecode
+  bytes 17.5 MB → 3.3 MB (**−81.3%**), function entries 16,399 → 2,996, and the
+  optimise stage itself 3.07 s → 0.62 s; the benchmark pair alone −92.9%;
+  `Reflection.zl`/`Lambdas.zl`/`Generics.zl` unchanged by design.
+  Gates: `zl-mir-opt-tests` 196 checks (renumber, three refusal reasons, dispatch and
+  static keeps, differential removal-vs-growth/rename/reorder, idempotence, the 9-pass
+  order), 42/42 ctest, 52/52 examples byte-compared, 91/91 regression fixtures,
+  native gate. See [docs/changelog.md](docs/changelog.md).
 - [x] **P2-7 · Typed field-by-field C struct schemas** (2026-09-20) - a plain-data C
   `struct` with only scalar fields now generates a typed schema: zero-initialized storage
   behind the opaque slot map (type-tagged: a struct handle is not a class handle),

@@ -392,6 +392,7 @@ zl_add_required_test(zl-mir-opt-tests tests/mir_pass_tests.cpp
     src/mir/verifier.cpp
     src/mir/safety.cpp
     src/compiler/operator_rules.cpp
+    src/compiler/native_catalog.cpp
     src/compiler/semantic_types.cpp
     src/common/type_name.cpp)
 
