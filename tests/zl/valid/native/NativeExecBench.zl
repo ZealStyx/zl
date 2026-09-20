@@ -1,0 +1,74 @@
+// ============================================================================
+// Regression fixture - valid/native - NativeExecBench
+//
+// P1-6 end-to-end pair. The `sumSquares` kernel below is `@native` and runs on
+// emitted machine code through `zl --run-native <this file> --call sumSquares
+// --int64 100 --iters 10000`; the twin `sumSquaresVm` is the identical body
+// without the annotation, and `main` runs the same loop with it on the VM,
+// printing the same structured line. `tests/native_exec_parity.py` (ctest
+// `native-exec-parity`) runs both and requires identical totals; the two ms
+// fields are the measured wall time of each tier over the same 10,000 calls.
+//
+// The program must also pass as a plain run on every backend - the @native
+// kernel is never called from the VM path here, only the VM twin is.
+// ============================================================================
+
+class NativeExecBench {
+    @native
+    static func sumSquares(int n): int {
+        var total = 0
+        var i = 0
+        while (i < n) {
+            total = total + i * i
+            i = i + 1
+        }
+        return total
+    }
+
+    static func sumSquaresVm(int n): int {
+        var total = 0
+        var i = 0
+        while (i < n) {
+            total = total + i * i
+            i = i + 1
+        }
+        return total
+    }
+
+    func main(): void {
+        // Reach the @native kernel exactly once from main. Not because the VM
+        // can run it - reaching the stub raises the catchable fallback error -
+        // but because a function no reachable body calls is dead code, and the
+        // optimizer (correctly) removes it before the native tier sees it. This
+        // line is what keeps `--call sumSquares` alive in the module.
+        try {
+            log(NativeExecBench.sumSquares(1))
+        } catch Exception e {
+            log("vm fallback: " + e.message)
+        }
+
+        // One call first: the closed form settles the kernel's contract
+        // (sum of i^2 for i in [0,100) is 99*100*199/6 = 328350) so a loop
+        // total is never compared against a wrong unit.
+        var unit = NativeExecBench.sumSquaresVm(100)
+        if (unit != 328350) {
+            throw new Exception("NativeExecBench: kernel unit is 328350, got " + unit)
+        }
+
+        var iters = 10000
+        var total = 0
+        var start = Time.nowMillis()
+        var i = 0
+        while (i < iters) {
+            total = total + NativeExecBench.sumSquaresVm(100)
+            i = i + 1
+        }
+        var elapsed = Time.nowMillis() - start
+        if (total != unit * iters) {
+            throw new Exception("NativeExecBench: VM loop total disagrees")
+        }
+        log("vm-exec: NativeExecBench.sumSquaresVm(int) result=" + total +
+            " iters=" + iters + " vm_ms=" + elapsed)
+        log("ok")
+    }
+}

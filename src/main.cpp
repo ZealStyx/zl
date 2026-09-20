@@ -27,6 +27,7 @@
 #include "zl/compiler/pipeline.hpp"
 #include "zl/mir/printer.hpp"
 #include "zl/mir/reachability.hpp"
+#include "zl/native/exec.hpp"
 #include "zl/native/pipeline.hpp"
 
 namespace pipeline = zl::pipeline;
@@ -970,6 +971,110 @@ int zlMain(int argc, char** argv) {
             std::cerr << native.describe();
             return writeTextOutput(argv[2], text.str());
         }
+        if (command == "--run-native") {
+            // The native tier's execution driver: verified MIR -> selected and
+            // emitted machine code -> mapped executable -> real call. Without
+            // `--call` it is a listing (what the subset compiled of this
+            // program, and why the rest is absent); with it, the named
+            // function is invoked `--iters` times and its int64 result and the
+            // wall time of the loop are printed. The driver's refusals
+            // (runtime-bound calls, non-int signatures, unsupported hosts)
+            // are the subset boundary stated in zl/native/exec.hpp - reported
+            // by name, before anything executes.
+            std::vector<std::string> rest(argv + 2, argv + argc);
+            std::string file;
+            std::string callSpec;
+            std::vector<std::int64_t> intArgs;
+            std::int64_t iters = 1;
+            for (std::size_t i = 0; i < rest.size(); ++i) {
+                const std::string& a = rest[i];
+                auto need = [&](const char* opt) -> std::string {
+                    if (i + 1 >= rest.size()) {
+                        std::cerr << "usage error: " << opt << " needs a value\n";
+                        std::exit(2);
+                    }
+                    return rest[++i];
+                };
+                if (a == "--call") callSpec = need("--call");
+                else if (a == "--int64") {
+                    try { intArgs.push_back(std::stoll(need("--int64"))); }
+                    catch (const std::exception&) {
+                        std::cerr << "usage error: --int64 expects an integer\n";
+                        return 2;
+                    }
+                }
+                else if (a == "--iters") {
+                    try { iters = std::stoll(need("--iters")); }
+                    catch (const std::exception&) {
+                        std::cerr << "usage error: --iters expects an integer\n";
+                        return 2;
+                    }
+                    if (iters < 1) {
+                        std::cerr << "usage error: --iters must be positive\n";
+                        return 2;
+                    }
+                }
+                else if (!a.empty() && a[0] == '-') {
+                    std::cerr << "usage error: unknown option " << a << "\n";
+                    return 2;
+                }
+                else if (file.empty()) file = a;
+                else { std::cerr << "usage error: more than one input file\n"; return 2; }
+            }
+            if (file.empty()) {
+                std::cerr << "usage: zl --run-native <file.zl> [--call <name>] [--int64 v]... [--iters n]\n";
+                return 2;
+            }
+            std::vector<std::filesystem::path> roots;
+            int exitCode = 1;
+            if (!appendStandardRoots(argv[0], roots, exitCode)) return exitCode;
+            pipeline::Options options = optionsForEmit(pipeline::Backend::Native, /*optimize=*/true);
+            options.native.selectOnly = false;
+            pipeline::Pipeline compiler(std::move(options));
+            if (!compiler.run(file, roots)) return reportPipelineFailure(compiler.result());
+            const auto& native = *compiler.result().native;
+            zl::native::NativeExecutable exec(native.code, native.lir);
+            if (!exec.ok()) {
+                std::cerr << "run-native: " << exec.error() << "\n";
+                return 4;
+            }
+            if (callSpec.empty()) {
+                std::cout << "run-native: " << native.code.size() << " function(s) compiled natively\n";
+                for (const auto& fn : native.code) std::cout << "  native  " << fn.name << "\n";
+                std::cerr << native.describe();
+                return 0;
+            }
+            std::string error;
+            const std::size_t entry = exec.resolve(callSpec, error);
+            if (entry == zl::native::NativeExecutable::kNoEntry) {
+                std::cerr << error << "\n";
+                return 4;
+            }
+            std::int64_t value = 0;
+            if (!exec.callInt64(entry, intArgs, value, error)) {
+                std::cerr << error << "\n";
+                return 4;
+            }
+            // The first call warmed the mapping; the measured loop is the
+            // benchmark number, timed exactly like it is reported.
+            const auto start = std::chrono::steady_clock::now();
+            std::int64_t sink = 0;
+            for (std::int64_t i = 0; i < iters; ++i) {
+                std::int64_t r = 0;
+                if (!exec.callInt64(entry, intArgs, r, error)) { std::cerr << error << "\n"; return 4; }
+                sink += r;
+            }
+            const auto end = std::chrono::steady_clock::now();
+            const double ms = std::chrono::duration<double, std::milli>(end - start).count();
+            const std::string name = native.code[entry].name;
+            std::cout << "native-exec: " << name << " result=" << value
+                      << " iters=" << iters << " native_ms=" << ms << "\n";
+            if (sink != value * iters) {
+                std::cerr << "run-native: iteration results disagree (driver bug)\n";
+                return 4;
+            }
+            return 0;
+        }
         if (command == "--parse-only") {
             if (argc != 3) {
                 std::cerr << "usage: zl --parse-only <file.zl>\n";
@@ -1010,6 +1115,7 @@ int zlMain(int argc, char** argv) {
                          "  zl --emit-machine-code <output.zlm> <file.zl>\n"
                          "  zl --emit-native-ir <output|-> <file.zl>\n"
                          "  zl --emit-native-code <output|-> <file.zl>\n"
+                         "  zl --run-native <file.zl> [--call <name>] [--int64 v]... [--iters n]\n"
                          "  zl --mir-vm <file.zl> [program args...]\n"
                          "  zl --emit-mir <output|-> <file.zl>\n"
                          "  zl --emit-ssa <output|-> <file.zl>\n"
@@ -1024,9 +1130,11 @@ int zlMain(int argc, char** argv) {
                          "verify -> optimise -> backend) with different stages; see docs/pipeline.md\n"
                          "\n"
                          "`--backend native` generates machine code for the supported subset, but the\n"
-                         "program still executes on the VM. Mixed-mode native execution is not\n"
-                         "implemented yet; use --strict-native to refuse programs the native tier\n"
-                         "cannot compile fully.\n"
+                         "program still executes on the VM: in-program mixed-mode native execution is\n"
+                         "not implemented. The subset boundary is concrete at the execution driver:\n"
+                         "zl --run-native maps the emitted bytes and calls a compiled function\n"
+                         "(int64 signatures for now; everything else is refused by name and reason).\n"
+                         "Use --strict-native to refuse programs the native tier cannot compile fully.\n"
                          "\n"
                          "environment:\n"
                          "  ZL_BACKEND=<bytecode|native>  backend selection (same as --backend; native still runs on the VM)\n"

@@ -1,5 +1,34 @@
 # Development Checkpoints
 
+## 2026-09-20 - P1-6, first half: native bytes get an execution driver, and it measures
+
+`--backend native` has been a code generator with no consumer since day one:
+emitted x86-64 was reported, packaged, but never called. `zl --run-native
+<file.zl> [--call NAME] [--int64 v]... [--iters n]` closes that. It compiles
+the program through the ordinary pipeline (verified MIR, optimiser on), maps
+the whole emitted module into one page-aligned executable arena, binds every
+direct-call relocation among the module's own functions, and calls the named
+function through the SysV int64 ABI - then, with `--iters`, times the loop.
+Everything outside what it can honestly call is *refused before execution, by
+name and reason*: modules with runtime-call relocations (those symbols belong
+to the GC'd VM world a native frame cannot enter), non-integer signatures
+(floats live in XMM registers; refs need GC maps the backend does not have -
+the same wall P1-6's remaining half is built on), more than six arguments,
+non-x86-64-Linux hosts. `include/zl/native/exec.hpp` owns the loader;
+`tests/zl/valid/native/NativeExecBench.zl` is the named program - an `@native`
+kernel, its VM twin, and a main whose loop the interpreter runs while the
+driver runs the machine-code one - and ctest `native-exec-parity` requires the
+two tiers to produce identical totals and the driver to refuse `main`
+naming what it did compile. On the sandbox the pair measures 6.0 ms
+(10,000 calls of sumSquares(100) in emitted bytes) against 870 ms for the
+identical arithmetic on the VM; the parity test prints both and asserts only
+equality of results, because milliseconds swing and the sign does not. The
+finding to carry into the rest of P1-6: the gap between tiers is subset
+coverage, not emitted-code quality. Docs updated
+([docs/native-backend.md](native-backend.md) gains the driver section), and
+`--help` says what is true now. Gates: ctest 43/43 (new test included),
+regressions 94/94 (new fixture included), examples 52/52, native gate PASS.
+
 ## 2026-09-20 - PF-2 closed: the optimiser now pays for itself, measured
 
 The research report's finding that the default optimiser "costs ~44 ms and buys

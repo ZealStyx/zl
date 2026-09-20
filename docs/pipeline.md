@@ -112,7 +112,7 @@ Details worth knowing:
   mean the same thing, and every backend accepts either.
 - **The optimiser is a stage with a switch, and the switch is off only when you
   say so.** The run paths (`zl file.zl`, `--mir-vm`, `--backend native`,
-  `--pipeline-report`) optimise by default, because the stage is what makes the
+  `--run-native`, `--pipeline-report`) optimise by default, because the stage is what makes the
   MIR boundary worth having; `ZL_MIR_OPT=0` turns it off. The inspection
   commands (`--emit-mir`, `--emit-ssa`, `--emit-native-ir`, `--safety-check`)
   leave it off unless asked, because their output is a snapshot of lowering
@@ -148,7 +148,8 @@ implemented.
 | Produces | `zl::Chunk` for the stack VM | native IR, then x86-64 machine code |
 | Coverage | the whole language | a deliberately small, named subset |
 | Refusal | a function that cannot be translated is *stubbed*: its entry points at a stub that raises if reached, and the reason is carried out to the caller | a function is rejected *by name and reason*; the ledger accounts for every function in the module |
-| Used by | `zl file.zl`, `--mir-vm`, `--emit-mir*` | `--emit-native-ir`, `--emit-native-code`, `--emit-machine-code`, `--backend native` |
+| Used by | `zl file.zl`, `--mir-vm`, `--emit-mir*` | `--emit-native-ir`, `--emit-native-code`, `--emit-machine-code`, `--run-native`, `--backend native` |
+| Executed by | the VM (`zl::VM::run`) | the VM for whole programs; `--run-native` executes compiled functions directly (`docs/native-backend.md`) |
 
 Neither backend is privileged by the language. `Backend` is an enumerator plus
 an arm in `Pipeline::generate`; a third backend would be another enumerator, and

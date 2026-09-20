@@ -56,27 +56,39 @@ closed 2026-09-18 while writing the `Condition` fixture below) - are in
 
 ## P1 - promised capability, or a daily gap
 
-### P1-6 · Native backend: not an execution driver, and a small subset
+### P1-6 · Native backend: the execution driver exists; the subset still stops at int64
 
-- `--backend native` generates machine code and still executes on the VM
-  (`zl --help` says so outright); mixed-mode native execution is unimplemented.
-- The subset is ~1.7% of the functions in a realistic module
+**Driver (2026-09-20):** `zl --run-native <file.zl> [--call NAME] [--int64 v]... [--iters n]`
+maps the emitted module executable, binds direct-call relocations, refuses
+anything it cannot honestly call *by name and reason* (runtime imports,
+non-integer signatures, more than six arguments, non-x86-64-Linux hosts), and
+measures. `tests/native_exec_parity.py` (ctest `native-exec-parity`) requires
+the driver and the VM to compute identical totals on
+`tests/zl/valid/native/NativeExecBench.zl` and prints the wall pair
+(~6 ms machine code vs ~870 ms interpreter per 10,000 kernel calls on the
+sandbox). See [docs/native-backend.md](docs/native-backend.md).
+
+**Remaining:**
+- The subset is still ~1.7% of the functions in a realistic module
   ([research/report.md](research/report.md) §2.7) - ints and floats, no refs,
-  objects, collections, closures, exceptions or async.
+  objects, collections, closures, exceptions or async; the driver speaks int64 only.
+- In-program mixed mode is unimplemented: `--backend native` compiles the subset
+  and still runs the program on the VM.
 - Win64 is select-only (`TargetMachine::encoderAvailable()` false,
   `src/native/pipeline.cpp:59`); there is no arm64 encoder, so macOS CI
   cross-compiles to SysV.
 - No register allocator, no stack arguments, no GC maps or safepoints, no unwind
   tables, no object-file or JIT writer.
-- An arithmetic fault in native bytes is `SIGILL`, not a catchable
-  `ArithmeticError`.
+- An arithmetic fault in driver-executed native bytes is `SIGILL`, not a
+  catchable `ArithmeticError`.
 
-**Done when** one value class at a time joins the subset - refs and objects are
-the useful next step - and a named program (start with
-`tests/zl/valid/native/NumericKernel.zl` plus collections) runs natively end to
-end with a measured wall time against the VM.
+**Done when** one value class at a time joins the driver and the backend - refs
+and objects are the useful next step, and the GC map is their gate - until a
+named program (start again from `NativeExecBench.zl`, plus collections) runs
+end-to-end through `--backend native` with a measured wall time against the VM.
 
 ---
+
 
 ## Performance ([research/report.md](research/report.md))
 
@@ -84,8 +96,12 @@ Measured, not estimated. Highest-value gap if you care about speed.
 
 ### PF-3 · Native is not a performance path yet
 
-Follows from [P1-6](#p1-6--native-backend-not-an-execution-driver-and-a-small-subset):
-~1.7% of functions, and the program still executes on the VM.
+Follows from
+[P1-6](#p1-6--native-backend-the-execution-driver-exists-the-subset-still-stops-at-int64):
+~1.7% of functions, and the whole-program path still executes on the VM. The
+driver (`zl --run-native`) has since measured the other direction - compiled
+kernels ran ~140x their VM twin on identical loops - which locates the gap
+precisely: it is subset coverage, not the code quality of what is covered.
 
 ---
 

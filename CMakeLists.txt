@@ -77,6 +77,7 @@ set(SOURCES
     ${CMAKE_SOURCE_DIR}/src/mir/verifier.cpp
     ${CMAKE_SOURCE_DIR}/src/mir/vm_backend.cpp
     ${CMAKE_SOURCE_DIR}/src/native/emit.cpp
+    ${CMAKE_SOURCE_DIR}/src/native/exec.cpp
     ${CMAKE_SOURCE_DIR}/src/native/lir.cpp
     ${CMAKE_SOURCE_DIR}/src/native/pipeline.cpp
     ${CMAKE_SOURCE_DIR}/src/native/select.cpp
@@ -685,6 +686,15 @@ if(BUILD_TESTING)
         add_test(NAME sum-match-parity COMMAND ${ZL_PARITY_PYTHON}
             ${CMAKE_SOURCE_DIR}/tests/sum_match_parity.py $<TARGET_FILE:zl_language>)
         set_tests_properties(sum-match-parity PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endif()
+    # Native execution parity (P1-6): the emitted x86-64 bytes, run by the
+    # driver, must compute the same number as the VM loop over the same
+    # program - and the driver must refuse what it cannot honestly call.
+    # Skips off x86-64 Linux, where the driver refuses by design.
+    if(ZL_PARITY_PYTHON)
+        add_test(NAME native-exec-parity COMMAND ${ZL_PARITY_PYTHON}
+            ${CMAKE_SOURCE_DIR}/tests/native_exec_parity.py $<TARGET_FILE:zl_language>)
+        set_tests_properties(native-exec-parity PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     endif()
 endif()
 
