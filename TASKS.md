@@ -54,36 +54,6 @@ closed 2026-09-18 while writing the `Condition` fixture below) - are in
 
 ## P1 - promised capability, or a daily gap
 
-### PF-1 · MIR bytecode larger than the reference: closed at −86.6% corpus size
-
-The size half of the original finding no longer reproduces after the P1-9
-deletion pass. Re-measured on the same 16-program research corpus, one build,
-one day: bytecode total 3,246,480 (reference) vs 433,480 (pipeline) - 15 of 16
-programs between −89% and −99%. The one larger file (`Closures.zl`, +56.7%) is
-exactly what the deletion gate refuses to reduce, and why. Section 2.9 of the
-report carries the table; the runtime half of §2.4 stays open with the
-performance work (P1-6, PF-3).
-
-### P1-6 · Native backend: not an execution driver, and a small subset
-
-- `--backend native` generates machine code and still executes on the VM
-  (`zl --help` says so outright); mixed-mode native execution is unimplemented.
-- The subset is ~1.7% of the functions in a realistic module
-  ([research/report.md](research/report.md) §2.7) - ints and floats, no refs,
-  objects, collections, closures, exceptions or async.
-- Win64 is select-only (`TargetMachine::encoderAvailable()` false,
-  `src/native/pipeline.cpp:59`); there is no arm64 encoder, so macOS CI
-  cross-compiles to SysV.
-- No register allocator, no stack arguments, no GC maps or safepoints, no unwind
-  tables, no object-file or JIT writer.
-- An arithmetic fault in native bytes is `SIGILL`, not a catchable
-  `ArithmeticError`.
-
-**Done when** one value class at a time joins the subset - refs and objects are
-the useful next step - and a named program (start with
-`tests/zl/valid/native/NumericKernel.zl` plus collections) runs natively end to
-end with a measured wall time against the VM.
-
 ### P1-10 · Stabilization leftovers ([REVIEW.md:83-86](examples/REVIEW.md))
 
 FFI callback quiescence and ownership; channel cancellation and progress
@@ -149,6 +119,14 @@ confirmed already fixed on 2026-09-17; see [Done](#done) and
 
 Most recent first. Kept briefly so the gates that cover each fix are findable,
 then deleted - [docs/changelog.md](docs/changelog.md) is the permanent record.
+
+- [x] **PF-1 · MIR bytecode is larger and slower than the reference compiler** (2026-09-20) -
+  size half closed at the measured numbers: post-P1-9 re-measurement on the same 16
+  positive programs, one build ([research/report.md §2.9](research/report.md)) - total
+  3,246,480 B reference vs 433,480 B pipeline (−86.6%), 15 of 16 between −89% and
+  −99%, the single outlier (`Closures.zl`, +56.7%) exactly the documented deletion-gate
+  refusal. The runtime half of §2.4 stands until the native work (P1-6, PF-3) remeasures
+  it; the size "within 10%" bar is met by being 87% under.
 
 - [x] **P1-9 · Reachability is a report; nothing deletes dead code** (2026-09-20) -
   `eliminate-dead-functions` ships as the framework's first module pass. It deletes
