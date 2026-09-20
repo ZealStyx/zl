@@ -277,6 +277,38 @@ what (a)+(b)+(c) cannot buy is eager release at scope exit, which is exactly
 what the domain phases exist to measure against this table. Raw rows:
 `benchmarks/results/allocation_{before,after}{,2}.json`.
 
+### 2.9 Size re-measurement after P1-9 (measured 2026-09-20)
+
+P1-9 closed by teaching the pipeline to delete unreachable functions, so the
+§2.3 size finding - "MIR-derived bytecode is ~42% larger than the reference
+after optimisation" - no longer reproduces. Same `--artifact-stats` method,
+same 16 positive programs, default pipeline against `--reference-compiler`;
+all three columns were measured the same day on one build, the "before" column
+being the default pipeline minus `eliminate-dead-functions` via
+`ZL_MIR_OPT_PASSES`:
+
+| Measure | reference | MIR opt (before P1-9) | MIR opt (now) |
+| --- | ---: | ---: | ---: |
+| Bytecode bytes, median | 201,460 | 316,000 | 7,360 |
+| Bytecode bytes, total | 3,246,480 | 5,104,240 | 433,480 |
+
+The corpus total is **−86.6%** against the reference, and 15 of 16 programs
+measure between −89% and −99%. Two things produce that, and only the first is
+new: the reference compiler emits every stdlib function for every program
+(its ~200 KB floor here), while the MIR backend has always emitted only what
+the module keeps - and P1-9 made that keep set actually provable, deleting the
+dead remainder of stdlib and generics from the chunk. The one program that is
+still larger, `Closures.zl` (+56.7%), is exactly the case the deletion gate
+refuses: an unpinned function-value call makes the graph incomplete, so
+keeping everything is the licensed answer. The argument, and the conditions
+under which a module may be reduced at all, are
+[docs/mir-optimizer.md](../docs/mir-optimizer.md#function-removal).
+
+On the full examples corpus (54 runnable programs, same ledger): bytecode
+bytes 17,518,680 → 3,281,120 (−81.3%) against pass-off, with the MIR-opt
+stage itself falling 3,070 ms → 616 ms because there is 80% less to verify
+and emit.
+
 ---
 
 ## 3. Trade-off analysis

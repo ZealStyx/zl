@@ -37,8 +37,8 @@ Priorities: **P0** produces a wrong result or refuses a valid program ·
 
 Nothing leads on value-to-risk right now; the remaining P1 work (native
 execution driver P1-6, stabilization fixtures P1-10) and the P2 items are all
-in the sections below, and PF-1 got closer to an answer today - see
-[docs/changelog.md](docs/changelog.md) for the dead-function size table.
+in the sections below. PF-1 closed 2026-09-20 at the measured numbers in
+[research/report.md §2.9](research/report.md).
 
 ---
 
@@ -53,6 +53,16 @@ closed 2026-09-18 while writing the `Condition` fixture below) - are in
 ---
 
 ## P1 - promised capability, or a daily gap
+
+### PF-1 · MIR bytecode larger than the reference: closed at −86.6% corpus size
+
+The size half of the original finding no longer reproduces after the P1-9
+deletion pass. Re-measured on the same 16-program research corpus, one build,
+one day: bytecode total 3,246,480 (reference) vs 433,480 (pipeline) - 15 of 16
+programs between −89% and −99%. The one larger file (`Closures.zl`, +56.7%) is
+exactly what the deletion gate refuses to reduce, and why. Section 2.9 of the
+report carries the table; the runtime half of §2.4 stays open with the
+performance work (P1-6, PF-3).
 
 ### P1-6 · Native backend: not an execution driver, and a small subset
 
@@ -106,16 +116,6 @@ see [Done](#done).)
 ## Performance ([research/report.md](research/report.md))
 
 Measured, not estimated. Highest-value gap if you care about speed.
-
-### PF-1 · MIR bytecode is larger and slower than the reference compiler
-
-~42-49% more bytecode (§2.3) and ~9-36% slower on compute-heavy programs (§2.4:
-Prims +9%, Recursion +36%); the MIR backend is ~3.8× slower to *run* than the
-reference code generator (§2.2).
-
-**Done when** bytecode size is within 10% of the reference on the corpus, or the
-wall-time delta is explained instruction by instruction and the difference is
-bought back where it matters.
 
 ### PF-2 · The optimiser costs ~44 ms and buys nothing at runtime
 
