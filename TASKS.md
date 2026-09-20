@@ -57,7 +57,7 @@ closed 2026-09-18 while writing the `Condition` fixture below) - are in
 
 ## P1 - promised capability, or a daily gap
 
-### P1-6 · Native backend: the execution driver exists; the subset still stops at int64
+### P1-6 · Native backend: the driver runs integers and doubles; refs and objects stop at the GC map
 
 **Driver (2026-09-20):** `zl --run-native <file.zl> [--call NAME] [--int64 v |
 --double v]... [--iters n]` maps the emitted module executable, binds
@@ -101,7 +101,7 @@ Measured, not estimated. Highest-value gap if you care about speed.
 ### PF-3 · Native is not a performance path yet
 
 Follows from
-[P1-6](#p1-6--native-backend-the-execution-driver-exists-the-subset-still-stops-at-int64):
+[P1-6](#p1-6--native-backend-the-driver-runs-integers-and-doubles-refs-and-objects-stop-at-the-gc-map):
 ~1.7% of functions, and the whole-program path still executes on the VM. The
 driver (`zl --run-native`) has since measured the other direction - compiled
 kernels ran ~140x their VM twin on identical loops - which locates the gap
