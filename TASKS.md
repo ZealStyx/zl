@@ -35,10 +35,11 @@ Priorities: **P0** produces a wrong result or refuses a valid program ·
 
 ## Start here
 
-Only the native line remains: P1-6 (execution driver + one value class in the
-subset) and PF-3, which follows it. Closed 2026-09-20: P1-10 (stabilization
-gate - two fixtures, two written arguments, verdict in the
-[examples review](examples/REVIEW.md)), P2-5 (registry scope in
+Only the native line remains: P1-6, whose execution driver shipped 2026-09-20
+and whose remaining half is one value class at a time in the subset (refs and
+objects, gated on the GC map), plus PF-3, which follows it. Closed the same
+day: P1-10 (stabilization gate - two fixtures, two written arguments, verdict
+in the [examples review](examples/REVIEW.md)), P2-5 (registry scope in
 [docs/packages.md](docs/packages.md)), and PF-1 + PF-2 at the re-measured
 numbers in [research/report.md §2.9](research/report.md).
 
