@@ -329,6 +329,7 @@ endif()
 # it links the front end (its end-to-end cases lower real ZL source) plus the
 # native sources themselves.
 zl_add_vm_test(zl-native-backend-tests tests/native_backend_tests.cpp)
+zl_add_vm_test(zl-native-exec-tests tests/native_exec_tests.cpp)
 
 # --- MIR (mid-level IR) -----------------------------------------------------
 # Two targets, split by what they need to link.

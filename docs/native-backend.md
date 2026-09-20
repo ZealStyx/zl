@@ -369,6 +369,12 @@ through a function pointer and compared against what ZL's semantics say the
 program computes. A backend test that only inspects the IR proves the backend
 agrees with itself.
 
+`tests/native_exec_tests.cpp` (target `zl-native-exec-tests`) tests the
+execution driver itself: the arena plus relocation binding under a real
+native-caller-calls-native-callee program, name resolution (exact, bare token,
+miss list), the signature-shape classifier, and each refusal - decided from the
+signature, before anything runs.
+
 `tools/native_demo.sh` is the same idea in shell form, for looking at rather
 than asserting on.
 

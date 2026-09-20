@@ -19,7 +19,11 @@ evaluation of `0.7 * 1.5 + 0.1` is the third opinion. Measured: the double
 kernel runs 0.16 ms natively against 24 ms on the VM over 10,000 calls (~150x,
 same story as the integer kernel's ~140x); the ms fields are printed, not
 asserted. Refs and objects - with the GC map they imply - remain the other
-half of P1-6 and are unchanged here.
+half of P1-6 and are unchanged here. The loader itself gained unit coverage -
+`zl-native-exec-tests` runs a native caller into a native callee through the
+driver's own relocation binding, exercises the shape classifier, and asserts
+each refusal message; execution cases skip (loudly) off x86-64 Linux, and the
+refusal logic is tested everywhere.
 
 
 ## 2026-09-20 - P1-6, first half: native bytes get an execution driver, and it measures
