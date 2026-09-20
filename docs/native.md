@@ -81,7 +81,18 @@ The ownership-aware FFI foundation provides opaque handles, borrowed buffers and
 views, callback lifetime contracts, native resource adapters, dynamic library loading,
 and validated `@ffi(symbol)` / `@ffi(library, symbol)` metadata.
 
-Typed field-by-field C struct schemas remain a later ABI extension.
+For plain-data C structs, `zl-bind` emits a typed field-by-field schema: each
+`struct` whose members are all scalar (fixed-width integers, `double`/`float`,
+`bool`) gets zero-initialized storage behind an opaque handle, one typed
+get/set binding pair per field (`<Ns>.<Struct>_get_<field>`,
+`<Ns>.<Struct>_set_<field>`), layout queries (`<Ns>.<Struct>_size`,
+`<Ns>.<Struct>_offset_<field>`), and a C++ schema table whose `offsetof`/
+`sizeof` entries are evaluated by the target compiler under `static_assert`
+guards. The generated ZL facade exposes each field as a typed method pair
+(`field()` / `set_field(v)`). Structs with pointer, array or non-scalar
+fields, or with no fields at all, are refused at generation time rather than
+bound opaquely; the raw-buffer FFI path above remains the escape hatch for
+layouts this schema does not describe.
 
 ## Native export registry
 

@@ -25,7 +25,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release           # once
 cmake --build build --config Release --target zl-tests   # core + every regression target
 (cd build && ctest -C Release)                           # 42 tests, includes both parity scripts
 examples/run_all.sh build/zl_language                    # 52 examples, byte-compared to their expected output
-bash scripts/run_regressions.sh build/zl_language all    # 88 fixtures under tests/zl (verified 2026-09-19)
+bash scripts/run_regressions.sh build/zl_language all    # 91 fixtures under tests/zl (verified 2026-09-20)
 bash scripts/native_gate.sh build/zl_language            # native tier gate
 ```
 
@@ -35,13 +35,11 @@ Priorities: **P0** produces a wrong result or refuses a valid program ·
 
 ## Start here
 
-The three with the best value-to-risk ratio right now:
+The open task with the best value-to-risk ratio right now:
 
 | # | Task | Why first |
 | --- | --- | --- |
-| [P1-7](#p1-7--async-cancellation-unobserved-failures-async-lambdas) | Async: cancellation, unobserved failures, async lambdas | Three named gaps the README already lists, each with an obvious fixture; `async func(x) => …` is the smallest of them |
 | [P1-9](#p1-9--reachability-is-a-report-nothing-deletes-dead-code) | Reachability is a report; nothing deletes dead code | The report and the deleter both exist and are tested - the missing piece is the argument for where the boundary sits, plus a measured bytecode delta |
-| [P2-7](#p2-7--typed-field-by-field-c-struct-schemas) | Typed field-by-field C struct schemas | Self-contained: one `zl-bind` emitter change and one test that reads and writes each field by name |
 
 ---
 
@@ -77,17 +75,6 @@ the useful next step - and a named program (start with
 `tests/zl/valid/native/NumericKernel.zl` plus collections) runs natively end to
 end with a measured wall time against the VM.
 
-### P1-7 · Async: cancellation, unobserved failures, async lambdas
-
-`async func`, `Task<T>`, `await` and `block()` work; cancellation propagation,
-unobserved-failure reporting and async lambdas are pending
-([README](README.md#current-limitations)).
-
-**Done when** a cancelled task propagates to the tasks it spawned, a task dropped
-without `block()`/`ignore()` reports its failure instead of vanishing, and
-`async func(x) => …` parses - each with a `tests/zl/valid/concurrency_regressions`
-fixture.
-
 ### P1-9 · Reachability is a report; nothing deletes dead code
 
 `src/mir/reachability.cpp` produces a complete, over-approximated report and
@@ -121,14 +108,6 @@ moving the lines).
 
 **Done when** the intended scope is decided and written down - a registry is a
 service, not a feature, and "no registry yet" should say what replaces it.
-
-### P2-7 · Typed field-by-field C struct schemas
-
-FFI passes opaque buffers; a typed schema per C struct is a later ABI extension
-([docs/native.md](docs/native.md)).
-
-**Done when** `zl-bind` emits a typed schema for a struct with mixed field types
-and a test reads and writes each field by name.
 
 (P2-8 - `owned` ends rootedness but frees nothing - closed 2026-09-19 with the
 Phase 0 baseline in [docs/memory-domains.md §10.1](docs/memory-domains.md#101-phase-0-baseline-measured-2026-09-19);
@@ -182,6 +161,32 @@ confirmed already fixed on 2026-09-17; see [Done](#done) and
 
 Most recent first. Kept briefly so the gates that cover each fix are findable,
 then deleted - [docs/changelog.md](docs/changelog.md) is the permanent record.
+
+- [x] **P2-7 · Typed field-by-field C struct schemas** (2026-09-20) - a plain-data C
+  `struct` with only scalar fields now generates a typed schema: zero-initialized storage
+  behind the opaque slot map (type-tagged: a struct handle is not a class handle),
+  `<Ns>.<Struct>_get_<field>`/`_set_<field>` pairs per field, `_size`/`_offset_<field>`
+  layout queries, and a generated `ZlFieldSchema` table whose `offsetof`/`sizeof` entries
+  are target-compiler-evaluated under `static_assert`s. Pointer/array/non-scalar or empty
+  structs, and fields colliding with the facade, are refused at generation. The ZL facade
+  gets typed per-field accessor pairs; the manifest carries the schema.
+  Gates: `tools/zl-bind/test_zl_bind.sh` - manifest/facade/docs greps, a C++ test that
+  reads and writes each field of a `bool`/`int32_t`/`double`/`uint16_t` struct by name
+  (zero defaults, negatives, truncation at the field's own width, offsets inside the
+  struct, close-then-use refused) and drives the struct through both bytecode pipelines
+  from ZL. See [docs/changelog.md](docs/changelog.md).
+- [x] **P1-7 · Async: cancellation, unobserved failures, async lambdas** (2026-09-20) -
+  all three named gaps are closed and pinned. `async func(x) => …` now compiles on MIR
+  (a callable's async signature keeps the *body* type; `Task<T>` is the call boundary's -
+  see [docs/changelog.md](docs/changelog.md)); a cancelled task cascades its request to
+  the tasks spawned from its body (weak spawn edges, cooperative, pending spawns cancelled
+  on arrival, CPU-pool closures skip or settle-as-cancelled); and a dropped failure's
+  stderr report is pinned on both sides - `tests/runtime_task_executor_tests.cpp`
+  (`testUnobservedFailureReport`, `testCancellationCascade`) and
+  `tests/zl/valid/concurrency_regressions/{AsyncLambdaTasks,CancellationPropagates,UnobservedTaskFailure}.zl`
+  under MIR, `ZL_MIR_OPT=0` and `ZL_COMPILER=ast`. README, `docs/mir.md` and
+  `examples/advanced/AsyncTasks.zl` (now demonstrating an async lambda) follow the fix.
+  Gates: 42/42 ctest, 52/52 examples byte-compared, 91/91 regression fixtures.
 
 - [x] **P2-8 · `owned` ends rootedness but frees nothing - Phase 0 baseline
   measured, box recycling lands with numbers** (2026-09-19) -

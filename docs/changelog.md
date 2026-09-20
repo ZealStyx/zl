@@ -2,6 +2,123 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-20 - `zl-bind` binds C structs field by field against a typed schema (P2-7)
+
+`docs/native.md` said "Typed field-by-field C struct schemas remain a later
+ABI extension," and the generator agreed: a plain-data C `struct` either fell
+into the class path and died on "requires an explicit constructor" or had its
+data members silently skipped, leaving FFI to pass opaque buffers. Plain-data
+structs are now first-class generator input.
+
+**The parser grew a struct kind.** A `struct Name { ... }` whose body holds
+only scalar data members - no constructor, no destructor, no methods - is
+collected as a `NativeStruct` with a field list, where a member type must map
+to a fixed-width `int`, a `double`/`float`, or a `bool`. `long`, `long long`
+and friends stay unsupported because their width is target-dependent and the
+schema is a promise; a struct with no bindable fields, a pointer or array
+field, or a field named `handle`/`close` (which would collide with the
+facade) is refused at generation time, each with its own message. The
+scalar map itself was widened to the whole fixed-width family (`int8_t` …
+`uint64_t`), all mapping to ZL `int` with the C type preserved for casts and
+`sizeof` - a `uint16_t` field truncates to its own width, not to 64 bits.
+
+**The emitter grew the schema and the accessors.** Per struct: zero-initialized
+heap storage behind the same opaque-integer slot map the class bindings use
+(the slot carries a type tag, so a struct handle cannot be loaded as a class
+or another struct - the registry test pins the refusal); `<Name>_new`/
+`_close`/`_size` bindings; and for every field a typed `_get_<field>`/
+`_set_<field>` pair plus a compile-time `_offset_<field>` query. The layout
+is a real schema: a generated `ZlFieldSchema` table of `{name, type,
+offsetof, sizeof}` evaluated by the target compiler, with a
+`static_assert` per field that it lies inside the struct and an arity guard
+on the table itself. The ZL facade becomes a class with typed per-field
+accessors (`mode()` returns `int`, `set_ratio(double value)` takes a
+`double`), and the `.zlbind` manifest gains `struct|Name|fields=N` and
+`field|Name.f|zltype|ctype|access=getter+setter` lines so tooling can read
+the schema without the C++.
+
+Gates: `tools/zl-bind/test_zl_bind.sh` now asserts the manifest lines, the
+generated table and guards, the facade, the docs, the C++ round-trip of
+every field type *by name* (defaults zero, `int32_t` negative values, a
+`double`, a truncating `uint16_t`, offsets within size, the handle type
+tag, and close-then-use), and drives the struct through both bytecode
+pipelines end to end from ZL source; the empty-struct and pointer-field
+fixtures must be refused.
+
+## 2026-09-20 - Async closes out: async lambdas run on MIR, cancellation cascades, dropped failures report (P1-7)
+
+The README listed three async gaps; measured against a working build, two had
+already been built and one was half-built - and the half was load-bearing.
+
+**Async lambdas (`async func(x) => ...`) now compile on the MIR pipeline.**
+The parser, checker, closure metadata and `CallValue` scheduling already
+carried `LambdaExpr.isAsync` end to end (the reference pipeline ran the
+programs fine); what was missing was one convention mismatch in the typed IR.
+An async *function* in MIR declares its body's result type and the `isAsync`
+flag adds `Task<T>` at the call boundary - but the callable *signature* built
+from a checker inference (`TypeConverter::fromInferred`) rendered the
+signature's return from `functionReturnClassName`, which by the checker's
+convention *already* spells `Task<...>`. `call_indirect` then wrapped it a
+second time and verification refused the module with
+`call_indirect produces Task<Task<int>> but the temp is typed Task<int>`.
+Lowering now takes the signature's return from `taskValueType`/
+`taskValueClassName` - the body type, the way `declareFunction` stores it -
+and `nil` maps to `void` exactly as an async function's does. The checker
+part closed beside it: a call through a func value returned the bare
+`TASK`/`Task<...>` pair without the task's payload, so `mk().block().get()`
+saw `block()` yield `unknown`; `inferCallExpr`'s value-call arm now carries
+the payload (directly when the variable records it, otherwise decoded from
+the rendered `Task<...>` name, the same decode `inferLambdaExpr` uses for an
+expected signature). Arrow bodies, block bodies with `return`, void bodies,
+object payloads, and `await` inside the lambda body all run under MIR,
+`ZL_MIR_OPT=0`, and the AST pipeline with identical output.
+
+**Cancellation propagates to spawned tasks.** `RuntimeTaskState` records a
+weak spawn edge for every task created while a task body runs:
+`VM::scheduleAsyncInvocation` registers an async call under the invoking
+task, and both it and the `Task.spawn` native ask the thread-local
+`gCurrentSpawningTask` first - set by `resumeAsyncInvocation` around each
+execution step and by the spawn worker around the closure body - so a spawn
+made from a CPU-pool closure finds its parent on a foreign thread too. A
+`requestCancellation()` (or a terminal `cancel()`) cascades parent-first
+along those edges, remaining cooperative: a request is never itself a
+terminal transition. A child added to a parent whose cancellation is already
+in flight is cancelled on arrival, so the parent cannot race past its own
+request into a fresh spawn. A synchronous `Task.spawn` closure has no
+suspension point to notice at, so it skips its body when it starts cancelled
+and settles as cancelled at completion if the request arrives mid-run; its
+result is discarded exactly like a cancelled async body's. Edges are weak by
+design: a parent must not keep its children alive (a dropped child still
+owns its own unobserved-failure report), and the cascade's recursion
+terminates because `requestCancellation` is idempotent and spawn edges only
+ever point from older work to newer.
+
+**Unobserved failures already reported - now pinned.** The
+`RuntimeTaskState` destructor printed `unobserved task failure: ...` on
+stderr for an unobserved failed task; nothing asserted it anywhere. It is
+pinned on both sides: `testUnobservedFailureReport` in
+`tests/runtime_task_executor_tests.cpp` (the line appears at drop, names the
+failure, and stays silent after `observe()` and after `ignore()`, and a
+dropped *success* is silent), and `testCancellationCascade` pins the graph
+semantics (three-deep cascade, mid-flight spawn, terminal-cancellation
+cascade, unrelated tasks untouched, no parent keeping a child alive).
+
+**The "pending" claim was stale, and the docs moved with it.** README's
+async limitation now states what is cooperative about cancellation and what
+the teardown report does; `docs/mir.md` replaces "the runtime delivers
+nothing beyond [the request edge]" with the cascade; and
+`examples/advanced/AsyncTasks.zl` demonstrates an async lambda end to end
+(its verified output block gained `async lambda 36`).
+
+Gates: `tests/zl/valid/concurrency_regressions/AsyncLambdaTasks.zl`,
+`CancellationPropagates.zl` (parent -> child -> grandchild cascade, pending-
+cancel, and an uncancelled sibling that must run to completion), and
+`UnobservedTaskFailure.zl`, all under MIR, `ZL_MIR_OPT=0` and
+`ZL_COMPILER=ast`; the two C++ tests above; the existing
+`runtime_task_executor_tests`, `runtime_sync_tests` and
+`concurrency_regressions` suites unchanged; 42/42 ctest, 52/52 examples
+byte-compared, 91/91 regression fixtures.
+
 ## 2026-09-19 - Phase 1 (memory domains): annotation rules and the `memory` contract skeleton
 
 Phase 1 of [`docs/memory-domains.md`](memory-domains.md) is in: annotations

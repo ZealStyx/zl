@@ -248,6 +248,7 @@ void registerBuiltinPasses() {
     registry.registerPass("simplify-branches", [] { return createBranchSimplificationPass(); });
     registry.registerPass("eliminate-dead-blocks", [] { return createDeadBlockEliminationPass(); });
     registry.registerPass("eliminate-dead-values", [] { return createDeadValueEliminationPass(); });
+    registry.registerPass("eliminate-dead-functions", [] { return createEliminateDeadFunctionsPass(); });
 }
 
 // ---------------------------------------------------------------------------
@@ -364,9 +365,18 @@ PassManager PassManager::defaultPipeline() {
 
     // Ordering, and why:
     //
-    //   simplify-branches   first, because a branch on a constant is the
-    //                       cheapest win available and it *creates* the
-    //                       unreachable blocks the next pass removes.
+    //   eliminate-dead-functions
+    //                       first, and the only module pass: a function that
+    //                       cannot run needs no per-function passes run over
+    //                       it, and the smaller module is what every later
+    //                       pass (and the verifier at the end) walks. It runs
+    //                       again each iteration, so a call site some other
+    //                       pass deletes can strand a function that was live
+    //                       on the way in.
+    //   simplify-branches   first among the function passes, because a branch
+    //                       on a constant is the cheapest win available and it
+    //                       *creates* the unreachable blocks the next pass
+    //                       removes.
     //   eliminate-dead-blocks
     //                       immediately after, so the value passes walk a CFG
     //                       with no dead regions in it - a dead block can
@@ -397,6 +407,7 @@ PassManager PassManager::defaultPipeline() {
     // the last pass enables the first one again: values that become constant
     // late turn into branches on constants that were not constant on the way
     // in.
+    manager.addPass(createEliminateDeadFunctionsPass());
     manager.addPass(createBranchSimplificationPass());
     manager.addPass(createDeadBlockEliminationPass());
     manager.addPass(createConstantFoldingPass());

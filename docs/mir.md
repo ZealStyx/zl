@@ -408,8 +408,9 @@ void return and the runtime nil the task completes with.
 `task_block` waits for a task and yields its payload, and is rejected in
 `async` code (which suspends with `await` instead). `task_ignore` detaches
 failure propagation; `task_cancel` requests cancellation, which the task
-observes at its next suspension point. MIR models the request edge only,
-because the runtime delivers nothing beyond it either.
+observes at its next suspension point and which the runtime then cascades to
+the tasks spawned from that task's body. MIR models the request edge only;
+the cascade is runtime state, not a graph edge the module sees.
 
 ### Scoped locks and shared state
 

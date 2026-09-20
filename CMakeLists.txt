@@ -66,6 +66,7 @@ set(SOURCES
     ${CMAKE_SOURCE_DIR}/src/mir/lowering.cpp
     ${CMAKE_SOURCE_DIR}/src/mir/opt_constant.cpp
     ${CMAKE_SOURCE_DIR}/src/mir/opt_dead.cpp
+    ${CMAKE_SOURCE_DIR}/src/mir/opt_dead_functions.cpp
     ${CMAKE_SOURCE_DIR}/src/mir/opt_simplify.cpp
     ${CMAKE_SOURCE_DIR}/src/mir/pass_manager.cpp
     ${CMAKE_SOURCE_DIR}/src/mir/printer.cpp
@@ -381,9 +382,11 @@ zl_add_required_test(zl-mir-opt-tests tests/mir_pass_tests.cpp
     src/mir/instruction.cpp
     src/mir/opt_constant.cpp
     src/mir/opt_dead.cpp
+    src/mir/opt_dead_functions.cpp
     src/mir/opt_simplify.cpp
     src/mir/pass_manager.cpp
     src/mir/printer.cpp
+    src/mir/reachability.cpp
     src/mir/ssa.cpp
     src/mir/type.cpp
     src/mir/verifier.cpp
