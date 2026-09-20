@@ -235,6 +235,8 @@ zl_add_required_test(zl-runtime-type-tests tests/runtime_type_tests.cpp
 
 # Controlled collector seam: exercises GC parking/reactivation and collector
 # election without depending on allocation volume or thread scheduling luck.
+# The test defines its own TracingGC methods (including Collection::reclaim),
+# so gc.cpp must NOT be linked: only the coordinator is under test.
 zl_add_required_test(zl-gc-safepoint-tests tests/gc_safepoint_tests.cpp src/vm/gc_safepoint.cpp)
     target_link_libraries(zl-gc-safepoint-tests PRIVATE Threads::Threads)
 

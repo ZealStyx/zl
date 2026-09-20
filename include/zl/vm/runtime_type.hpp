@@ -66,8 +66,36 @@ struct RuntimeTypeInfo {
     std::vector<RuntimeFieldInfo> fields;
     std::vector<RuntimeMethodInfo> methods;
     std::vector<RuntimeConstructorInfo> constructors;
+
+    // Flat field storage layout (Phase 0, memory-domains.md §9). An instance's
+    // declared fields live in ObjectBox::fields at these slots: slot i is the
+    // i-th distinct non-static field name in `fields` order (base classes
+    // first - the merge order both compiler pipelines build). Static fields
+    // are excluded: they live in chunk static storage, not per-instance.
+    // Build with buildRuntimeFieldIndex() BEFORE the type is shared as
+    // RuntimeTypeRef; every consumer (VM GetField/SetField, printing, tracing,
+    // structural equality, the natives) reads the layout through this one
+    // table, so both pipelines agree by construction.
+    std::size_t instanceFieldCount{0};
+    std::vector<std::string> instanceFieldNames;
+    std::unordered_map<std::string, std::size_t> fieldIndex;
 };
 
 using RuntimeTypeRef = std::shared_ptr<const RuntimeTypeInfo>;
+
+// Fill the flat-layout index from `type.fields`. Idempotent and cheap
+// (one pass over the field list); call it once at metadata construction.
+inline void buildRuntimeFieldIndex(RuntimeTypeInfo& type) {
+    type.instanceFieldCount = 0;
+    type.instanceFieldNames.clear();
+    type.fieldIndex.clear();
+    for (const auto& field : type.fields) {
+        if (field.isStatic) continue;
+        if (type.fieldIndex.count(field.name)) continue; // first occurrence wins
+        type.fieldIndex.emplace(field.name, type.instanceFieldCount);
+        type.instanceFieldNames.push_back(field.name);
+        ++type.instanceFieldCount;
+    }
+}
 
 } // namespace zl

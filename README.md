@@ -174,6 +174,7 @@ Full syntax and semantics: **[docs/language-guide.md](docs/language-guide.md)**.
 | [docs/mir-optimizer.md](docs/mir-optimizer.md) | The MIR optimiser: pass/analysis managers, effect classification, the safety contract, differential validation |
 | [docs/tooling.md](docs/tooling.md) | Editor/test tooling, `zl-lsp`, `zl-test`, fast diagnostics, document symbols |
 | [docs/development.md](docs/development.md) | Build details, stdlib lookup, testing, packaging |
+| [docs/memory-domains.md](docs/memory-domains.md) | Design direction: user-defined automatic memory domains (arena/pool/`memory` blocks) beside the tracing GC |
 | [examples/](examples/README.md) | 46 runnable examples, basics through async, each with verified output |
 | [examples/REVIEW.md](examples/REVIEW.md) | Bugs found while writing them, fixed and open |
 | [TASKS.md](TASKS.md) | The open work list: what is left, what it would take, and what is already stale |
@@ -182,6 +183,9 @@ Full syntax and semantics: **[docs/language-guide.md](docs/language-guide.md)**.
 The memory-model direction — ownership combined with tracing GC, GC-managed and
 thread-confined by default, with `shared` explicit rather than implicit — is
 summarized in [docs/language-guide.md](docs/language-guide.md#memory-model-direction).
+The plan for extending it so programmers can write their own automatic memory
+strategies (memory domains: arena, pool, user-defined) is
+[docs/memory-domains.md](docs/memory-domains.md).
 
 ## Current limitations
 

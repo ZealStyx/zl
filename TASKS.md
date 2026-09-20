@@ -23,9 +23,9 @@ Rules of upkeep:
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release           # once
 cmake --build build --config Release --target zl-tests   # core + every regression target
-(cd build && ctest -C Release)                           # 41 tests, includes both parity scripts
-examples/run_all.sh build/zl_language                    # 51 examples, byte-compared to their expected output
-bash scripts/run_regressions.sh build/zl_language all    # 59 fixtures under tests/zl
+(cd build && ctest -C Release)                           # 42 tests, includes both parity scripts
+examples/run_all.sh build/zl_language                    # 52 examples, byte-compared to their expected output
+bash scripts/run_regressions.sh build/zl_language all    # 88 fixtures under tests/zl (verified 2026-09-19)
 bash scripts/native_gate.sh build/zl_language            # native tier gate
 ```
 
@@ -130,6 +130,10 @@ FFI passes opaque buffers; a typed schema per C struct is a later ABI extension
 **Done when** `zl-bind` emits a typed schema for a struct with mixed field types
 and a test reads and writes each field by name.
 
+(P2-8 - `owned` ends rootedness but frees nothing - closed 2026-09-19 with the
+Phase 0 baseline in [docs/memory-domains.md §10.1](docs/memory-domains.md#101-phase-0-baseline-measured-2026-09-19);
+see [Done](#done).)
+
 ---
 
 ## Performance ([research/report.md](research/report.md))
@@ -179,6 +183,33 @@ confirmed already fixed on 2026-09-17; see [Done](#done) and
 Most recent first. Kept briefly so the gates that cover each fix are findable,
 then deleted - [docs/changelog.md](docs/changelog.md) is the permanent record.
 
+- [x] **P2-8 · `owned` ends rootedness but frees nothing - Phase 0 baseline
+  measured, box recycling lands with numbers** (2026-09-19) -
+  [benchmarks/AllocationBenchmark.zl](benchmarks/AllocationBenchmark.zl) +
+  [benchmarks/run_allocation_benchmark.sh](benchmarks/run_allocation_benchmark.sh)
+  (one process per workload, per-child peak RSS via `wait4`, two runs averaged)
+  measures the corpus of [docs/memory-domains.md](docs/memory-domains.md#101-phase-0-baseline-measured-2026-09-19)
+  before (`3f1a737` + counters only) and after (flat `ObjectBox::fields`,
+  recycled-box free list, existing threshold growth). Result: peak RSS per
+  kept object **703 B → 574 B (−18%)** one-field and **1464 B → 905 B (−38%)**
+  eight-field; collect share 4.2% → 2.8% on eight-field keep 1e6; `new`
+  throughput neutral inside two-run variance; churn free-list hit rate ~100%
+  with no throughput gain - the per-allocation cost is the registry `push_back`
+  and the refcount, not the box allocation, so recycling is not a speed win on
+  this corpus. The memory win is the flat fields; the gate verdict keeps
+  domains aimed at what the numbers don't touch - eager release at scope exit,
+  which is this task's original gap. (e) also lands the first `.zl` fixture
+  pair for `gc/owned/borrow/shared`:
+  [tests/zl/valid/ownership_tests/OwnedBorrowShared.zl](tests/zl/valid/ownership_tests/OwnedBorrowShared.zl)
+  plus the two rejects
+  [tests/zl/invalid/ownership_tests/](tests/zl/invalid/ownership_tests/)
+  (`UseAfterMove`, `MoveWhileBorrowed`) and the example
+  [examples/advanced/OwnershipBasics.zl](examples/advanced/OwnershipBasics.zl).
+  Gates: 42/42 ctest, 52/52 examples byte-compared, 72/72 regression fixtures,
+  16/16 regression corpus + 6/6 static rejects + 4/4 runtime safety fixtures
+  byte-identical across backends; raw rows in
+  `benchmarks/results/allocation_{before,after}{,2}.json`; table in
+  [docs/memory-domains.md §10.1](docs/memory-domains.md#101-phase-0-baseline-measured-2026-09-19).
 - [x] **P2-10 · An unmatched empty literal was reported by the verifier, not by
   resolution** (found 2026-09-18 while closing P2-9) - an empty `{}` inferred a
   bare `SET` with no class name, and `isAssignable` treats an unparameterized

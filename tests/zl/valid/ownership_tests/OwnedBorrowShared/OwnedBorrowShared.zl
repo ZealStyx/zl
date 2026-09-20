@@ -1,0 +1,54 @@
+// ============================================================================
+// Regression fixture - valid/ownership_tests - OwnedBorrowShared
+//
+// The first source-level fixture pair for the four slot modifiers. This is
+// the valid half: one program that exercises every modifier and prints
+// deterministic output, so a regression in any of them shows up in
+// scripts/run_regressions.sh (valid scope expects exit 0).
+//
+// Covered:
+//   gc      the default domain - a plain local managed by the collector
+//   owned   a single owner, passed on with `move`, and consumed by value
+//   borrow  a read-only view of an owned local; the owner keeps it
+//   shared  the thread-synchronised cell (Shared<T>), set and read back
+//
+// The invalid half lives in tests/zl/invalid/ownership_tests/ (UseAfterMove,
+// MoveWhileBorrowed), one fixture per dataflow diagnostic. The Ticket type is
+// this case's helper module (Ticket.zl, sibling of the entry): one primary
+// type per file, imported by name.
+// ============================================================================
+
+import Ticket
+
+class OwnedBorrowShared {
+    static func read(borrow Ticket t): string {
+        return t.label()
+    }
+
+    static func consume(owned Ticket t): string {
+        return t.label() + ":consumed"
+    }
+
+    func main(): void {
+        // gc: the default domain; the collector decides when the box dies.
+        var gcTicket = new Ticket("gc")
+        log("gc=" + gcTicket.label())
+
+        // owned: exactly one owner. The borrow parameter borrows it;
+        // `move` transfers ownership into consume, ending this binding.
+        owned Ticket ownedTicket = new Ticket("owned")
+        log("owned=" + OwnedBorrowShared.read(ownedTicket))
+        log("moved=" + OwnedBorrowShared.consume(move ownedTicket))
+
+        // borrow: a read-only view; `kept` still owns the box afterwards.
+        owned Ticket kept = new Ticket("kept")
+        borrow Ticket view = kept
+        log("view=" + view.label())
+        log("after=" + kept.label())
+
+        // shared: a synchronised cell; setValue/get are the accessors.
+        var cell = new Shared<int>(0)
+        cell.setValue(cell.get() + 7)
+        log("cell=" + cell.get())
+    }
+}

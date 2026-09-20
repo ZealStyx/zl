@@ -58,7 +58,7 @@ void testReachabilityThroughGraphs() {
     auto leaf = zl::makeGCMap();
     auto middle = zl::makeGCObject();
     middle->className = "Middle";
-    middle->fields["leaf"] = zl::Value(leaf);
+    objectFieldAccess(*middle, "leaf") = zl::Value(leaf);
     auto root = zl::makeGCList();
     root->items.push_back(zl::Value(middle));
 

@@ -2,6 +2,145 @@
 
 Dated progress notes, newest first. These were previously appended to `README.md`.
 
+## 2026-09-19 - Phase 1 (memory domains): annotation rules and the `memory` contract skeleton
+
+Phase 1 of [`docs/memory-domains.md`](memory-domains.md) is in: annotations
+have rules, and a `memory` declaration parses and is contract-checked - with
+no consumer yet, exactly as the phase planned. The phase's two exit criteria
+are both compile errors with locations now: a `memory` block missing
+`release` is refused at the declaration, and an unknown `@` name is refused
+at the `@`.
+
+**Annotations: a table instead of silence.** `parseAnnotations` accepted any
+identifier, so `@memroy(Pool)` compiled and did nothing - a misspelt
+annotation was indistinguishable from an absent one, and nothing stopped a
+fourth annotation consumer from being another `if`. The fix is one registry,
+[`include/zl/parser/annotation_rules.hpp`](../include/zl/parser/annotation_rules.hpp),
+with the five names that have consumers today (`Deprecated`,
+`SuppressWarnings`, `Override`, `ffi`, `native`), each with the declaration
+kinds it may annotate. The two halves are enforced where the context lives:
+the *name* is checked in the parser at the `@` itself (the earliest point a
+location is known - `syntax error: unknown annotation '@memroy' at line N -
+known annotations are: ...`), and the *target* is checked in the type checker
+where the declaration kind is fully known (`@Override` on a class or on a
+constructor is an error naming what is allowed there; `@Deprecated` and
+`@SuppressWarnings` remain constructor-legal because they target any func).
+A field still takes no annotation, unchanged.
+
+**`memory Name { ... }`: the contract skeleton.** `memory` is a contextual
+keyword at file scope (identifier uses are untouched - `var memory = 5`
+still parses), the body takes exactly the member forms a domain can use
+(fields, funcs; statics, asyncs, operators, nested declarations and
+annotations on members are each a specific error), and
+`TypeChecker::registerMemoryDeclaration` validates the contract from
+`docs/memory-domains.md §4.1` against the written signatures: `acquire`
+and `release` required, `reset`/`exhausted`/`onCollect` optional-but-
+then-exact, each public, state and helpers private, no constructor, no
+`extends` of a domain, and `new FrameArena()` fails closed with a message
+naming the phase that removes the refusal - the same convention as the
+native backend's unimplemented region opcodes. Three inert builtin types
+(`MemoryShape`, `MemorySlot`, `MemoryStats`) make the signatures resolvable;
+nothing accepts a value of them, so a fabricated one is unobservable.
+Nothing emits the declaration: no layout, no dispatch, no reflection, no
+`--emit-mir` output - registration builds a checking shape and the checker
+is the only reader.
+
+Phase 0's one open gate item closes with this phase: §9 required each
+phase's §10 numbers to land in `research/report.md`, and they now have -
+`research/report.md` §2.8 carries the allocation baseline (throughput,
+collect share, peak RSS, before/after) with the same reading §10.1 gives it.
+
+Gates: the new fixtures are `tests/zl/valid/memory_tests/MemoryContract/`
+(a full valid contract, imported as a module) and
+`tests/zl/valid/language_hardening_tests/AnnotationRules/` (every known
+annotation on a legal target), plus one invalid fixture per rule:
+`tests/zl/invalid/memory_tests/` (11 - missing release, wrong signature,
+private contract method, duplicate contract method, public helper, public
+field, constructor, static member, construction refused, extends refused,
+malformed declaration) and `UnknownAnnotation` /
+`AnnotationTarget{Class,Constructor}`. 42/42 ctest, 88/88 regression
+fixtures, 52/52 examples, boundary-lint, backend diff and the native gate
+all green on the same build.
+
+## 2026-09-19 - One primary type per file in the test corpus
+
+The regression fixtures had drifted against the rule
+[`docs/packages.md`](packages.md#one-primary-type-per-file) documents: eight
+fixtures inlined their helper types into the case's own file, so the corpus
+that is supposed to pin the language's module rules never exercised the
+one-primary-type-per-file layout it ships with. Each of them is now a
+per-case directory - entry file plus one helper module per type, imported by
+name, the layout `tests/zl/valid/import_tests/ImportCase/` already used -
+and the runner discovers them unchanged (a case is a directory containing a
+`main`-declaring `.zl`):
+
+- `valid/ownership_tests/OwnedBorrowShared` (Ticket out)
+- `invalid/ownership_tests/UseAfterMove`, `MoveWhileBorrowed` (Ticket out)
+- `valid/language_hardening_tests/StringMethods` (StringMethodBox,
+  StringMethodTag out), `IncompleteStubRefusal` (Box out),
+  `GenericNameCollision` (E out - the collision with builtin `Result`'s
+  `E` type parameter survives the import intact, same diagnostic)
+- `invalid/type_errors/OpenSumMatch` (Mine out - the imported subclass
+  still reopens the sum and the match still reports
+  `uncovered Result<int,string>`)
+- `valid/core_tests/AllFeatures` (Point, Animal, Dog, Box out; Dog imports
+  Animal itself, and `scripts/native_gate.sh`/`.ps1` point at the new
+  entry path)
+
+Two fixtures keep multiple types in one file on purpose, both because the
+multi-type file *is* the thing under test:
+`invalid/semantic_errors/DuplicateClass` (two same-name classes in one
+compilation unit is the diagnostic) and
+`valid/import_tests/ImportCase/ImportHelper` (a helper travelling with its
+primary import is the documented behaviour being exercised). Every moved
+case reproduces its pre-move exit status and diagnostic; every unmoved gate
+was rerun (88/88 fixtures, 52/52 examples, 42/42 ctest).
+
+## 2026-09-19 - Memory domains: a plan that fits the runtime (design, no behaviour change)
+
+The direction for letting a ZL program choose - and eventually write - its own
+automatic memory strategy now lives in
+[`docs/memory-domains.md`](memory-domains.md). It replaces an earlier draft, and
+most of the replacing came from the code disagreeing with it:
+
+- the draft's `MemoryDomain::allocate(size)` has nothing to intercept. Managed
+  allocation here is `make_unique<ObjectBox>` into one global registry, and a
+  box's payload is RAII (`std::string`, `vector<Value>`, `unordered_map`), so a
+  chunk reset could not free it - a bump arena would leak exactly the memory it
+  came to reclaim. The contract is typed instead (`acquire(MemoryShape)` /
+  `release(MemorySlot)`), modelled on the native-resource registry ZL already
+  has and verifies.
+- the ownership half of the abstraction is already built: `gc`/`owned`/`borrow`/
+  `shared` are parsed, checked and carried through MIR to the runtime. So the
+  plan adds an *orthogonal* storage-domain id rather than the fused
+  `Arena<'a, T>` the draft proposed, which would have re-opened every ownership
+  rule in the checker, the verifier and both backends.
+- `shared` is the thread-synchronised cell, not a reference count, and no
+  managed box is counted anywhere - so the draft's `shared Object` is out, and
+  `docs/mir.md`'s "reference-counted elsewhere" is corrected.
+- `with` is the data-update operator, `@name` annotations have no allowlist (an
+  unknown one compiles and is ignored), and `unsafe` does not exist. Domains
+  need none of the three: they never receive an address, and reclamation happens
+  only where the domain's policy and the compiler's liveness proof agree - which
+  is what turns a lying domain from a memory-safety bug into a performance bug.
+- escape checking is scoped to what the checker can prove: it extends the region
+  paths `borrowRegionForExpr`/`regionOverlaps` already compute to `FieldStore`,
+  `StaticStore` and captures, instead of promising the heap alias analysis
+  `docs/mir-safety.md` says the project does not have.
+
+Two doc gaps the plan exposed, and which this change closes: `docs/language-guide.md`
+never documented the `owned`/`borrow` declarations at all, and said nothing about
+what `Drop` does - which is to end a binding's rootedness, not to free anything.
+`TASKS.md` gains **P2-8** for that second half: the lifetime language is checked
+end to end with no eager reclamation behind it, which is the real reason a memory
+domain would be worth its complexity. Phase 0 of the plan is deliberately the
+runtime's own easy wins - flat `ObjectBox` fields, recycling boxes from the
+collector's deferred vector, a measured baseline - gated so that if those beat an
+arena, no syntax is added.
+
+No compiler, runtime, stdlib or test change: documentation only, so the build,
+ctest, examples and the differential harnesses are untouched by definition.
+
 ## 2026-09-18 - An empty literal says what kind of collection it is (P2-10)
 
 ```zl

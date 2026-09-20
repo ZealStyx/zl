@@ -1,0 +1,23 @@
+// Regression fixture - invalid/ownership_tests - MoveWhileBorrowed
+//
+// The second invalid half of the first ownership fixture pair. While a
+// `borrow` view of an owned value is still live, the owner cannot be moved
+// away from it - the view would alias a box someone else now owns. Expected:
+// a compile error naming the owner and the active borrow, exit 1.
+//
+// Valid counterpart: tests/zl/valid/ownership_tests/OwnedBorrowShared.zl.
+// The Ticket type is this case's helper module (Ticket.zl, sibling of the
+// entry): one primary type per file, imported by name.
+
+import Ticket
+
+class MoveWhileBorrowed {
+    static func consume(owned Ticket t): void {}
+
+    func main(): void {
+        owned Ticket b = new Ticket()
+        borrow Ticket view = b
+        log(view.label())
+        MoveWhileBorrowed.consume(move b)
+    }
+}

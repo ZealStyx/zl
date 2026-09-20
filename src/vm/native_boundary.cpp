@@ -13,7 +13,13 @@ namespace {
                                      const ExecutionState* state) {
     Value objectValue = makeEmptyObject("NativeError");
     auto object = std::get<ObjectRef>(objectValue);
-    object->fields["message"] = message;
+    // Runtime type before the first declared-field write (flat field layout:
+    // a declared name resolves through the box's own runtime class).
+    if (chunk) {
+        auto it = chunk->classReflection.find("NativeError");
+        if (it != chunk->classReflection.end()) object->runtimeType = it->second.runtimeType;
+    }
+    objectFieldAccess(*object, "message") = message;
     std::string trace;
     if (state) {
         for (const auto& name : state->callStackNames()) {
@@ -21,11 +27,7 @@ namespace {
             trace += "at " + name;
         }
     }
-    object->fields["stackTrace"] = trace.empty() ? std::string("at <native>") : trace;
-    if (chunk) {
-        auto it = chunk->classReflection.find("NativeError");
-        if (it != chunk->classReflection.end()) object->runtimeType = it->second.runtimeType;
-    }
+    objectFieldAccess(*object, "stackTrace") = trace.empty() ? std::string("at <native>") : trace;
     throw ZlThrownException(std::move(object));
 }
 

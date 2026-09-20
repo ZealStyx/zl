@@ -2152,9 +2152,9 @@ Value typeFields(const std::vector<Value>& args) {
     if (obj && obj->runtimeType) for (const auto& field : obj->runtimeType->fields) {
         auto ref = makeGCObject();
         ref->className = "Field";
-        ref->fields["name"] = field.name;
-        ref->fields["type"] = field.typeName;
-        ref->fields["access"] = field.access;
+        objectFieldAccess(*ref, "name") = field.name;
+        objectFieldAccess(*ref, "type") = field.typeName;
+        objectFieldAccess(*ref, "access") = field.access;
         out->items.emplace_back(ObjectRef(std::move(ref)));
     }
     return out;
@@ -2168,14 +2168,14 @@ Value typeMethods(const std::vector<Value>& args) {
     if (obj && obj->runtimeType) for (const auto& method : obj->runtimeType->methods) {
         auto ref = makeGCObject();
         ref->className = "Method";
-        ref->fields["name"] = method.name;
-        ref->fields["returnType"] = method.returnType;
-        ref->fields["access"] = method.access;
-        ref->fields["static"] = method.isStatic;
-        ref->fields["async"] = method.isAsync;
+        objectFieldAccess(*ref, "name") = method.name;
+        objectFieldAccess(*ref, "returnType") = method.returnType;
+        objectFieldAccess(*ref, "access") = method.access;
+        objectFieldAccess(*ref, "static") = method.isStatic;
+        objectFieldAccess(*ref, "async") = method.isAsync;
         auto params = makeGCList();
         for (const auto& type : method.parameterTypes) params->items.emplace_back(type);
-        ref->fields["parameters"] = ListRef(std::move(params));
+        objectFieldAccess(*ref, "parameters") = ListRef(std::move(params));
         out->items.emplace_back(ObjectRef(std::move(ref)));
     }
     return out;
@@ -2191,13 +2191,37 @@ Value typeBase(const std::vector<Value>& args) {
 
 // --- Reflection wrappers -------------------------------------------------
 
+// Phase 0 measurement surface (memory-domains.md §9/§10): the process-wide
+// collector counters as a map. Keys are stable - the allocation benchmark
+// (benchmarks/) parses them - and every value is an int:
+//   allocations   boxes that entered the registry (fresh + recycled)
+//   reused        boxes taken from the recycled-box free list
+//   collections   collect() runs so far
+//   collectMs     cumulative trace+sweep time, whole milliseconds
+//   tracked       boxes live right now
+//   peakTracked   high-water mark of the live heap
+//   threshold     allocation count that triggers the next collection
+Value gcStats(const std::vector<Value>& args) {
+    if (!args.empty()) throw std::runtime_error("GC.stats: expected no arguments");
+    const auto c = TracingGC::instance().counters();
+    auto out = makeGCMap();
+    out->setEntry(Value(std::string("allocations")), Value(static_cast<std::int64_t>(c.allocations)));
+    out->setEntry(Value(std::string("reused")), Value(static_cast<std::int64_t>(c.reused)));
+    out->setEntry(Value(std::string("collections")), Value(static_cast<std::int64_t>(c.collections)));
+    out->setEntry(Value(std::string("collectMs")), Value(static_cast<std::int64_t>(c.collectNs / 1000000)));
+    out->setEntry(Value(std::string("tracked")), Value(static_cast<std::int64_t>(c.tracked)));
+    out->setEntry(Value(std::string("peakTracked")), Value(static_cast<std::int64_t>(c.peakTracked)));
+    out->setEntry(Value(std::string("threshold")), Value(static_cast<std::int64_t>(c.threshold)));
+    return Value(out);
+}
+
 Value sharedShare(const std::vector<Value>& args) {
     if (args.size() != 1) throw std::runtime_error("share: expected one value");
     auto box = makeGCObject();
     // Runtime dispatch uses the canonical Shared class; the compiler retains
     // Shared<T> at the static type level for get()/setValue() typing.
     box->className = "Shared";
-    box->fields["__value"] = args[0];
+    objectFieldAccess(*box, "__value") = args[0];
     return Value{ObjectRef(std::move(box))};
 }
 
@@ -2212,9 +2236,9 @@ Value sharedGet(const std::vector<Value>& args) {
         VM::BlockingNativeCall blocked(g_currentNativeVm);
         lock.lock();
     }
-    auto it = (*obj)->fields.find("__value");
-    if (it == (*obj)->fields.end()) throw std::runtime_error("Shared.__get: invalid Shared value");
-    return it->second;
+    const Value* it = objectFieldLookup(**obj, "__value");
+    if (it == nullptr) throw std::runtime_error("Shared.__get: invalid Shared value");
+    return *it;
 }
 
 Value sharedWithLock(const std::vector<Value>& args) {
@@ -2251,7 +2275,7 @@ Value sharedSet(const std::vector<Value>& args) {
     {
         RuntimeTypeCheck types(nativeChunk());
         types.require(replacement, runtimeFieldType(*nativeChunk(), (*obj)->className, "__value", obj->get()));
-        std::swap((*obj)->fields["__value"], replacement);
+        std::swap(objectFieldAccess(**obj, "__value"), replacement);
         types.commit();
     }
     lock.unlock();
@@ -2262,7 +2286,7 @@ Value typeOf(const std::vector<Value>& args) {
     if (args.size() != 1) throw std::runtime_error("Type.of: expected one argument");
     auto box = makeGCObject();
     box->className = "Type";
-    box->fields["__value"] = args[0];
+    objectFieldAccess(*box, "__value") = args[0];
     return ObjectRef(std::move(box));
 }
 
@@ -2276,9 +2300,9 @@ ObjectRef requireTypeObject(const Value& value, const char* name) {
 
 const Value& reflectedValue(const Value& value, const char* name) {
     auto obj = requireTypeObject(value, name);
-    auto it = obj->fields.find("__value");
-    if (it == obj->fields.end()) throw std::runtime_error(std::string(name) + ": invalid Type value");
-    return it->second;
+    const Value* it = objectFieldLookup(*obj, "__value");
+    if (it == nullptr) throw std::runtime_error(std::string(name) + ": invalid Type value");
+    return *it;
 }
 
 Value reflectionName(const std::vector<Value>& args) {
@@ -2313,15 +2337,15 @@ Value reflectionFunction(const std::vector<Value>& args) {
         throw std::runtime_error("Reflection.function: expected a function value");
     auto ref = makeGCObject();
     ref->className = "Function";
-    ref->fields["__closure"] = value;
-    ref->fields["name"] = (*closure)->functionName;
+    objectFieldAccess(*ref, "__closure") = value;
+    objectFieldAccess(*ref, "name") = (*closure)->functionName;
     auto params = makeGCList();
     for (const auto& type : (*closure)->parameterTypeNames) params->items.emplace_back(type);
-    ref->fields["parameters"] = ListRef(std::move(params));
-    ref->fields["returnType"] = (*closure)->isAsync
+    objectFieldAccess(*ref, "parameters") = ListRef(std::move(params));
+    objectFieldAccess(*ref, "returnType") = (*closure)->isAsync
         ? "Task<" + (*closure)->returnTypeName + ">" : (*closure)->returnTypeName;
-    ref->fields["async"] = (*closure)->isAsync;
-    ref->fields["native"] = (*closure)->isNative;
+    objectFieldAccess(*ref, "async") = (*closure)->isAsync;
+    objectFieldAccess(*ref, "native") = (*closure)->isNative;
     return ObjectRef(std::move(ref));
 }
 
@@ -2373,9 +2397,9 @@ Value reflectedMember(const Value& value, const char* expectedClass, const char*
 
 Value reflectionMemberField(const Value& value, const char* expectedClass, const char* operation, const char* fieldName) {
     auto obj = std::get<ObjectRef>(reflectedMember(value, expectedClass, operation));
-    auto it = obj->fields.find(fieldName);
-    if (it == obj->fields.end()) throw std::runtime_error(std::string("Reflection.") + operation + ": malformed " + expectedClass + " metadata");
-    return it->second;
+    const Value* it = objectFieldLookup(*obj, fieldName);
+    if (it == nullptr) throw std::runtime_error(std::string("Reflection.") + operation + ": malformed " + expectedClass + " metadata");
+    return *it;
 }
 Value reflectionFieldName(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Field", "Field.name", "name"); }
 Value reflectionFieldType(const std::vector<Value>& args) { return reflectionMemberField(args[0], "Field", "Field.type", "type"); }
@@ -2396,20 +2420,20 @@ Value reflectionFunctionIsNative(const std::vector<Value>& args) { return reflec
 Value reflectionTypeConstructors(const std::vector<Value>& args) {
     if (args.size() != 1 || !std::holds_alternative<ObjectRef>(args[0])) throw std::runtime_error("Type.constructors: expected a Type value");
     auto typeObj = requireTypeObject(args[0], "Type.constructors");
-    auto it = typeObj->fields.find("__value");
-    if (it == typeObj->fields.end() || !std::holds_alternative<ObjectRef>(it->second)) throw std::runtime_error("Type.constructors: invalid Type value");
-    auto valueObj = std::get<ObjectRef>(it->second);
+    const Value* it = objectFieldLookup(*typeObj, "__value");
+    if (it == nullptr || !std::holds_alternative<ObjectRef>(*it)) throw std::runtime_error("Type.constructors: invalid Type value");
+    auto valueObj = std::get<ObjectRef>(*it);
     auto out = makeGCList();
     if (valueObj && valueObj->runtimeType) {
         for (const auto& ctor : valueObj->runtimeType->constructors) {
             auto ref = makeGCObject();
             ref->className = "Constructor";
-            ref->fields["__owner"] = ctor.ownerClassName;
-            ref->fields["__functionIndex"] = static_cast<std::int64_t>(ctor.functionIndex);
-            ref->fields["__access"] = ctor.access;
+            objectFieldAccess(*ref, "__owner") = ctor.ownerClassName;
+            objectFieldAccess(*ref, "__functionIndex") = static_cast<std::int64_t>(ctor.functionIndex);
+            objectFieldAccess(*ref, "__access") = ctor.access;
             auto params = makeGCList();
             for (const auto& type : ctor.parameterTypes) params->items.emplace_back(type);
-            ref->fields["parameters"] = ListRef(std::move(params));
+            objectFieldAccess(*ref, "parameters") = ListRef(std::move(params));
             out->items.emplace_back(ObjectRef(std::move(ref)));
         }
     }
@@ -2421,21 +2445,21 @@ Value reflectionField(const std::vector<Value>& args) {
     const Value& fieldNameValue = args[1];
     const std::string& fieldName = requireString(fieldNameValue, "Reflection.field");
     auto typeObj = requireTypeObject(typeValue, "Reflection.field");
-    const Value& original = typeObj->fields.at("__value");
+    const Value& original = objectFieldRequire(*typeObj, "__value");
     if (!std::holds_alternative<ObjectRef>(original)) throw std::runtime_error("Reflection.field: expected an object-backed Type");
     auto valueObj = std::get<ObjectRef>(original);
     if (!valueObj || !valueObj->runtimeType) throw std::runtime_error("Reflection.field: missing runtime type metadata");
     auto it = std::find_if(valueObj->runtimeType->fields.begin(), valueObj->runtimeType->fields.end(), [&](const auto& f){ return f.name == fieldName; });
     if (it == valueObj->runtimeType->fields.end()) throw std::runtime_error("Reflection.field: field not found: " + fieldName);
     auto ref = makeGCObject(); ref->className = "Field";
-    ref->fields["name"] = it->name; ref->fields["type"] = it->typeName; ref->fields["access"] = it->access;
+    objectFieldAccess(*ref, "name") = it->name; objectFieldAccess(*ref, "type") = it->typeName; objectFieldAccess(*ref, "access") = it->access;
     return ObjectRef(std::move(ref));
 }
 
 Value reflectionMethod(const std::vector<Value>& args) {
     const std::string& methodName = requireString(args[1], "Reflection.method");
     auto typeObj = requireTypeObject(args[0], "Reflection.method");
-    const Value& original = typeObj->fields.at("__value");
+    const Value& original = objectFieldRequire(*typeObj, "__value");
     if (!std::holds_alternative<ObjectRef>(original)) throw std::runtime_error("Reflection.method: expected an object-backed Type");
     auto valueObj = std::get<ObjectRef>(original);
     if (!valueObj || !valueObj->runtimeType) throw std::runtime_error("Reflection.method: missing runtime type metadata");
@@ -2445,9 +2469,9 @@ Value reflectionMethod(const std::vector<Value>& args) {
     if (matches > 1) throw std::runtime_error("Reflection.method: method '" + methodName + "' is overloaded; use Type.methods() and select a signature");
     auto it = std::find_if(valueObj->runtimeType->methods.begin(), valueObj->runtimeType->methods.end(), [&](const auto& m){ return m.name == methodName; });
     auto ref = makeGCObject(); ref->className = "Method";
-    ref->fields["name"] = it->name; ref->fields["returnType"] = it->returnType; ref->fields["access"] = it->access; ref->fields["static"] = it->isStatic; ref->fields["async"] = it->isAsync;
-    auto params = makeGCList(); for (const auto& type : it->parameterTypes) params->items.emplace_back(type); ref->fields["parameters"] = ListRef(std::move(params));
-    ref->fields["__owner"] = it->ownerClassName; ref->fields["__functionIndex"] = static_cast<std::int64_t>(it->functionIndex);
+    objectFieldAccess(*ref, "name") = it->name; objectFieldAccess(*ref, "returnType") = it->returnType; objectFieldAccess(*ref, "access") = it->access; objectFieldAccess(*ref, "static") = it->isStatic; objectFieldAccess(*ref, "async") = it->isAsync;
+    auto params = makeGCList(); for (const auto& type : it->parameterTypes) params->items.emplace_back(type); objectFieldAccess(*ref, "parameters") = ListRef(std::move(params));
+    objectFieldAccess(*ref, "__owner") = it->ownerClassName; objectFieldAccess(*ref, "__functionIndex") = static_cast<std::int64_t>(it->functionIndex);
     return ObjectRef(std::move(ref));
 }
 
@@ -2455,20 +2479,20 @@ Value reflectionConstructor(const std::vector<Value>& args) {
     auto typeObj = requireTypeObject(args[0], "Reflection.constructor");
     if (!std::holds_alternative<std::int64_t>(args[1])) throw std::runtime_error("Reflection.constructor: expected integer index");
     const auto index = static_cast<std::size_t>(std::get<std::int64_t>(args[1]));
-    const Value& original = typeObj->fields.at("__value");
+    const Value& original = objectFieldRequire(*typeObj, "__value");
     if (!std::holds_alternative<ObjectRef>(original)) throw std::runtime_error("Reflection.constructor: expected an object-backed Type");
     auto valueObj = std::get<ObjectRef>(original);
     if (!valueObj || !valueObj->runtimeType || index >= valueObj->runtimeType->constructors.size()) throw std::runtime_error("Reflection.constructor: index out of range");
     auto ref = makeGCObject(); ref->className = "Constructor";
     const auto& ctor = valueObj->runtimeType->constructors[index];
-    ref->fields["__owner"] = ctor.ownerClassName; ref->fields["__functionIndex"] = static_cast<std::int64_t>(ctor.functionIndex); ref->fields["__access"] = ctor.access;
-    auto params = makeGCList(); for (const auto& type : ctor.parameterTypes) params->items.emplace_back(type); ref->fields["parameters"] = ListRef(std::move(params));
+    objectFieldAccess(*ref, "__owner") = ctor.ownerClassName; objectFieldAccess(*ref, "__functionIndex") = static_cast<std::int64_t>(ctor.functionIndex); objectFieldAccess(*ref, "__access") = ctor.access;
+    auto params = makeGCList(); for (const auto& type : ctor.parameterTypes) params->items.emplace_back(type); objectFieldAccess(*ref, "parameters") = ListRef(std::move(params));
     return ObjectRef(std::move(ref));
 }
 
 Value reflectionConstructorParameters(const std::vector<Value>& args) {
     auto obj = std::get<ObjectRef>(reflectedMember(args[0], "Constructor", "Constructor.parameters"));
-    return obj->fields.at("parameters");
+    return objectFieldRequire(*obj, "parameters");
 }
 
 // --- Test assertions ------------------------------------------------------
@@ -2572,9 +2596,9 @@ static void collectRegexNames(const std::shared_ptr<zl::regex_engine::Node>& n, 
 static Value makeRegexMatchObject(const std::string& text, const zl::regex_engine::MatchResult& match, const zl::regex_engine::Pattern& pattern) {
     auto ref = makeGCObject();
     ref->className = "RegexMatch";
-    ref->fields["value"] = match.groups.empty() ? text.substr(match.start, match.end - match.start) : match.groups[0];
-    ref->fields["start"] = static_cast<std::int64_t>(match.start);
-    ref->fields["end"] = static_cast<std::int64_t>(match.end);
+    objectFieldAccess(*ref, "value") = match.groups.empty() ? text.substr(match.start, match.end - match.start) : match.groups[0];
+    objectFieldAccess(*ref, "start") = static_cast<std::int64_t>(match.start);
+    objectFieldAccess(*ref, "end") = static_cast<std::int64_t>(match.end);
     auto groups = makeGCList();
     auto matched = makeGCList();
     auto namedGroups = makeGCMap();
@@ -2589,10 +2613,10 @@ static Value makeRegexMatchObject(const std::string& text, const zl::regex_engin
         namedGroups->entries.emplace_back(name, match.groups[index]);
         namedMatched->entries.emplace_back(name, index < static_cast<int>(match.groupMatched.size()) && match.groupMatched[index]);
     }
-    ref->fields["groups"] = ListRef(std::move(groups));
-    ref->fields["matched"] = ListRef(std::move(matched));
-    ref->fields["namedGroups"] = MapRef(std::move(namedGroups));
-    ref->fields["namedMatched"] = MapRef(std::move(namedMatched));
+    objectFieldAccess(*ref, "groups") = ListRef(std::move(groups));
+    objectFieldAccess(*ref, "matched") = ListRef(std::move(matched));
+    objectFieldAccess(*ref, "namedGroups") = MapRef(std::move(namedGroups));
+    objectFieldAccess(*ref, "namedMatched") = MapRef(std::move(namedMatched));
     return ObjectRef(std::move(ref));
 }
 static zl::regex_engine::Pattern loadRegexPattern(const std::vector<Value>& args, std::size_t index, const char* fnName) {
@@ -2874,20 +2898,21 @@ std::string toJsonInner(const Value& v, std::unordered_set<const void*>& active,
         // encode the payload directly instead.
         const auto& className = (*p)->className;
         if (className == "List" || className == "Map" || className == "Set") {
-            auto native = (*p)->fields.find("__native");
-            if (native != (*p)->fields.end()) {
-                std::string encoded = toJsonInner(native->second, active, depth + 1);
+            const Value* native = objectFieldLookup(**p, "__native");
+            if (native != nullptr) {
+                std::string encoded = toJsonInner(*native, active, depth + 1);
                 active.erase(p->get());
                 return encoded;
             }
         }
         std::string o = "{";
         bool first = true;
-        for (auto& e : (*p)->fields) {
+        // Layout order for declared fields, as in valueToString.
+        objectFieldForEach(**p, [&](const std::string& name, const Value& fieldValue) {
             if (!first) o += ",";
             first = false;
-            o += jsonEscape(e.first) + ":" + toJsonInner(e.second, active, depth + 1);
-        }
+            o += jsonEscape(name) + ":" + toJsonInner(fieldValue, active, depth + 1);
+        });
         active.erase(p->get());
         return o + "}";
     }
@@ -3338,6 +3363,7 @@ std::vector<NativeFunction> buildTable() {
         std::pair{NativeId::INT_PARSE, intParse},
         std::pair{NativeId::DOUBLE_PARSE, doubleParse},
         std::pair{NativeId::BOOL_PARSE, boolParse},
+        std::pair{NativeId::GC_STATS, gcStats},
         std::pair{NativeId::SHARED_SHARE, sharedShare},
         std::pair{NativeId::SHARED_GET, std::function<Value(const std::vector<Value>&)>{sharedGet}},
         std::pair{NativeId::SHARED_SET, std::function<Value(const std::vector<Value>&)>{sharedSet}},

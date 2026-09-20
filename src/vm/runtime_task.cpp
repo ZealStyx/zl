@@ -217,9 +217,12 @@ Value RuntimeTaskState::observe() {
             error_.rethrow();
         case TaskStatus::Cancelled: {
             failureObserved_ = true;
+            // No chunk is reachable from task state, so the box carries no
+            // runtime type and the message lands in extraFields; every reader
+            // (StoredException, the catch binding, main) resolves it there.
             Value object = makeEmptyObject("CancellationException");
             auto ex = std::get<ObjectRef>(object);
-            ex->fields["message"] = std::string("task was cancelled");
+            objectFieldAccess(*ex, "message") = std::string("task was cancelled");
             throw ZlThrownException(std::move(ex));
         }
         case TaskStatus::Pending:
