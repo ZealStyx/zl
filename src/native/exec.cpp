@@ -18,6 +18,9 @@ namespace {
 using EntryFn = std::int64_t (*)(std::int64_t, std::int64_t, std::int64_t,
                                 std::int64_t, std::int64_t, std::int64_t);
 
+// The all-double counterpart: six XMM argument registers, result in xmm0.
+using DoubleFn = double (*)(double, double, double, double, double, double);
+
 std::string describeClass(ValueClass cls) {
     switch (cls) {
         case ValueClass::Integer: return "int";
@@ -152,14 +155,43 @@ std::size_t NativeExecutable::resolve(const std::string& spec, std::string& erro
     return kNoEntry;
 }
 
+// The one calling shape each entry can honestly be called through, decided
+// from the LIR signature list the constructor recorded. A cast can only
+// describe one register file, so a mixed signature is a refusal, not a
+// marshalling puzzle; `Void` in the parameter list is impossible (selection
+// refuses void parameters), so only the result needs the extra case.
+NativeExecutable::Shape NativeExecutable::shape(std::size_t e, std::string& reason) const {
+    if (e >= names_.size()) { reason = "bad entry index"; return Shape::kUnsupported; }
+    const auto& params = parameterClasses_[e];
+    if (params.size() > 6) {
+        reason = "native execution driver: '" + names_[e] + "' takes " +
+                 std::to_string(params.size()) + " arguments; the SysV shapes the driver casts go to six";
+        return Shape::kUnsupported;
+    }
+    bool all_int = returnClasses_[e] == ValueClass::Integer;
+    bool all_float = returnClasses_[e] == ValueClass::Float;
+    for (const auto cls : params) {
+        if (cls != ValueClass::Integer) all_int = false;
+        if (cls != ValueClass::Float) all_float = false;
+    }
+    if (all_int) return Shape::kInt64;
+    if (all_float) return Shape::kDouble;
+    std::string sig;
+    for (std::size_t i = 0; i < params.size(); ++i) sig += (i ? ", " : "") + describeClass(params[i]);
+    reason = "native execution driver: '" + names_[e] + "' has signature (" + sig + ") -> " +
+             describeClass(returnClasses_[e]) + "; the driver calls all-integer or all-double "
+             "signatures, because one cast describes exactly one register file";
+    return Shape::kUnsupported;
+}
+
 bool NativeExecutable::callInt64(std::size_t e, const std::vector<std::int64_t>& args,
                                  std::int64_t& result, std::string& error) const {
     if (!ok_) { error = error_; return false; }
-    if (e >= names_.size()) { error = "native execution driver: bad entry index"; return false; }
 #if defined(ZL_NATIVE_EXEC_POSIX_MMAP)
-    if (returnClasses_[e] != ValueClass::Integer) {
-        error = "native execution driver: '" + names_[e] + "' returns " + describeClass(returnClasses_[e]) +
-                "; the driver speaks int64 in and out for now";
+    if (shape(e, error) != Shape::kInt64) {
+        if (!error.empty() && error.rfind("native execution driver:", 0) == 0) return false;
+        error = "native execution driver: '" + names_[e] +
+                "' does not have an all-integer int64 signature; see --run-native listing";
         return false;
     }
     if (args.size() != parameterClasses_[e].size()) {
@@ -167,20 +199,39 @@ bool NativeExecutable::callInt64(std::size_t e, const std::vector<std::int64_t>&
                 std::to_string(parameterClasses_[e].size()) + " argument(s), got " + std::to_string(args.size());
         return false;
     }
-    if (args.size() > 6) { error = "native execution driver: more than six arguments"; return false; }
-    for (std::size_t i = 0; i < args.size(); ++i) {
-        if (parameterClasses_[e][i] != ValueClass::Integer) {
-            error = "native execution driver: '" + names_[e] + "' parameter " + std::to_string(i) +
-                    " is " + describeClass(parameterClasses_[e][i]) + "; the driver passes int64 for now";
-            return false;
-        }
-    }
     std::int64_t a[6] = {0, 0, 0, 0, 0, 0};
     for (std::size_t i = 0; i < args.size(); ++i) a[i] = args[i];
     result = reinterpret_cast<EntryFn>(entries_[e])(a[0], a[1], a[2], a[3], a[4], a[5]);
     return true;
 #else
-    (void)e; (void)args; (void)result;
+    (void)e; (void)args; (void)result; (void)error;
+    error = error_;
+    return false;
+#endif
+}
+
+bool NativeExecutable::callDouble(std::size_t e, const std::vector<double>& args,
+                                  double& result, std::string& error) const {
+    if (!ok_) { error = error_; return false; }
+#if defined(ZL_NATIVE_EXEC_POSIX_MMAP)
+    if (shape(e, error) != Shape::kDouble) {
+        if (!error.empty() && error.rfind("native execution driver:", 0) == 0) return false;
+        error = "native execution driver: '" + names_[e] + "' is not an all-double signature";
+        return false;
+    }
+    if (args.size() != parameterClasses_[e].size()) {
+        error = "native execution driver: '" + names_[e] + "' takes " +
+                std::to_string(parameterClasses_[e].size()) + " argument(s), got " + std::to_string(args.size());
+        return false;
+    }
+    // Six XMM argument registers exist; passing padding in unused ones is
+    // exactly what the SysV calling convention allows.
+    double a[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    for (std::size_t i = 0; i < args.size(); ++i) a[i] = args[i];
+    result = reinterpret_cast<DoubleFn>(entries_[e])(a[0], a[1], a[2], a[3], a[4], a[5]);
+    return true;
+#else
+    (void)e; (void)args; (void)result; (void)error;
     error = error_;
     return false;
 #endif

@@ -328,29 +328,37 @@ into one page-aligned arena, binds every direct-call relocation among the
 module's own functions, flips the pages executable, and calls the function
 `--call` names - bare method tokens resolve when unambiguous
 (`sumSquares` finds `NumericKernel.sumSquares(int)`). Without `--call` it lists
-what the subset compiled. `--iters` repeats the call and times the loop:
+what the subset compiled. `--iters` repeats the call, times the loop, and
+accumulates its results in the same order the program's VM loop does, so the
+two lines are comparable as data:
 
-    native-exec: NativeExecBench.sumSquares(int) result=328350 iters=10000 native_ms=6.04
-    vm-exec:     NativeExecBench.sumSquaresVm(int) result=3283500000 iters=10000 vm_ms=870
+    native-exec: NativeExecBench.sumSquares(int) result=328350 iters=10000 total=3283500000 native_ms=6.04
+    vm-exec:     NativeExecBench.sumSquaresVm(int) result=328350 iters=10000 total=3283500000 vm_ms=870
 
 (the second line is the same program's VM twin, run as an ordinary `zl`
-program - `tests/zl/valid/native/NativeExecBench.zl`; both loops compute the
-same totals, and ctest `native-exec-parity` requires exactly that, skipping on
-hosts where the driver refuses to exist). The millisecond columns swing with
+program - `tests/zl/valid/native/NativeExecBench.zl`; ctest
+`native-exec-parity` requires `result` and `total` to agree per tier pair -
+for the double kernel `poly`, agreeing *as printed* means agreeing bit for
+bit, because both sides render the shortest round-trip decimal of the same
+binary64 accumulator). The millisecond columns swing with
 the machine - they are a measurement, not an assertion - but the sign does not
 move much: on the sandbox they measured on, the machine-code loop ran ~140x
 faster than the interpreter running the identical arithmetic.
 
-The driver speaks one ABI, and refuses everything else *by name and reason,
-before anything runs*: integer parameters and an integer result, at most six
-(plain SysV `int64` in/out - floats need XMM marshalling a cast cannot express);
-a module with an unbound call site or any runtime-call relocation (those
-symbols belong to the VM's world, and a GC-map-free native frame cannot enter
-it); non-x86-64-Linux hosts (the same guard as the executable tests - other
+The driver speaks two call shapes, chosen by the signature it finds, and
+refuses everything else *by name and reason, before anything runs*: every
+parameter and the result Integer (SysV `int64` registers, at most six), or
+every parameter and the result Float (six XMM registers, result in `xmm0`).
+A signature that *mixes* the register files is refused rather than marshalled
+- one C++ cast describes exactly one shape, and faking the other would mean
+generating a thunk, which this driver does not do. Also refused: a module
+with an unbound call site or any runtime-call relocation (those symbols
+belong to the VM's world, and a GC-map-free native frame cannot enter it),
+and non-x86-64-Linux hosts (the same guard as the executable tests - other
 platforms get `unsupported platform`, not a guess). Those refusals are the
 subset boundary made operational: every one of them names the machinery the
-"deliberately missing" list below already keeps out. Growing the driver's
-language is P1-6's remaining half.
+"deliberately missing" list below already keeps out. Refs and objects - with
+the GC map they imply - remain P1-6's other half.
 
 ## Tests
 

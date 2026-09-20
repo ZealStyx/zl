@@ -976,15 +976,18 @@ int zlMain(int argc, char** argv) {
             // emitted machine code -> mapped executable -> real call. Without
             // `--call` it is a listing (what the subset compiled of this
             // program, and why the rest is absent); with it, the named
-            // function is invoked `--iters` times and its int64 result and the
-            // wall time of the loop are printed. The driver's refusals
-            // (runtime-bound calls, non-int signatures, unsupported hosts)
-            // are the subset boundary stated in zl/native/exec.hpp - reported
-            // by name, before anything executes.
+            // function is invoked `--iters` times and its result - int64 or
+            // double, decided by the function's own signature - plus the
+            // loop total and the wall time are printed. The driver's refusals
+            // (runtime-bound calls, mixed or reference signatures,
+            // unsupported hosts) are the subset boundary stated in
+            // zl/native/exec.hpp - reported by name, before anything
+            // executes.
             std::vector<std::string> rest(argv + 2, argv + argc);
             std::string file;
             std::string callSpec;
             std::vector<std::int64_t> intArgs;
+            std::vector<double> dblArgs;
             std::int64_t iters = 1;
             for (std::size_t i = 0; i < rest.size(); ++i) {
                 const std::string& a = rest[i];
@@ -1000,6 +1003,13 @@ int zlMain(int argc, char** argv) {
                     try { intArgs.push_back(std::stoll(need("--int64"))); }
                     catch (const std::exception&) {
                         std::cerr << "usage error: --int64 expects an integer\n";
+                        return 2;
+                    }
+                }
+                else if (a == "--double") {
+                    try { dblArgs.push_back(std::stod(need("--double"))); }
+                    catch (const std::exception&) {
+                        std::cerr << "usage error: --double expects a number\n";
                         return 2;
                     }
                 }
@@ -1022,7 +1032,7 @@ int zlMain(int argc, char** argv) {
                 else { std::cerr << "usage error: more than one input file\n"; return 2; }
             }
             if (file.empty()) {
-                std::cerr << "usage: zl --run-native <file.zl> [--call <name>] [--int64 v]... [--iters n]\n";
+                std::cerr << "usage: zl --run-native <file.zl> [--call <name>] [--int64 v | --double v]... [--iters n]\n";
                 return 2;
             }
             std::vector<std::filesystem::path> roots;
@@ -1044,35 +1054,62 @@ int zlMain(int argc, char** argv) {
                 std::cerr << native.describe();
                 return 0;
             }
+            if (!intArgs.empty() && !dblArgs.empty()) {
+                std::cerr << "usage error: --int64 and --double cannot be mixed; the driver dispatches on the function's signature\n";
+                return 2;
+            }
             std::string error;
             const std::size_t entry = exec.resolve(callSpec, error);
             if (entry == zl::native::NativeExecutable::kNoEntry) {
                 std::cerr << error << "\n";
                 return 4;
             }
-            std::int64_t value = 0;
-            if (!exec.callInt64(entry, intArgs, value, error)) {
-                std::cerr << error << "\n";
-                return 4;
-            }
-            // The first call warmed the mapping; the measured loop is the
-            // benchmark number, timed exactly like it is reported.
-            const auto start = std::chrono::steady_clock::now();
-            std::int64_t sink = 0;
-            for (std::int64_t i = 0; i < iters; ++i) {
-                std::int64_t r = 0;
-                if (!exec.callInt64(entry, intArgs, r, error)) { std::cerr << error << "\n"; return 4; }
-                sink += r;
-            }
-            const auto end = std::chrono::steady_clock::now();
-            const double ms = std::chrono::duration<double, std::milli>(end - start).count();
             const std::string name = native.code[entry].name;
-            std::cout << "native-exec: " << name << " result=" << value
-                      << " iters=" << iters << " native_ms=" << ms << "\n";
-            if (sink != value * iters) {
-                std::cerr << "run-native: iteration results disagree (driver bug)\n";
-                return 4;
+            std::string reason;
+            const auto shape = exec.shape(entry, reason);
+            using Shape = zl::native::NativeExecutable::Shape;
+            if (shape == Shape::kUnsupported) { std::cerr << reason << "\n"; return 4; }
+            // The first call warms the mapping; the measured loop follows, and
+            // the loop total is accumulated exactly like the fixture's VM loop
+            // does - same order, same per-operation rounding - so
+            // `native-exec-parity` can compare totals as data, not as bounds.
+            const auto start = std::chrono::steady_clock::now();
+            if (shape == Shape::kInt64) {
+                if (!dblArgs.empty()) {
+                    std::cerr << "usage error: '" << name << "' has an all-integer signature; pass --int64 arguments\n";
+                    return 2;
+                }
+                std::int64_t value = 0;
+                if (!exec.callInt64(entry, intArgs, value, error)) { std::cerr << error << "\n"; return 4; }
+                std::int64_t total = 0;
+                for (std::int64_t i = 0; i < iters; ++i) {
+                    std::int64_t r = 0;
+                    if (!exec.callInt64(entry, intArgs, r, error)) { std::cerr << error << "\n"; return 4; }
+                    if (r != value) { std::cerr << "run-native: iteration results disagree (driver bug)\n"; return 4; }
+                    total += r;
+                }
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+                std::cout << "native-exec: " << name << " result=" << value << " iters=" << iters
+                          << " total=" << total << " native_ms=" << ms << "\n";
+                return 0;
             }
+            if (!intArgs.empty()) {
+                std::cerr << "usage error: '" << name << "' has an all-double signature; pass --double arguments\n";
+                return 2;
+            }
+            double value = 0.0;
+            if (!exec.callDouble(entry, dblArgs, value, error)) { std::cerr << error << "\n"; return 4; }
+            double total = 0.0;
+            for (std::int64_t i = 0; i < iters; ++i) {
+                double r = 0.0;
+                if (!exec.callDouble(entry, dblArgs, r, error)) { std::cerr << error << "\n"; return 4; }
+                if (r != value) { std::cerr << "run-native: iteration results disagree (driver bug)\n"; return 4; }
+                total += r;
+            }
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            std::cout << "native-exec: " << name << " result=" << zl::doubleToShortestString(value)
+                      << " iters=" << iters << " total=" << zl::doubleToShortestString(total)
+                      << " native_ms=" << ms << "\n";
             return 0;
         }
         if (command == "--parse-only") {
@@ -1115,7 +1152,7 @@ int zlMain(int argc, char** argv) {
                          "  zl --emit-machine-code <output.zlm> <file.zl>\n"
                          "  zl --emit-native-ir <output|-> <file.zl>\n"
                          "  zl --emit-native-code <output|-> <file.zl>\n"
-                         "  zl --run-native <file.zl> [--call <name>] [--int64 v]... [--iters n]\n"
+                         "  zl --run-native <file.zl> [--call <name>] [--int64 v | --double v]... [--iters n]\n"
                          "  zl --mir-vm <file.zl> [program args...]\n"
                          "  zl --emit-mir <output|-> <file.zl>\n"
                          "  zl --emit-ssa <output|-> <file.zl>\n"
@@ -1133,7 +1170,8 @@ int zlMain(int argc, char** argv) {
                          "program still executes on the VM: in-program mixed-mode native execution is\n"
                          "not implemented. The subset boundary is concrete at the execution driver:\n"
                          "zl --run-native maps the emitted bytes and calls a compiled function\n"
-                         "(int64 signatures for now; everything else is refused by name and reason).\n"
+                         "(all-integer or all-double signatures; everything else is refused by\n"
+                         "name and reason).\n"
                          "Use --strict-native to refuse programs the native tier cannot compile fully.\n"
                          "\n"
                          "environment:\n"

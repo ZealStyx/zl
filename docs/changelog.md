@@ -1,5 +1,27 @@
 # Development Checkpoints
 
+## 2026-09-20 - P1-6 continues: the execution driver learns its second calling shape
+
+`--run-native` covered one signature today: all-integer in, all-integer out.
+It now covers the other shape the encoder already emits for - **all-double**:
+six XMM argument registers, result in `xmm0`, dispatched by the signature the
+driver finds, with a signature that *mixes* integer and double parameters
+still refused by name and reason (one C++ cast describes one register file;
+faking the other would mean generating a thunk, and this driver does not
+generate code). `NativeExecBench.zl` grew a `@native poly(double): double`
+kernel and its VM twin, and the parity line got stronger to match: both tiers
+print `result=` and an accumulated loop `total=`, and ctest
+`native-exec-parity` requires both to agree *as printed* - for doubles that
+means bit-for-bit, because both sides render the shortest round-trip decimal
+of the same binary64 accumulation (the two tiers' ten-thousand-step sums both
+end at exactly 11499.999999997886, rounding included). Python's independent
+evaluation of `0.7 * 1.5 + 0.1` is the third opinion. Measured: the double
+kernel runs 0.16 ms natively against 24 ms on the VM over 10,000 calls (~150x,
+same story as the integer kernel's ~140x); the ms fields are printed, not
+asserted. Refs and objects - with the GC map they imply - remain the other
+half of P1-6 and are unchanged here.
+
+
 ## 2026-09-20 - P1-6, first half: native bytes get an execution driver, and it measures
 
 `--backend native` has been a code generator with no consumer since day one:

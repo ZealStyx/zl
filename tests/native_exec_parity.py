@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """P1-6 end-to-end parity: emitted machine code vs the VM on one program.
 
-Runs tests/zl/valid/native/NativeExecBench.zl twice through zl_language:
+Runs tests/zl/valid/native/NativeExecBench.zl four times through zl_language:
+each kernel (all-integer `sumSquares`, all-double `poly`) once through the
+native execution driver (`--run-native`), which maps the emitted x86-64 bytes
+and calls them for real, and once as the VM twin inside the program's own
+loop. For each pair the driver line and the VM line must agree *as printed* -
+same result, same accumulated loop total - which for the double pair means
+same bits, because both sides render the shortest round-trip decimal of the
+same binary64 value. The Python interpreter is a third opinion on the unit.
 
-  1. through the native execution driver (`--run-native --call sumSquares`),
-     which maps the emitted x86-64 bytes and calls them for real; and
-  2. as an ordinary VM program, whose main runs the same loop over the same
-     arithmetic in the interpreter.
-
-The VM loop total must equal the driver's per-call result times the iteration
-count, and the driver must *refuse* a call it cannot honour (`--call main`)
-naming what it compiled instead. Wall times are printed for the record; they
-are not asserted (the sandbox is shared and timings swing). On any platform
-this is not x86-64 Linux the driver refuses by design, so the test skips.
+The driver must also refuse what it cannot honestly call (`--call main`) and
+name what it compiled instead. Wall times are printed for the record and not
+asserted - the sandbox is shared and milliseconds swing. On any platform this
+is not x86-64 Linux the driver refuses to exist by design, so the test skips.
 """
 
 import platform
@@ -24,6 +25,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 FIXTURE = REPO / "tests" / "zl" / "valid" / "native" / "NativeExecBench.zl"
 ITERS = "10000"
+LINE = re.compile(r"(\w[\w-]*): (\S+) result=(\S+) iters=(\d+) total=(\S+) (?:native|vm)_ms=([\d.]+)")
 
 failures = []
 
@@ -34,32 +36,43 @@ def require(cond, msg):
         print(f"FAIL  {msg}")
 
 
+def parse(line_text, tag, name):
+    for line in line_text.splitlines():
+        m = LINE.match(line.strip())
+        if m and m.group(2) == name:
+            return m
+    require(False, f"{tag}: no '{name}' line in output: {line_text!r}")
+    return None
+
+
 def main() -> int:
     zl = sys.argv[1]
     if sys.platform != "linux" or platform.machine() != "x86_64":
         print(f"SKIP  native execution driver is x86-64 Linux only (host: {sys.platform}/{platform.machine()})")
         return 0
 
-    native = subprocess.run(
-        [zl, "--run-native", str(FIXTURE), "--call", "sumSquares", "--int64", "100", "--iters", ITERS],
-        capture_output=True, text=True, timeout=300,
-    )
-    require(native.returncode == 0, f"--run-native exited {native.returncode}: {native.stderr.strip()[:200]}")
-    m = re.search(r"native-exec: NativeExecBench\.sumSquares\(int\) result=(\d+) iters=(\d+) native_ms=([\d.]+)", native.stdout)
-    require(m is not None, f"--run-native output not in driver form: {native.stdout!r}")
-
     vm = subprocess.run([zl, str(FIXTURE)], capture_output=True, text=True, timeout=300)
     require(vm.returncode == 0, f"VM run exited {vm.returncode}: {vm.stderr.strip()[:200]}")
-    v = re.search(r"vm-exec: NativeExecBench\.sumSquaresVm\(int\) result=(\d+) iters=(\d+) vm_ms=([\d.]+)", vm.stdout)
-    require(v is not None, f"VM output not in benchmark form: {vm.stdout!r}")
     require("ok" in vm.stdout.splitlines()[-1:], "fixture did not end with its ok line")
 
-    if m and v:
-        per_call, iters_n, nms = int(m.group(1)), int(m.group(2)), float(m.group(3))
-        total, iters_v, vms = int(v.group(1)), int(v.group(2)), float(v.group(3))
-        require(iters_n == int(ITERS) and iters_v == int(ITERS), f"iteration counts drifted: native {iters_n}, VM {iters_v}")
-        require(total == per_call * iters_n, f"tier disagreement: VM total {total} != native {per_call} x {iters_n}")
-        print(f"pass  sumSquares(100)={per_call}; VM loop {total}; native {nms:.1f} ms vs VM {vms:.1f} ms over {iters_n} calls")
+    for name, extra, expect in (
+        ("sumSquares", ["--int64", "100"], "328350"),
+        ("poly", ["--double", "0.7"], repr(0.7 * 1.5 + 0.1)),
+    ):
+        native = subprocess.run(
+            [zl, "--run-native", str(FIXTURE), "--call", name, *extra, "--iters", ITERS],
+            capture_output=True, text=True, timeout=300,
+        )
+        require(native.returncode == 0, f"--run-native {name} exited {native.returncode}: {native.stderr.strip()[:200]}")
+        n = parse(native.stdout, "driver", f"NativeExecBench.{name}(int)" if name == "sumSquares" else f"NativeExecBench.{name}(double)")
+        v = parse(vm.stdout, "vm", f"NativeExecBench.{name}Vm(int)" if name == "sumSquares" else f"NativeExecBench.{name}Vm(double)")
+        if n and v:
+            require(n.group(4) == ITERS and v.group(4) == ITERS, f"{name}: iteration counts drifted")
+            require(n.group(3) == v.group(3), f"{name}: tier disagreement on the unit: driver {n.group(3)} vs VM {v.group(3)}")
+            require(n.group(5) == v.group(5), f"{name}: tier disagreement on the loop total: driver {n.group(5)} vs VM {v.group(5)}")
+            require(n.group(3) == expect, f"{name}: driver unit {n.group(3)} != independently computed {expect}")
+            print(f"pass  {name}: unit={n.group(3)} total={n.group(5)} "
+                  f"(native {float(n.group(6)):.1f} ms vs VM {float(v.group(6)):.1f} ms over {ITERS} calls)")
 
     refused = subprocess.run(
         [zl, "--run-native", str(FIXTURE), "--call", "main"],

@@ -59,20 +59,23 @@ closed 2026-09-18 while writing the `Condition` fixture below) - are in
 
 ### P1-6 · Native backend: the execution driver exists; the subset still stops at int64
 
-**Driver (2026-09-20):** `zl --run-native <file.zl> [--call NAME] [--int64 v]... [--iters n]`
-maps the emitted module executable, binds direct-call relocations, refuses
-anything it cannot honestly call *by name and reason* (runtime imports,
-non-integer signatures, more than six arguments, non-x86-64-Linux hosts), and
-measures. `tests/native_exec_parity.py` (ctest `native-exec-parity`) requires
-the driver and the VM to compute identical totals on
-`tests/zl/valid/native/NativeExecBench.zl` and prints the wall pair
-(~6 ms machine code vs ~870 ms interpreter per 10,000 kernel calls on the
-sandbox). See [docs/native-backend.md](docs/native-backend.md).
+**Driver (2026-09-20):** `zl --run-native <file.zl> [--call NAME] [--int64 v |
+--double v]... [--iters n]` maps the emitted module executable, binds
+direct-call relocations, and refuses anything it cannot honestly call *by name
+and reason* (runtime imports, signatures that mix register files or carry
+references, more than six arguments, non-x86-64-Linux hosts).
+`tests/native_exec_parity.py` (ctest `native-exec-parity`) requires driver and
+VM to agree on `result` and accumulated `total` for both calling shapes - for
+the double kernel that is bit-for-bit agreement through the shortest
+round-trip formatter - and prints the wall pairs (~6 ms machine code vs
+~870 ms interpreter for `sumSquares`, 0.16 vs 24 ms for `poly`, per 10,000
+calls on the sandbox). See [docs/native-backend.md](docs/native-backend.md).
 
 **Remaining:**
 - The subset is still ~1.7% of the functions in a realistic module
   ([research/report.md](research/report.md) §2.7) - ints and floats, no refs,
-  objects, collections, closures, exceptions or async; the driver speaks int64 only.
+  objects, collections, closures, exceptions or async; the driver calls
+  all-integer and all-double signatures and refuses the mix by name.
 - In-program mixed mode is unimplemented: `--backend native` compiles the subset
   and still runs the program on the VM.
 - Win64 is select-only (`TargetMachine::encoderAvailable()` false,

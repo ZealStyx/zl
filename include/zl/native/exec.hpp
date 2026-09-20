@@ -16,15 +16,15 @@
 // something to put those bytes in memory a CPU will execute, bind their call
 // sites, and hand back a result. This file is that driver: it maps an emitted
 // module executable, resolves direct calls among the module's own functions,
-// and offers typed entry for the one calling shape it can honestly speak today
-// (integer in, integer out, SysV). Everything else is refused *before* any
-// code runs, by name and with a reason:
+// and offers typed entry for the calling shapes it can honestly speak today -
+// all-integer or all-double signatures, SysV. Everything else is refused
+// *before* any code runs, by name and with a reason:
 //
 //   * a call relocation that is not bound (a runtime import, or a callee the
 //     selection left out) - binding would point at nothing;
-//   * a function whose parameter or return class is not Integer - a float
-//     arrives in an XMM register and a reference carries GC obligations the
-//     driver does not model;
+//   * a function whose signature mixes register files, or whose result is not
+//     a scalar the casts cover - a double arrives in an XMM register, and a
+//     reference carries GC obligations the driver does not model;
 //   * a host this code does not target: execution is x86-64 Linux (the same
 //     guard the executable-native tests use); every other build constructs a
 //     NativeExecutable that reports `unsupported platform` rather than
@@ -35,6 +35,12 @@
 // half that makes the bytes reachable at all.
 
 namespace zl::native {
+
+// The driver speaks two calling shapes, chosen by the signature it finds:
+// every-Integer in and out through `callInt64`, every-Float in and out
+// through `callDouble`. A signature that mixes the two is refused with a
+// reason - one C++ cast can only describe one register-file shape, and
+// hand-written thunks are not this file's business.
 
 class NativeExecutable {
 public:
@@ -58,10 +64,21 @@ public:
     static constexpr std::size_t kNoEntry = static_cast<std::size_t>(-1);
     std::size_t resolve(const std::string& spec, std::string& error) const;
 
+    // The entry's call shape: everything Integer (kInt64), everything Float
+    // with a Float result (kDouble), or neither (kUnsupported, with the
+    // reason). Entries are what `resolve` returns.
+    enum class Shape { kInt64, kDouble, kUnsupported };
+    Shape shape(std::size_t e, std::string& reason) const;
+
     // Call entry e with integer arguments (up to six, SysV integer ABI).
-    // Returns false with a reason when the signature is not driver-compatible.
+    // Requires shape() == kInt64; false with a reason otherwise.
     bool callInt64(std::size_t e, const std::vector<std::int64_t>& args,
                    std::int64_t& result, std::string& error) const;
+
+    // Call entry e with double arguments (up to six, SysV XMM ABI).
+    // Requires shape() == kDouble; false with a reason otherwise.
+    bool callDouble(std::size_t e, const std::vector<double>& args,
+                    double& result, std::string& error) const;
 
 private:
     bool ok_{false};
