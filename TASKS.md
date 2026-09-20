@@ -35,10 +35,11 @@ Priorities: **P0** produces a wrong result or refuses a valid program ·
 
 ## Start here
 
-Nothing leads on value-to-risk right now; the remaining P1 work (native
-execution driver P1-6, stabilization fixtures P1-10) and the P2 items are all
-in the sections below. PF-1 closed 2026-09-20 at the measured numbers in
-[research/report.md §2.9](research/report.md).
+Nothing leads on value-to-risk right now; what remains is the two P1 items
+(native execution driver P1-6, stabilization fixtures P1-10) and PF-3, which
+follows it. P2-5 closed 2026-09-20 with the registry scope decision now written
+into [docs/packages.md](docs/packages.md); PF-1 closed the same day at the
+measured numbers in [research/report.md §2.9](research/report.md).
 
 ---
 
@@ -62,24 +63,6 @@ guarantees; blocking native-resource finalizers; the remaining exception and
 
 **Done when** each has a fixture that would have caught the original report, or a
 written argument that the behaviour is correct as it stands.
-
----
-
-## P2 - polish, measurement, ecosystem
-
-### P2-5 · `zlpkg` has no registry
-
-Git URL or local `path` only; exact versions, no ranges, no workspaces, no
-dev-dependencies ([docs/packages.md](docs/packages.md#external-dependencies-zlpkg) -
-the pointer is an anchor, not a line range, because this file's own edits keep
-moving the lines).
-
-**Done when** the intended scope is decided and written down - a registry is a
-service, not a feature, and "no registry yet" should say what replaces it.
-
-(P2-8 - `owned` ends rootedness but frees nothing - closed 2026-09-19 with the
-Phase 0 baseline in [docs/memory-domains.md §10.1](docs/memory-domains.md#101-phase-0-baseline-measured-2026-09-19);
-see [Done](#done).)
 
 ---
 
@@ -127,6 +110,15 @@ then deleted - [docs/changelog.md](docs/changelog.md) is the permanent record.
   −99%, the single outlier (`Closures.zl`, +56.7%) exactly the documented deletion-gate
   refusal. The runtime half of §2.4 stands until the native work (P1-6, PF-3) remeasures
   it; the size "within 10%" bar is met by being 87% under.
+
+- [x] **P2-5 · `zlpkg` has no registry** (2026-09-20) - decided, not deferred: a
+  registry is a hosted service (name index, curation, yanks) and stays out of
+  this repository's scope. What replaces it is written into
+  [docs/packages.md](docs/packages.md): the manifest states location (`path`/`git`)
+  and the name-agreement rule plus conflict errors make wrong-source fetches loud;
+  `zlpkg.lock`'s pinned commits play the artifact-store role; exact versions stay
+  identity-not-selection, so ranges stay out; the future-registry-shaped hole is
+  one key in the inline-table grammar. No code changed.
 
 - [x] **P1-9 · Reachability is a report; nothing deletes dead code** (2026-09-20) -
   `eliminate-dead-functions` ships as the framework's first module pass. It deletes
