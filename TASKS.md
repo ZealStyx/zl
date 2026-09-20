@@ -56,6 +56,26 @@ closed 2026-09-18 while writing the `Condition` fixture below) - are in
 
 ## P1 - promised capability, or a daily gap
 
+### P1-6 · Native backend: not an execution driver, and a small subset
+
+- `--backend native` generates machine code and still executes on the VM
+  (`zl --help` says so outright); mixed-mode native execution is unimplemented.
+- The subset is ~1.7% of the functions in a realistic module
+  ([research/report.md](research/report.md) §2.7) - ints and floats, no refs,
+  objects, collections, closures, exceptions or async.
+- Win64 is select-only (`TargetMachine::encoderAvailable()` false,
+  `src/native/pipeline.cpp:59`); there is no arm64 encoder, so macOS CI
+  cross-compiles to SysV.
+- No register allocator, no stack arguments, no GC maps or safepoints, no unwind
+  tables, no object-file or JIT writer.
+- An arithmetic fault in native bytes is `SIGILL`, not a catchable
+  `ArithmeticError`.
+
+**Done when** one value class at a time joins the subset - refs and objects are
+the useful next step - and a named program (start with
+`tests/zl/valid/native/NumericKernel.zl` plus collections) runs natively end to
+end with a measured wall time against the VM.
+
 ---
 
 ## Performance ([research/report.md](research/report.md))
